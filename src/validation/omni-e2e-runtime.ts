@@ -16,6 +16,7 @@ interface E2EOptions {
   omniModel: string;
   profile: string;
   evidenceDir: string;
+  tool: string;
 }
 
 interface E2EReport {
@@ -30,6 +31,7 @@ interface E2EReport {
   tool_rounds: number;
   tool_calls: number;
   final_content: string;
+  tool: string;
   status: "pass" | "fail";
   checks: Array<{ name: string; pass: boolean; detail?: string }>;
   status_events: RuntimeStatusEvent[];
@@ -50,7 +52,8 @@ async function main(): Promise<void> {
 
 export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport> {
   await ensureDir(options.evidenceDir);
-  const controller = new ScriptedController();
+  const toolCase = toolCaseFor(options.tool);
+  const controller = new ScriptedController(toolCase);
   await controller.start();
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "inferoa-omni-e2e-workspace-"));
   const stateDir = path.join(options.evidenceDir, "state");
@@ -62,7 +65,7 @@ export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport>
     const statusEvents: RuntimeStatusEvent[] = [];
     const result = await runtime.run({
       title: `omni-e2e-${options.profile}`,
-      prompt: "Run the remote Omni vision validation now. Use vision_understanding on the provided one-pixel fixture, then summarize the result.",
+      prompt: `Run the remote Omni ${options.tool} validation now. Use ${toolCase.name}, then summarize the result.`,
       client_id: "omni-e2e-runtime",
       onStatus: (event) => statusEvents.push(event),
       request_class: "background",
@@ -81,9 +84,9 @@ export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport>
     const checks = [
       { name: "runtime made two controller model requests", pass: controller.requests.length === 2, detail: `${controller.requests.length}` },
       { name: "runtime executed at least one tool round", pass: result.tool_rounds >= 1, detail: `${result.tool_rounds}` },
-      { name: "runtime executed vision_understanding", pass: statusEvents.some((event) => event.type === "tool_end" && event.tool_name === "vision_understanding" && event.ok) },
-      { name: "remote Omni answer reached tool result", pass: toolResults.some((data) => /"ok":true/.test(JSON.stringify(data)) && /"capability":"vision"/.test(JSON.stringify(data))) },
-      { name: "managed resource persisted", pass: resources.some((resource) => String(resource.kind).startsWith("omni.")) },
+      { name: `runtime executed ${toolCase.name}`, pass: statusEvents.some((event) => event.type === "tool_end" && event.tool_name === toolCase.name && event.ok) },
+      { name: "remote Omni result reached tool result", pass: toolResults.some((data) => /"ok":true/.test(JSON.stringify(data)) && toolCase.resultPattern.test(JSON.stringify(data))) },
+      { name: "managed resource persisted", pass: !toolCase.requiresResource || resources.some((resource) => String(resource.kind).startsWith("omni.")) },
       { name: "final model turn consumed tool result", pass: /OMNI_E2E_RUNTIME_OK/.test(result.content), detail: result.content.slice(0, 200) },
     ];
     const report: E2EReport = {
@@ -98,6 +101,7 @@ export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport>
       tool_rounds: result.tool_rounds,
       tool_calls: result.tool_calls,
       final_content: result.content,
+      tool: options.tool,
       status: checks.every((check) => check.pass) ? "pass" : "fail",
       checks,
       status_events: statusEvents,
@@ -105,7 +109,7 @@ export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport>
       resources,
       endpoint_evidence_events: endpointEvidenceEvents,
     };
-    const reportPath = path.join(options.evidenceDir, `${safeFilePart(options.profile)}-runtime-e2e-${Date.now()}.json`);
+    const reportPath = path.join(options.evidenceDir, `${safeFilePart(options.profile)}-${safeFilePart(options.tool)}-runtime-e2e-${Date.now()}.json`);
     await fs.writeFile(reportPath, JSON.stringify(report, null, 2), "utf8");
     report.report_path = reportPath;
     return report;
@@ -116,8 +120,73 @@ export async function runOmniRuntimeE2E(options: E2EOptions): Promise<E2EReport>
   }
 }
 
+interface RuntimeToolCase {
+  name: string;
+  arguments: JsonObject;
+  endpoint: "vision" | "image_generation" | "image_edit" | "video_generation" | "audio_generation" | "speech";
+  resultPattern: RegExp;
+  requiresResource: boolean;
+}
+
+const TOOL_CASES: Record<string, RuntimeToolCase> = {
+  vision: {
+    name: "vision_understanding",
+    endpoint: "vision",
+    arguments: {
+      inputs: [onePixelPng()],
+      prompt: "Describe this validation image in one short sentence.",
+    },
+    resultPattern: /"capability":"vision"/,
+    requiresResource: true,
+  },
+  image_generation: {
+    name: "image_generation",
+    endpoint: "image_generation",
+    arguments: { prompt: "A tiny validation icon", size: "256x256" },
+    resultPattern: /"capability":"image_generation"/,
+    requiresResource: true,
+  },
+  image_edit: {
+    name: "image_edit",
+    endpoint: "image_edit",
+    arguments: { prompt: "Make this validation image brighter.", images: [onePixelPng()] },
+    resultPattern: /"capability":"image_edit"/,
+    requiresResource: true,
+  },
+  video_generation: {
+    name: "video_generation",
+    endpoint: "video_generation",
+    arguments: { prompt: "A one second validation clip.", mode: "sync", seconds: "1", size: "256x256" },
+    resultPattern: /"capability":"video_generation"/,
+    requiresResource: true,
+  },
+  audio_generation: {
+    name: "audio_generation",
+    endpoint: "audio_generation",
+    arguments: { input: "short rain ambience", response_format: "wav" },
+    resultPattern: /"capability":"audio_generation"/,
+    requiresResource: true,
+  },
+  speech_generation: {
+    name: "speech_generation",
+    endpoint: "speech",
+    arguments: { input: "hello from inferoa validation", voice: "vivian", response_format: "wav" },
+    resultPattern: /"capability":"speech_generation"/,
+    requiresResource: true,
+  },
+  speech_voices: {
+    name: "speech_voices",
+    endpoint: "speech",
+    arguments: {},
+    resultPattern: /"capability":"speech_voices"|"voices":/,
+    requiresResource: false,
+  },
+};
+
 class ScriptedController {
   readonly requests: JsonObject[] = [];
+  constructor(private readonly toolCase: RuntimeToolCase) {}
+
   private server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/v1/models") {
       json(res, { object: "list", data: [{ id: "scripted-controller", object: "model", owned_by: "inferoa-validation" }] });
@@ -156,11 +225,8 @@ class ScriptedController {
                     id: "call_omni_vision",
                     type: "function",
                     function: {
-                      name: "vision_understanding",
-                      arguments: JSON.stringify({
-                        inputs: [onePixelPng()],
-                        prompt: "Describe this validation image in one short sentence.",
-                      }),
+                      name: this.toolCase.name,
+                      arguments: JSON.stringify(this.toolCase.arguments),
                     },
                   },
                 ],
@@ -173,7 +239,7 @@ class ScriptedController {
         writeSse(res, {
           id: "resp_omni_e2e_final",
           model: "scripted-controller",
-          choices: [{ delta: { content: "OMNI_E2E_RUNTIME_OK remote vision_understanding completed through Inferoa runtime." } }],
+          choices: [{ delta: { content: `OMNI_E2E_RUNTIME_OK remote ${this.toolCase.name} completed through Inferoa runtime.` } }],
         });
         writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 32, completion_tokens: 8 } });
       }
@@ -215,17 +281,27 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): E2EOptions {
     omniModel,
     profile: args.get("profile") ?? env.INFEROA_OMNI_REAL_PROFILE ?? "manual",
     evidenceDir: path.resolve(args.get("evidence-dir") ?? env.INFEROA_OMNI_REAL_EVIDENCE_DIR ?? ".inferoa/omni-evidence"),
+    tool: args.get("tool") ?? env.INFEROA_OMNI_E2E_TOOL ?? "vision",
   };
 }
 
 function configFor(options: E2EOptions, controllerBaseUrl: string): VllmAgentConfig {
+  const toolCase = toolCaseFor(options.tool);
   const config = structuredClone(DEFAULT_CONFIG);
   config.model_setup.base_url = controllerBaseUrl;
   config.model_setup.model = "scripted-controller";
   config.model_setup.provider = "vllm";
   config.omni.enabled = true;
-  config.omni.endpoints.vision = { base_url: options.omniEndpointUrl, model: options.omniModel };
+  config.omni.endpoints[toolCase.endpoint] = { base_url: options.omniEndpointUrl, model: options.omniModel };
   return config;
+}
+
+function toolCaseFor(name: string): RuntimeToolCase {
+  const toolCase = TOOL_CASES[name];
+  if (!toolCase) {
+    throw new Error(`Unsupported Omni runtime E2E tool: ${name}. Supported tools: ${Object.keys(TOOL_CASES).join(", ")}`);
+  }
+  return toolCase;
 }
 
 function json(res: ServerResponse, value: unknown): void {

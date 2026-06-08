@@ -28,15 +28,19 @@ For an Inferoa runtime-loop E2E validation, run:
 INFEROA_OMNI_REAL_BASE_URL=http://host:8091/v1 \
 INFEROA_OMNI_REAL_MODEL=model-id \
 INFEROA_OMNI_REAL_PROFILE=qwen2.5-omni-runtime \
+INFEROA_OMNI_E2E_TOOL=vision \
 npm run validate:omni-e2e-runtime
 ```
 
 The runtime E2E runner uses a local scripted OpenAI-compatible controller to
 force one `vision_understanding` tool call through the normal Inferoa
-`Runtime.run()` loop. The tool call itself targets the remote vLLM-Omni service,
-persists managed resources, and returns through a second model turn. This keeps
-the validation deterministic while still proving the remote Omni model service
-is used by the actual Inferoa tool loop.
+`Runtime.run()` loop. Supported `INFEROA_OMNI_E2E_TOOL` values are `vision`,
+`image_generation`, `image_edit`, `video_generation`, `audio_generation`,
+`speech_generation`, and `speech_voices`. The tool call itself targets the
+remote vLLM-Omni service, persists managed resources when the capability
+produces artifacts, and returns through a second model turn. This keeps the
+validation deterministic while still proving the remote Omni model service is
+used by the actual Inferoa tool loop.
 
 Equivalent flags:
 
