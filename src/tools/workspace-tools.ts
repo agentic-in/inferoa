@@ -121,15 +121,20 @@ export async function fileSearch(args: JsonObject, context: ToolExecutionContext
   const query = String(args.query);
   const limit = clampLimit(args.limit, 50, 500);
   const cwd = resolveInside(context.workspace.root, String(args.path ?? "."));
+  const options: SearchOptions = {
+    caseSensitive: Boolean(args.case_sensitive),
+    regex: Boolean(args.regex),
+    glob: typeof args.glob === "string" && args.glob ? args.glob : undefined,
+  };
   const rgArgs = ["--line-number", "--column", "--no-heading", "--color", "never"];
-  if (!args.regex) {
+  if (!options.regex) {
     rgArgs.push("--fixed-strings");
   }
-  if (!args.case_sensitive) {
+  if (!options.caseSensitive) {
     rgArgs.push("--ignore-case");
   }
-  if (typeof args.glob === "string" && args.glob) {
-    rgArgs.push("--glob", args.glob);
+  if (options.glob) {
+    rgArgs.push("--glob", options.glob);
   }
   rgArgs.push("--", query, cwd);
   const rg = await runSmallCommand("rg", rgArgs, context.workspace.root, 15_000);
@@ -143,11 +148,22 @@ export async function fileSearch(args: JsonObject, context: ToolExecutionContext
       resource_uri: rg.stdout.length > 20_000 ? context.store.putResource(context.session_id, "file_search.raw", rg.stdout, { query }).uri : undefined,
     };
   }
-  if (rg.code !== 1 && rg.stderr.trim()) {
+  if (rg.code === 1) {
+    return ok(`Found 0 matches for ${query}`, { query, matches: [] });
+  }
+  if (rg.code !== 127 && rg.stderr.trim()) {
     return fail("file_search_failed", rg.stderr.trim());
   }
-  const fallback = await fallbackSearch(cwd, context.workspace.root, query, Boolean(args.case_sensitive), limit);
-  return ok(`Found ${fallback.length} matches for ${query}`, { query, matches: fallback });
+  const grep = await grepSearch(cwd, context.workspace.root, query, options, limit);
+  if (grep.ok) {
+    return ok(`Found ${grep.matches.length} matches for ${query}`, { query, matches: grep.matches });
+  }
+  try {
+    const fallback = await fallbackSearch(cwd, context.workspace.root, query, options, limit);
+    return ok(`Found ${fallback.length} matches for ${query}`, { query, matches: fallback });
+  } catch (error) {
+    return fail("file_search_failed", grep.error || errorMessage(error));
+  }
 }
 
 export async function writeFile(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -360,6 +376,73 @@ function parseRgLine(line: string): JsonObject | undefined {
   };
 }
 
+type SearchOptions = {
+  caseSensitive: boolean;
+  regex: boolean;
+  glob?: string;
+};
+
+async function grepSearch(
+  cwd: string,
+  root: string,
+  query: string,
+  options: SearchOptions,
+  limit: number,
+): Promise<{ ok: true; matches: JsonObject[] } | { ok: false; error?: string }> {
+  const grepArgs = ["-R", "-n", "-I", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=dist"];
+  grepArgs.push(options.regex ? "-E" : "-F");
+  if (!options.caseSensitive) {
+    grepArgs.push("-i");
+  }
+  if (options.glob) {
+    grepArgs.push("--include", options.glob);
+  }
+  grepArgs.push("--", query, ".");
+  const result = await runSmallCommand("grep", grepArgs, cwd, 15_000);
+  if (result.code === 0 || result.stdout.trim()) {
+    const matches = result.stdout
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(0, limit)
+      .map((line) => parseGrepLine(line, cwd, root, query, options))
+      .filter((match): match is JsonObject => Boolean(match));
+    return { ok: true, matches };
+  }
+  if (result.code === 1) {
+    return { ok: true, matches: [] };
+  }
+  return { ok: false, error: result.stderr.trim() };
+}
+
+function parseGrepLine(line: string, cwd: string, root: string, query: string, options: SearchOptions): JsonObject | undefined {
+  const match = /^(.*?):(\d+):(.*)$/.exec(line);
+  if (!match) {
+    return undefined;
+  }
+  const fullPath = path.resolve(cwd, match[1]!.replace(/^\.\//, ""));
+  return {
+    path: toPosixPath(path.relative(root, fullPath)),
+    line: Number(match[2]),
+    column: findMatchColumn(match[3] ?? "", query, options),
+    snippet: match[3],
+  };
+}
+
+function findMatchColumn(line: string, query: string, options: SearchOptions): number {
+  if (options.regex) {
+    try {
+      const match = new RegExp(query, options.caseSensitive ? "" : "i").exec(line);
+      return match?.index === undefined ? 1 : match.index + 1;
+    } catch {
+      return 1;
+    }
+  }
+  const haystack = options.caseSensitive ? line : line.toLowerCase();
+  const needle = options.caseSensitive ? query : query.toLowerCase();
+  const index = haystack.indexOf(needle);
+  return index < 0 ? 1 : index + 1;
+}
+
 export function simpleUnifiedDiff(rel: string, oldText: string, newText: string, isNewFile: boolean): string {
   const oldLines = splitForDiff(oldText);
   const newLines = splitForDiff(newText);
@@ -475,13 +558,17 @@ async function fallbackSearch(
   cwd: string,
   root: string,
   query: string,
-  caseSensitive: boolean,
+  options: SearchOptions,
   limit: number,
 ): Promise<JsonObject[]> {
   const files = await walkFiles(cwd, root, limit * 10);
-  const needle = caseSensitive ? query : query.toLowerCase();
+  const globRegex = options.glob ? globToRegExp(options.glob) : undefined;
+  const matcher = createSearchMatcher(query, options);
   const matches: JsonObject[] = [];
   for (const file of files) {
+    if (globRegex && !globRegex.test(file)) {
+      continue;
+    }
     const full = path.join(root, file);
     let text = "";
     try {
@@ -491,9 +578,10 @@ async function fallbackSearch(
     }
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i += 1) {
-      const haystack = caseSensitive ? lines[i] : lines[i]?.toLowerCase();
-      if (haystack?.includes(needle)) {
-        matches.push({ path: file, line: i + 1, column: haystack.indexOf(needle) + 1, snippet: lines[i] ?? "" });
+      const line = lines[i] ?? "";
+      const column = matcher(line);
+      if (column > 0) {
+        matches.push({ path: file, line: i + 1, column, snippet: line });
         if (matches.length >= limit) {
           return matches;
         }
@@ -501,6 +589,22 @@ async function fallbackSearch(
     }
   }
   return matches;
+}
+
+function createSearchMatcher(query: string, options: SearchOptions): (line: string) => number {
+  if (options.regex) {
+    const regex = new RegExp(query, options.caseSensitive ? "" : "i");
+    return (line) => {
+      const match = regex.exec(line);
+      return match?.index === undefined ? 0 : match.index + 1;
+    };
+  }
+  const needle = options.caseSensitive ? query : query.toLowerCase();
+  return (line) => {
+    const haystack = options.caseSensitive ? line : line.toLowerCase();
+    const index = haystack.indexOf(needle);
+    return index < 0 ? 0 : index + 1;
+  };
 }
 
 function errorMessage(error: unknown): string {

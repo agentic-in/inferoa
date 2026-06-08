@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import { renderHomeFrame } from "../src/tui/home.js";
 import { stripAnsi, visibleWidth } from "../src/tui/ansi.js";
 
+const workspaceRoot = path.join(os.homedir(), "local-workbench/work/vllm/inferoa");
+
 test("home banner omits border title without recent sessions or tagline", () => {
   const rendered = renderHomeFrame({
-    workspaceRoot: "/Users/bitliu/local-workbench/work/vllm/inferoa",
+    workspaceRoot,
     mode: "direct",
     model: "tke/deepseek-v4-pro-tokenhub",
     width: 120,
@@ -35,7 +39,7 @@ test("home banner omits border title without recent sessions or tagline", () => 
 test("home banner contracts to narrow terminal widths", () => {
   const width = 58;
   const rendered = renderHomeFrame({
-    workspaceRoot: "/Users/bitliu/local-workbench/work/vllm/inferoa",
+    workspaceRoot,
     mode: "direct",
     model: "tke/deepseek-v4-pro-tokenhub",
     width,
@@ -50,7 +54,7 @@ test("home banner contracts to narrow terminal widths", () => {
 test("home banner expands to the resized terminal width", () => {
   const width = 168;
   const rendered = renderHomeFrame({
-    workspaceRoot: "/Users/bitliu/local-workbench/work/vllm/inferoa",
+    workspaceRoot,
     mode: "direct",
     model: "tke/deepseek-v4-pro-tokenhub",
     width,

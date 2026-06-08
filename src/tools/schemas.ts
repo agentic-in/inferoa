@@ -142,7 +142,7 @@ const DEFINITIONS = [
   },
   {
     name: "file_search",
-    description: "Search workspace text using rg when available, with bounded snippets.",
+    description: "Search workspace text using rg when available, then grep or a bounded built-in fallback.",
     permission: "read",
     parameters: objectSchema(
       {
