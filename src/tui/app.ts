@@ -17,6 +17,7 @@ import {
   type ExternalProviderState,
 } from "../model/providers.js";
 import { resolveRtkStatus, type RtkStatus } from "../rtk/manager.js";
+import { staticOmniCapabilityMatrix } from "../model/omni-capabilities.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { SkillRegistry, type SkillDescriptor } from "../skills/registry.js";
 import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonRun, startDaemon } from "../daemon/supervisor.js";
@@ -44,6 +45,8 @@ import type {
   JsonObject,
   ModelSetup,
   ModelUsage,
+  OmniCapabilityStatus,
+  OmniEndpointName,
   OmniEndpointConfig,
   PermissionMode,
   SessionEvent,
@@ -105,7 +108,6 @@ import type { ContextEngineStatus } from "../code-intelligence/codegraph-engine.
 type LoadedApp = Awaited<ReturnType<typeof loadApp>>;
 type ProviderChoice = "direct" | "auto" | "external";
 type WebSearchProviderChoice = VllmAgentConfig["web_search"]["provider"];
-type OmniEndpointName = keyof VllmAgentConfig["omni"]["endpoints"];
 type SkillAction = "list" | "manage";
 type SessionAction = "resume" | "new" | "rename" | "archive" | "all";
 type JobAction = "status" | "queue" | "attach" | "detach" | "cancel";
@@ -177,10 +179,12 @@ export const TUI_OMNI_SETUP_CAPABILITIES: Array<{
 }> = [
   { name: "vision", label: "Vision understanding", requiredForAcceptance: true },
   { name: "image_generation", label: "Image generation", requiredForAcceptance: true },
+  { name: "image_edit", label: "Image edit", requiredForAcceptance: false },
   { name: "video_understanding", label: "Video understanding", requiredForAcceptance: false },
   { name: "video_generation", label: "Video generation", requiredForAcceptance: true },
   { name: "audio_understanding", label: "Audio understanding", requiredForAcceptance: false },
   { name: "audio_generation", label: "Audio generation", requiredForAcceptance: false },
+  { name: "speech", label: "Speech generation and voices", requiredForAcceptance: false },
 ];
 export const PREFIX_CACHE_REPORT_TITLE = "Prefix Cache Report";
 
@@ -3707,14 +3711,17 @@ export class TuiApp {
       return;
     }
     const directConfigured = Boolean(this.app.config.model_setup.base_url && this.app.config.model_setup.model);
-    const omni = this.app.config.omni.endpoints;
+    let matrix = staticOmniCapabilityMatrix(this.app.config);
+    try {
+      matrix = (await new EndpointSignals(this.app.config).snapshot()).omni_capabilities ?? matrix;
+    } catch {
+      // Static config state is still useful when the endpoint is unreachable.
+    }
     const lines = [
       `${checkbox(directConfigured)} coding endpoint configured`,
-      ...TUI_OMNI_SETUP_CAPABILITIES.map((capability) => {
-        const endpoint = omni[capability.name];
-        const configured = Boolean(this.app.config.omni.enabled && endpoint?.base_url && endpoint.model);
-        const suffix = capability.requiredForAcceptance ? fg256(244, "required") : fg256(244, "optional");
-        return `${checkbox(configured)} Omni ${capability.label} configured · ${suffix}`;
+      ...matrix.map((capability) => {
+        const suffix = capability.required_for_acceptance ? fg256(244, "required") : fg256(244, "optional");
+        return `${checkbox(capability.runtime_passed === true)} Omni ${capability.label} · ${omniCapabilitySummary(capability)} · ${suffix}`;
       }),
       `${checkbox(false)} AMD direct vLLM deployment check`,
       `${checkbox(false)} AMD vLLM-Omni deployment check`,
@@ -4294,9 +4301,10 @@ export function describeModelSetupForDisplay(setup: ModelSetup): string {
 }
 
 export function endpointStatusLinesForDisplay(snapshot: EndpointSignalSnapshot, config: VllmAgentConfig, webDescription: string, rtk?: RtkStatus): string[] {
-  const omni = Object.entries(config.omni.endpoints).map(([name, endpoint]) =>
-    `  ${name}: ${endpoint?.base_url && endpoint.model ? `${endpoint.base_url} · ${endpoint.model}` : "unconfigured"}`,
-  );
+  const omni = (snapshot.omni_capabilities ?? staticOmniCapabilityMatrix(config)).map((capability) => {
+    const endpoint = capability.base_url && capability.model ? ` · ${capability.base_url} · ${capability.model}` : "";
+    return `  ${capability.label}: ${omniCapabilitySummary(capability)}${endpoint}`;
+  });
   return [
     `${fg256(39, "Mode")} ${snapshot.mode}`,
     `${fg256(39, "Provider")} ${snapshot.provider_id}`,
@@ -4323,6 +4331,46 @@ function rtkStatusLabel(rtk?: RtkStatus): string {
   const pathLabel = rtk.binary_path ? ` · ${compactWorkspacePath(rtk.binary_path)}` : "";
   const error = rtk.error ? ` · ${rtk.error}` : "";
   return `${state} · ${source}${pathLabel}${error}`;
+}
+
+function omniCapabilitySummary(capability: OmniCapabilityStatus): string {
+  return [
+    capability.configured ? "configured" : "unconfigured",
+    routeStatus(capability.route_present),
+    profileStatus(capability.profile_compatible),
+    runtimeStatus(capability.runtime_passed),
+    capability.unavailable_reason ? `reason ${capability.unavailable_reason}` : undefined,
+  ].filter(Boolean).join(" · ");
+}
+
+function routeStatus(routePresent: boolean | undefined): string {
+  if (routePresent === true) {
+    return "route present";
+  }
+  if (routePresent === false) {
+    return "route missing";
+  }
+  return "route unknown";
+}
+
+function profileStatus(profileCompatible: boolean | undefined): string {
+  if (profileCompatible === true) {
+    return "profile compatible";
+  }
+  if (profileCompatible === false) {
+    return "profile incompatible";
+  }
+  return "profile unverified";
+}
+
+function runtimeStatus(runtimePassed: boolean | undefined): string {
+  if (runtimePassed === true) {
+    return "runtime passed";
+  }
+  if (runtimePassed === false) {
+    return "runtime failed";
+  }
+  return "runtime unverified";
 }
 
 export function setupReviewLinesForDisplay(config: VllmAgentConfig, contentWidth = setupDialogContentWidth(), rtkStatus?: RtkStatus): string[] {

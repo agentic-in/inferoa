@@ -7,6 +7,7 @@ import {
   probeExternalProviderModels,
 } from "./providers.js";
 import type { ExternalProviderRequestFamily } from "./providers.js";
+import { buildOmniCapabilityMatrix, staticOmniCapabilityMatrix } from "./omni-capabilities.js";
 
 export function providerId(config: VllmAgentConfig): string {
   const setup = config.model_setup;
@@ -170,6 +171,12 @@ export class EndpointSignals {
       } catch {
         // Optional signal.
       }
+    }
+    try {
+      snapshot.omni_capabilities = await buildOmniCapabilityMatrix(this.config);
+    } catch (error) {
+      snapshot.omni_capabilities = staticOmniCapabilityMatrix(this.config);
+      snapshot.errors?.push(`omni capability matrix unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
     return snapshot;
   }

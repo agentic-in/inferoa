@@ -221,10 +221,12 @@ function pruneConfig(config: VllmAgentConfig): void {
   pruneKeys(config.omni?.endpoints, [
     "vision",
     "image_generation",
+    "image_edit",
     "video_understanding",
     "video_generation",
     "audio_understanding",
     "audio_generation",
+    "speech",
   ]);
   for (const endpoint of Object.values(config.omni?.endpoints ?? {})) {
     pruneKeys(endpoint, ["base_url", "model", "api_key_ref", "api_key", "headers"]);

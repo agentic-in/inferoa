@@ -20,10 +20,12 @@ test("TUI setup exposes every Omni capability, with final-acceptance requirement
     [
       "vision",
       "image_generation",
+      "image_edit",
       "video_understanding",
       "video_generation",
       "audio_understanding",
       "audio_generation",
+      "speech",
     ],
   );
   assert.deepEqual(
@@ -78,6 +80,42 @@ test("system status omits disconnected render availability", () => {
   assert.match(lines, /Web Auto chain/);
   assert.doesNotMatch(lines, /\bRender\b/);
   assert.doesNotMatch(lines, /\bunavailable\b/);
+});
+
+test("system status renders Omni capability matrix details", () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.omni.enabled = true;
+  config.omni.endpoints.image_generation = {
+    base_url: "http://omni.example/v1",
+    model: "image-model",
+  };
+  const lines = stripAnsi(endpointStatusLinesForDisplay(
+    {
+      mode: "direct",
+      provider_id: "vllm:openai_compatible:http://chat.example/v1",
+      base_url: "http://chat.example/v1",
+      model: "chat-model",
+      omni_capabilities: [
+        {
+          name: "image_generation",
+          label: "Image generation",
+          endpoint_key: "image_generation",
+          required_for_acceptance: true,
+          route_path: "/v1/images/generations",
+          configured: true,
+          route_present: true,
+          runtime_passed: undefined,
+          base_url: "http://omni.example/v1",
+          model: "image-model",
+        },
+      ],
+    },
+    config,
+    "off",
+  ).join("\n"));
+
+  assert.match(lines, /Image generation: configured · route present · profile unverified · runtime unverified/);
+  assert.match(lines, /http:\/\/omni\.example\/v1 · image-model/);
 });
 
 test("TUI setup review uses full-width rows and does not truncate final summary", () => {

@@ -29,16 +29,45 @@ export interface OmniEndpointConfig {
   headers?: Record<string, string>;
 }
 
+export type OmniEndpointName =
+  | "vision"
+  | "image_generation"
+  | "image_edit"
+  | "video_understanding"
+  | "video_generation"
+  | "audio_understanding"
+  | "audio_generation"
+  | "speech";
+
+export type OmniCapabilityName =
+  | "vision"
+  | "image_generation"
+  | "image_edit"
+  | "video_understanding"
+  | "video_generation"
+  | "audio_understanding"
+  | "audio_generation"
+  | "speech_generation"
+  | "speech_voices";
+
+export interface OmniCapabilityStatus {
+  name: OmniCapabilityName;
+  label: string;
+  endpoint_key: OmniEndpointName;
+  required_for_acceptance: boolean;
+  route_path: string;
+  configured: boolean;
+  route_present?: boolean;
+  profile_compatible?: boolean;
+  runtime_passed?: boolean;
+  unavailable_reason?: string;
+  base_url?: string;
+  model?: string;
+}
+
 export interface OmniConfig {
   enabled: boolean;
-  endpoints: {
-    vision?: OmniEndpointConfig;
-    image_generation?: OmniEndpointConfig;
-    video_understanding?: OmniEndpointConfig;
-    video_generation?: OmniEndpointConfig;
-    audio_understanding?: OmniEndpointConfig;
-    audio_generation?: OmniEndpointConfig;
-  };
+  endpoints: Partial<Record<OmniEndpointName, OmniEndpointConfig>>;
 }
 
 export interface VllmAgentConfig {
@@ -254,6 +283,7 @@ export interface EndpointSignalSnapshot {
   router?: JsonObject;
   usage?: ModelUsage;
   cache_metrics?: JsonObject;
+  omni_capabilities?: OmniCapabilityStatus[];
   headers?: Record<string, string>;
   errors?: string[];
 }
