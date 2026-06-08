@@ -41,3 +41,20 @@ artifacts, and any unavailable capability reason.
 Real validation reports should live in local ignored evidence storage. Upstream
 pull requests should include the implementation, tests, and reusable runbook,
 but not generated media, raw API keys, model caches, or local testbed logs.
+
+## PR Readiness
+
+This adaptation is prepared from a non-main branch and should be merged only
+through pull request review. The final local validation path is:
+
+```sh
+npm test
+npm run check
+npm run validate:all
+```
+
+Real endpoint evidence is supplemental and profile-specific. The current
+testbed passes Qwen2.5-Omni route/chat/vision validation and has prior Qwen3-TTS
+speech evidence. Image, video, and audio diffusion runtime checks are blocked
+by active-profile and disk/model availability constraints, not by Inferoa
+request routing.
