@@ -22,6 +22,22 @@ INFEROA_OMNI_REAL_TOOLS=routes,chat,vision \
 npm run validate:omni-real
 ```
 
+For an Inferoa runtime-loop E2E validation, run:
+
+```sh
+INFEROA_OMNI_REAL_BASE_URL=http://host:8091/v1 \
+INFEROA_OMNI_REAL_MODEL=model-id \
+INFEROA_OMNI_REAL_PROFILE=qwen2.5-omni-runtime \
+npm run validate:omni-e2e-runtime
+```
+
+The runtime E2E runner uses a local scripted OpenAI-compatible controller to
+force one `vision_understanding` tool call through the normal Inferoa
+`Runtime.run()` loop. The tool call itself targets the remote vLLM-Omni service,
+persists managed resources, and returns through a second model turn. This keeps
+the validation deterministic while still proving the remote Omni model service
+is used by the actual Inferoa tool loop.
+
 Equivalent flags:
 
 ```sh
@@ -48,6 +64,8 @@ Supported tool names are:
 
 Each report records profile, model, endpoint URL, HTTP status when available,
 artifact resource IDs, resource metadata, summary, and failure reason.
+Runtime E2E reports additionally record model request count, tool-round count,
+tool results, managed resources, status events, and final assistant content.
 
 ## Acceptance Interpretation
 
