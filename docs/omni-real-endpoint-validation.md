@@ -33,10 +33,13 @@ npm run validate:omni-e2e-runtime
 ```
 
 The runtime E2E runner uses a local scripted OpenAI-compatible controller to
-force one `vision_understanding` tool call through the normal Inferoa
-`Runtime.run()` loop. Supported `INFEROA_OMNI_E2E_TOOL` values are `vision`,
+force one selected Omni tool call through the normal Inferoa `Runtime.run()`
+loop. Supported `INFEROA_OMNI_E2E_TOOL` values are `vision`,
 `image_generation`, `image_edit`, `video_generation`, `audio_generation`,
-`speech_generation`, and `speech_voices`. The tool call itself targets the
+`video_generation_async`, `speech_generation`, and `speech_voices`.
+`video_generation` uses sync `/videos/sync`, while `video_generation_async`
+uses async `/videos` plus status polling and content download. The tool call
+itself targets the
 remote vLLM-Omni service, persists managed resources when the capability
 produces artifacts, and returns through a second model turn. This keeps the
 validation deterministic while still proving the remote Omni model service is
@@ -105,18 +108,18 @@ and OpenAPI routes in the ignored evidence directory. After switching, rerun
 ## Current Testbed Matrix
 
 This matrix records the external vLLM-Omni testbed state observed on
-2026-06-08. It is evidence for this adaptation pass, not a permanent product
-requirement. Exact endpoint addresses, raw reports, and media remain in ignored
-local or remote evidence directories.
+2026-06-08 UTC. It is evidence for this adaptation pass, not a permanent
+product requirement. Exact endpoint addresses, raw reports, and media remain in
+ignored local or remote evidence directories.
 
 | Profile | Model / served name | Checks | Result | Evidence summary |
 | --- | --- | --- | --- | --- |
-| Qwen2.5-Omni | `Qwen/Qwen2.5-Omni-7B` / `qwen2.5-omni-7b` | `routes`, `chat`, `vision` | `pass` | `validate:omni-real` passed routes, direct chat, and `vision_understanding`; vision produced a managed resource. Direct chat also returned an audio payload from the Omni model. |
-| Qwen3-TTS CustomVoice | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` / `qwen3-tts-0.6b-custom` | `/audio/voices`, `/audio/speech` | `pass` | Remote TTS smoke returned built-in voices including `vivian` and generated a 230444-byte `audio/wav` file at 24000 Hz mono PCM. |
+| Qwen2.5-Omni | `Qwen/Qwen2.5-Omni-7B` / `qwen2.5-omni-7b` | `routes`, `chat`, `vision`, runtime-loop `vision_understanding` | `pass` | `validate:omni-real` passed routes, direct chat, and `vision_understanding`; runtime E2E executed `vision_understanding` through `Runtime.run()`, called the remote model, persisted an `omni.vision` resource, and returned through the final model turn. Direct chat also returned an audio payload from the Omni model. |
+| Qwen3-TTS CustomVoice | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` / `qwen3-tts-0.6b-custom` | `routes`, `/audio/voices`, `/audio/speech`, runtime-loop `speech_voices`, runtime-loop `speech_generation` | `pass` | Remote smoke listed 9 voices and generated `audio/wav`; runtime E2E executed both `speech_voices` and `speech_generation`, with speech output stored as managed media and metadata resources. |
 | Qwen3-TTS Base | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | TTS Base smoke | `blocked` | Base task requires reference audio plus transcript and has no preset voices; cache from exploration was removed to recover disk headroom. |
-| Image profile | Image diffusion model such as `zai-org/GLM-Image` | `image_generation`, `image_edit` | `blocked` | Routes are present, but the active Qwen2.5 profile has no diffusion stage. The image model is about 33.3 GiB before runtime overhead while the host had about 9.2 GiB free. |
-| Video profile | Wan-style video diffusion profile | `video_generation`, `video_sync` | `blocked` | Routes are present, but the active profile exposes an `llm` stage, not a video diffusion stage. The available `vllm/vllm-omni-rocm:v0.20.0` image did not include the newer Wan deploy profiles needed during setup. |
-| Audio diffusion profile | `stabilityai/stable-audio-open-1.0` or equivalent | `audio_generation` | `blocked` | Route is present, but the active profile is not an audio diffusion model. Stable Audio cache size is about 14.6 GiB, above current host disk headroom. |
+| Image profile | `zai-org/GLM-Image` / `glm-image` | `routes`, `image_generation`, `image_edit`, runtime-loop `image_generation`, runtime-loop `image_edit` | `pass` | After freeing non-current model caches, GLM-Image loaded successfully. Real smoke and runtime E2E generated images, edited a 64x64 validation PNG, and persisted `omni.image_generation` and `omni.image_edit` managed resources. |
+| Video profile | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` / `wan2.1-t2v-1.3b` | `routes`, async `/videos`, sync `/videos/sync`, runtime-loop sync `video_generation`, runtime-loop async `video_generation_async` | `pass` | Wan2.1 T2V 1.3B loaded from the online serving recipe. Real smoke passed sync and async video generation; runtime E2E validated sync `/videos/sync` and async `/videos` job polling/content download, with generated `video/mp4` stored as managed media resources. |
+| Audio diffusion profile | `stabilityai/stable-audio-open-1.0` | `audio_generation` | `blocked` | The Stable Audio container reached model download, but startup failed because the Hugging Face model is gated and requires license/access approval. This leaves `/audio/generate` blocked by testbed model access, not by Inferoa request serialization. |
 
 When a row is `blocked`, keep Inferoa implementation status separate from
 testbed readiness. A blocked row can become `pass` by switching to a compatible

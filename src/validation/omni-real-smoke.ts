@@ -51,7 +51,7 @@ const TOOL_CASES: Record<string, Omit<ToolCall, "id">> = {
   },
   image_edit: {
     name: "image_edit",
-    arguments: { prompt: "Make the image brighter.", images: [onePixelPng()] },
+    arguments: { prompt: "Make the image brighter.", images: [validationPng64()] },
   },
   video_generation: {
     name: "video_generation",
@@ -222,6 +222,10 @@ function likelyProfileBlocked(result: ToolResult): boolean {
 
 function onePixelPng(): string {
   return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+}
+
+function validationPng64(): string {
+  return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAZUlEQVR42u3QQREAAAQAMBFFFEwXcjh7rMAiq+ezECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAu5bGeiylVW0Mr0AAAAASUVORK5CYII=";
 }
 
 function safeFilePart(value: string): string {

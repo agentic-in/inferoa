@@ -149,7 +149,7 @@ const TOOL_CASES: Record<string, RuntimeToolCase> = {
   image_edit: {
     name: "image_edit",
     endpoint: "image_edit",
-    arguments: { prompt: "Make this validation image brighter.", images: [onePixelPng()] },
+    arguments: { prompt: "Make this validation image brighter.", images: [validationPng64()] },
     resultPattern: /"capability":"image_edit"/,
     requiresResource: true,
   },
@@ -157,6 +157,13 @@ const TOOL_CASES: Record<string, RuntimeToolCase> = {
     name: "video_generation",
     endpoint: "video_generation",
     arguments: { prompt: "A one second validation clip.", mode: "sync", seconds: "1", size: "256x256" },
+    resultPattern: /"capability":"video_generation"/,
+    requiresResource: true,
+  },
+  video_generation_async: {
+    name: "video_generation",
+    endpoint: "video_generation",
+    arguments: { prompt: "A one second validation clip.", mode: "async", seconds: "1", size: "256x256", timeout_ms: 120_000, poll_ms: 2_000 },
     resultPattern: /"capability":"video_generation"/,
     requiresResource: true,
   },
@@ -214,6 +221,7 @@ class ScriptedController {
       this.requests.push(JSON.parse(body) as JsonObject);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       if (this.requests.length === 1) {
+        const toolCallId = `call_omni_${safeFilePart(this.toolCase.name).replace(/[.-]+/g, "_")}`;
         writeSse(res, {
           id: "resp_omni_e2e_tool",
           model: "scripted-controller",
@@ -222,7 +230,7 @@ class ScriptedController {
               delta: {
                 tool_calls: [
                   {
-                    id: "call_omni_vision",
+                    id: toolCallId,
                     type: "function",
                     function: {
                       name: this.toolCase.name,
@@ -315,6 +323,10 @@ function writeSse(res: ServerResponse, value: unknown): void {
 
 function onePixelPng(): string {
   return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+}
+
+function validationPng64(): string {
+  return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAZUlEQVR42u3QQREAAAQAMBFFFEwXcjh7rMAiq+ezECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAgQIECBAgAABAu5bGeiylVW0Mr0AAAAASUVORK5CYII=";
 }
 
 function safeFilePart(value: string): string {
