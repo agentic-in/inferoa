@@ -15,6 +15,14 @@ import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 function config(baseUrl: string): VllmAgentConfig {
   const next = structuredClone(DEFAULT_CONFIG);
   next.omni.enabled = true;
+  next.omni.endpoints.vision = {
+    base_url: baseUrl,
+    model: "vision-model",
+  };
+  next.omni.endpoints.image_generation = {
+    base_url: baseUrl,
+    model: "image-model",
+  };
   next.omni.endpoints.audio_generation = {
     base_url: baseUrl,
     model: "stable-audio",
@@ -43,6 +51,75 @@ function visionConfig(baseUrl: string): VllmAgentConfig {
   };
   return next;
 }
+
+test("vision understanding and image generation use endpoint-backed requests and managed resources", async () => {
+  let chatBody: Record<string, unknown> | undefined;
+  let imageBody: Record<string, unknown> | undefined;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        chatBody = JSON.parse(body) as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "The image is a tiny fixture." } }],
+          usage: { prompt_tokens: 12, completion_tokens: 7 },
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/images/generations") {
+        imageBody = JSON.parse(body) as Record<string, unknown>;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: "ZmFrZS1pbWFnZQ==", revised_prompt: "tiny fixture" }] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-omni-vision-image-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const imagePath = path.join(dir, "fixture.png");
+    await writeFile(imagePath, Buffer.from("fake-png"));
+    const workspace: WorkspaceIdentity = { id: "w_omni_vision_image", root: dir, alias: "omni-vision-image" };
+    const session = store.createSession(workspace, "omni-vision-image");
+    const registry = new ToolRegistry(config(baseUrl), workspace, store);
+
+    const vision = await registry.call(
+      { id: "vision", name: "vision_understanding", arguments: { inputs: ["fixture.png"], prompt: "What is in the image?" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(vision.ok, true);
+    assert.equal(vision.data?.answer, "The image is a tiny fixture.");
+    assert.match(JSON.stringify(chatBody), /data:image\/png;base64/);
+
+    const image = await registry.call(
+      { id: "image", name: "image_generation", arguments: { prompt: "tiny fixture", size: "256x256", seed: 7 } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(image.ok, true);
+    assert.equal(image.data?.media_count, 1);
+    assert.equal(Object.hasOwn(image.data ?? {}, "media"), false);
+    assert.deepEqual(imageBody, { model: "image-model", prompt: "tiny fixture", size: "256x256", seed: 7 });
+    const stored = store.readResource(image.resource_uri!);
+    assert.match(stored?.content ?? "", /ZmFrZS1pbWFnZQ==/);
+    assert.equal(stored?.metadata.media_count, 1);
+  } finally {
+    store.close();
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("video_generation follows the vLLM-Omni async video job lifecycle", async () => {
   let polls = 0;

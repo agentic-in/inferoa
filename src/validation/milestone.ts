@@ -74,7 +74,7 @@ const checks: Record<Milestone, () => Promise<Check[]>> = {
     await file("src/tui/cache-footer.ts"),
     await containsCheck("src/session/store.ts", "recordEndpointEvidence", "endpoint evidence persistence"),
     await containsCheck("src/model/endpoint-signals.ts", "parseCacheMetrics", "prefix-cache metric parsing"),
-    await containsCheck("src/tui/cache-footer.ts", "cached_prompt_tokens !== undefined", "hide unavailable cache fields"),
+    await containsCheck("src/tui/cache-footer.ts", "cached === undefined", "hide unavailable cache fields"),
     await containsCheck("src/context/prompt.ts", "tool_schema_hash", "stable tool schema hash evidence"),
   ],
   T6: async () => [
