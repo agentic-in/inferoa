@@ -79,3 +79,24 @@ every runtime capability simultaneously.
 Before switching profiles, record current container image, served model, port,
 and OpenAPI routes in the ignored evidence directory. After switching, rerun
 `routes` and the profile-specific tools.
+
+## Current Testbed Matrix
+
+This matrix records the external vLLM-Omni testbed state observed on
+2026-06-08. It is evidence for this adaptation pass, not a permanent product
+requirement. Exact endpoint addresses, raw reports, and media remain in ignored
+local or remote evidence directories.
+
+| Profile | Model / served name | Checks | Result | Evidence summary |
+| --- | --- | --- | --- | --- |
+| Qwen2.5-Omni | `Qwen/Qwen2.5-Omni-7B` / `qwen2.5-omni-7b` | `routes`, `chat`, `vision` | `pass` | `validate:omni-real` passed routes, direct chat, and `vision_understanding`; vision produced a managed resource. Direct chat also returned an audio payload from the Omni model. |
+| Qwen3-TTS CustomVoice | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` / `qwen3-tts-0.6b-custom` | `/audio/voices`, `/audio/speech` | `pass` | Remote TTS smoke returned built-in voices including `vivian` and generated a 230444-byte `audio/wav` file at 24000 Hz mono PCM. |
+| Qwen3-TTS Base | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | TTS Base smoke | `blocked` | Base task requires reference audio plus transcript and has no preset voices; cache from exploration was removed to recover disk headroom. |
+| Image profile | Image diffusion model such as `zai-org/GLM-Image` | `image_generation`, `image_edit` | `blocked` | Routes are present, but the active Qwen2.5 profile has no diffusion stage. The image model is about 33.3 GiB before runtime overhead while the host had about 9.2 GiB free. |
+| Video profile | Wan-style video diffusion profile | `video_generation`, `video_sync` | `blocked` | Routes are present, but the active profile exposes an `llm` stage, not a video diffusion stage. The available `vllm/vllm-omni-rocm:v0.20.0` image did not include the newer Wan deploy profiles needed during setup. |
+| Audio diffusion profile | `stabilityai/stable-audio-open-1.0` or equivalent | `audio_generation` | `blocked` | Route is present, but the active profile is not an audio diffusion model. Stable Audio cache size is about 14.6 GiB, above current host disk headroom. |
+
+When a row is `blocked`, keep Inferoa implementation status separate from
+testbed readiness. A blocked row can become `pass` by switching to a compatible
+profile and rerunning `validate:omni-real`; it is not a wrong-route or request
+serialization failure by itself.
