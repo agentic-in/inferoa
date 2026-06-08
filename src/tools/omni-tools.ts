@@ -664,11 +664,10 @@ async function appendFormInput(form: FormData, key: string, input: string, conte
 }
 
 async function localFile(input: string, context: ToolExecutionContext): Promise<{ bytes: Buffer; contentType: string; name: string }> {
-  const file = input.startsWith("file:") ? new URL(input) : resolveInside(context.workspace.root, input);
-  const filePath = file instanceof URL ? file : file;
-  const bytes = await fs.readFile(filePath);
-  const name = path.basename(filePath.toString());
-  return { bytes, contentType: mimeType(filePath.toString()), name };
+  const file = resolveReadablePath(context.workspace.root, input).file;
+  const bytes = await fs.readFile(file);
+  const name = path.basename(file);
+  return { bytes, contentType: mimeType(file), name };
 }
 
 async function dataUriFile(input: string, fallbackName: string): Promise<{ bytes: Buffer; contentType: string; name: string }> {
