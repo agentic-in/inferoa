@@ -170,7 +170,14 @@ const TOOL_CASES: Record<string, RuntimeToolCase> = {
   audio_generation: {
     name: "audio_generation",
     endpoint: "audio_generation",
-    arguments: { input: "short rain ambience", response_format: "wav" },
+    arguments: {
+      input: "short rain ambience",
+      response_format: "wav",
+      audio_length: 1,
+      num_inference_steps: 4,
+      guidance_scale: 6,
+      seed: 42,
+    },
     resultPattern: /"capability":"audio_generation"/,
     requiresResource: true,
   },

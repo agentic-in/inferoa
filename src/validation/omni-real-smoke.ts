@@ -63,7 +63,14 @@ const TOOL_CASES: Record<string, Omit<ToolCall, "id">> = {
   },
   audio_generation: {
     name: "audio_generation",
-    arguments: { input: "short rain ambience", response_format: "wav" },
+    arguments: {
+      input: "short rain ambience",
+      response_format: "wav",
+      audio_length: 1,
+      num_inference_steps: 4,
+      guidance_scale: 6,
+      seed: 42,
+    },
   },
   speech_generation: {
     name: "speech_generation",

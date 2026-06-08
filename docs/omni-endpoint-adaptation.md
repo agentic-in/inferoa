@@ -56,6 +56,7 @@ npm run validate:all
 Real endpoint evidence is supplemental and profile-specific. The current
 testbed passes Qwen2.5-Omni route/chat/vision runtime validation, Qwen3-TTS
 speech validation, GLM-Image image generation/edit validation, and Wan2.1 T2V
-sync/async video validation. Stable Audio remains blocked by Hugging Face
-license/access approval for `stabilityai/stable-audio-open-1.0`, not by Inferoa
-request routing.
+sync/async video validation. AudioX passes `/audio/generate` validation through
+the Inferoa runtime loop. Stable Audio remains an additional profile blocked by
+Hugging Face license/access approval for `stabilityai/stable-audio-open-1.0`,
+not by Inferoa request routing.
