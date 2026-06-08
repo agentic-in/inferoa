@@ -14,7 +14,7 @@ import { endpointApiKey } from "../config/config.js";
 import { throwIfAborted } from "../util/abort.js";
 import { stableJson } from "../util/hash.js";
 import { authHeaders, modelBaseUrl, normalizeUsage, providerId, signalHeaders } from "./endpoint-signals.js";
-import { externalProviderById, externalProviderRequiresApiKey } from "./providers.js";
+import { externalProviderById, externalProviderProfileForModel, externalProviderRequiresApiKey } from "./providers.js";
 
 interface OpenAiToolCallAccumulator {
   id?: string;
@@ -51,16 +51,21 @@ export class ModelGateway {
     if (setup.provider === "external" && (!externalProvider || externalProviderRequiresApiKey(externalProvider)) && !endpointApiKey(setup)) {
       throw new Error(`No API key found for ${externalProvider?.label ?? "the external provider"}. Run /setup and paste the key once; config stores only api_key_ref.`);
     }
-    if (setup.provider === "external" && setup.profile === "openai_responses") {
-      return await this.callOpenAiResponses(setup, request, onDelta, signal);
+    const effectiveProfile =
+      setup.provider === "external"
+        ? externalProviderProfileForModel(externalProvider, request.model || setup.model, setup.profile)
+        : setup.profile;
+    const effectiveSetup = effectiveProfile === setup.profile ? setup : { ...setup, profile: effectiveProfile };
+    if (setup.provider === "external" && effectiveProfile === "openai_responses") {
+      return await this.callOpenAiResponses(effectiveSetup, request, onDelta, signal);
     }
-    if (setup.provider === "external" && setup.profile === "anthropic") {
-      return await this.callAnthropic(setup, request, onDelta, signal);
+    if (setup.provider === "external" && effectiveProfile === "anthropic") {
+      return await this.callAnthropic(effectiveSetup, request, onDelta, signal);
     }
-    if (setup.provider === "external" && setup.profile === "gemini") {
-      return await this.callGemini(setup, request, onDelta, signal);
+    if (setup.provider === "external" && effectiveProfile === "gemini") {
+      return await this.callGemini(effectiveSetup, request, onDelta, signal);
     }
-    return await this.callOpenAiCompatible(setup, request, onDelta, signal);
+    return await this.callOpenAiCompatible(effectiveSetup, request, onDelta, signal);
   }
 
   private async callOpenAiCompatible(
@@ -71,7 +76,7 @@ export class ModelGateway {
   ): Promise<ModelResponse> {
     throwIfAborted(signal);
     const base = modelBaseUrl(setup);
-    const headers = new Headers(authHeaders(setup));
+    const headers = new Headers(authHeaders(setup, "chat_completions"));
     headers.set("accept", "text/event-stream");
     headers.set("x-session-id", request.session_id);
     headers.set("x-inferoa-session-id", request.session_id);
@@ -203,7 +208,7 @@ export class ModelGateway {
   ): Promise<ModelResponse> {
     throwIfAborted(signal);
     const base = modelBaseUrl(setup).replace(/\/v1$/, "");
-    const headers = new Headers(authHeaders(setup));
+    const headers = new Headers(authHeaders(setup, "messages"));
     headers.set("anthropic-version", "2023-06-01");
     const system = request.messages.find((message) => message.role === "system")?.content;
     const body = {
@@ -275,7 +280,7 @@ export class ModelGateway {
     };
     const response = await fetch(url, {
       method: "POST",
-      headers: authHeaders({ ...setup, api_key: undefined, api_key_ref: undefined }),
+      headers: authHeaders({ ...setup, api_key: undefined, api_key_ref: undefined }, "chat_completions"),
       body: JSON.stringify(body),
       signal,
     });
@@ -306,18 +311,18 @@ export class ModelGateway {
   ): Promise<ModelResponse> {
     throwIfAborted(signal);
     const base = modelBaseUrl(setup);
-    const headers = new Headers(authHeaders(setup));
+    const headers = new Headers(authHeaders(setup, "responses"));
     headers.set("accept", "text/event-stream");
     headers.set("x-session-id", request.session_id);
     headers.set("x-inferoa-session-id", request.session_id);
     headers.set("x-inferoa-run-id", request.run_id);
     const body = {
       model: request.model || setup.model,
-      input: request.messages.map(toOpenAiResponseInputItem),
+      instructions: openAiResponsesInstructions(request.messages),
+      input: openAiResponsesInput(request.messages),
+      store: false,
       tools: sortedTools(request.tools).map(toOpenAiResponseTool),
       stream: true,
-      temperature: request.temperature ?? 0.2,
-      max_output_tokens: request.max_tokens,
     };
     const response = await fetch(`${base}/responses`, {
       method: "POST",
@@ -484,20 +489,52 @@ function toOpenAiMessage(message: ModelMessage): JsonObject {
   return base;
 }
 
-function toOpenAiResponseInputItem(message: ModelMessage): JsonObject {
+function openAiResponsesInstructions(messages: ModelMessage[]): string {
+  const instructions = messages
+    .filter((message) => message.role === "system")
+    .map(messageTextContent)
+    .map((content) => content.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return instructions || "You are Inferoa.";
+}
+
+function openAiResponsesInput(messages: ModelMessage[]): JsonObject[] {
+  return messages.flatMap(toOpenAiResponseInputItems);
+}
+
+function toOpenAiResponseInputItems(message: ModelMessage): JsonObject[] {
+  if (message.role === "system") {
+    return [];
+  }
   if (message.role === "tool") {
-    return {
+    return [{
       type: "function_call_output",
       call_id: message.tool_call_id ?? message.name ?? "tool",
       output: messageTextContent(message),
-    };
+    }];
   }
-  const role = message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user";
+  const items: JsonObject[] = [];
+  if (message.role === "assistant" && message.tool_calls?.length) {
+    for (const call of message.tool_calls) {
+      items.push({
+        type: "function_call",
+        call_id: call.id,
+        name: call.name,
+        arguments: stableJson(call.arguments),
+      });
+    }
+    if (!messageTextContent(message).trim()) {
+      return items;
+    }
+  }
+  const role = message.role === "assistant" ? "assistant" : "user";
   const contentType = role === "assistant" ? "output_text" : "input_text";
-  return {
+  items.push({
     role,
     content: [{ type: contentType, text: messageTextContent(message) }],
-  };
+  });
+  return items;
 }
 
 function stableMessageContent(content: ModelMessage["content"]): ModelMessage["content"] {

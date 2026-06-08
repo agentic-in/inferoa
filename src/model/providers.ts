@@ -6,6 +6,7 @@ import type { ModelSetup } from "../types.js";
 
 export type ExternalProviderAuthType = "api_key" | "oauth_external" | "none";
 export type ExternalProviderProfile = NonNullable<ModelSetup["profile"]>;
+export type ExternalProviderRequestFamily = "chat_completions" | "responses" | "messages";
 
 export interface ExternalProviderDefinition {
   id: string;
@@ -319,6 +320,29 @@ export function externalProviderRequiresApiKey(provider: ExternalProviderDefinit
   return Boolean(provider && provider.auth_type !== "none");
 }
 
+export function externalProviderProfileForModel(
+  provider: ExternalProviderDefinition | undefined,
+  modelId: string | undefined,
+  fallbackProfile?: ExternalProviderProfile,
+): ExternalProviderProfile {
+  const fallback = fallbackProfile ?? provider?.profile ?? "openai_compatible";
+  if (!provider) {
+    return fallback;
+  }
+  const providerId = provider.id.trim().toLowerCase();
+  const normalizedModel = normalizeProviderModelId(modelId);
+  if (providerId === "copilot") {
+    if (usesAnthropicMessagesTransport(normalizedModel)) {
+      return "anthropic";
+    }
+    if (usesOpenAiResponsesTransport(normalizedModel)) {
+      return "openai_responses";
+    }
+    return "openai_compatible";
+  }
+  return fallback;
+}
+
 export async function discoverExternalProviderStates(options: ProviderDiscoveryOptions = {}): Promise<ExternalProviderState[]> {
   const env = options.env ?? process.env;
   const homeDir = options.homeDir ?? os.homedir();
@@ -384,6 +408,7 @@ export function externalProviderAuthHeaders(
   provider: ExternalProviderDefinition | undefined,
   apiKey?: string,
   headers: Record<string, string> = {},
+  requestFamily: ExternalProviderRequestFamily = "chat_completions",
 ): HeadersInit {
   const output: Record<string, string> = {
     "content-type": "application/json",
@@ -408,7 +433,30 @@ export function externalProviderAuthHeaders(
     return output;
   }
   output.authorization = `Bearer ${key}`;
+  if (providerId === "copilot" && requestFamily === "messages") {
+    output["anthropic-version"] = "2023-06-01";
+  }
   return output;
+}
+
+function normalizeProviderModelId(modelId: string | undefined): string {
+  const normalized = String(modelId ?? "").trim().toLowerCase();
+  if (!normalized.includes("/")) {
+    return normalized;
+  }
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+function usesAnthropicMessagesTransport(modelId: string): boolean {
+  return modelId.startsWith("claude-");
+}
+
+function usesOpenAiResponsesTransport(modelId: string): boolean {
+  const match = /^gpt-(\d+)/.exec(modelId);
+  if (!match) {
+    return false;
+  }
+  return Number(match[1]) >= 5 && !modelId.startsWith("gpt-5-mini");
 }
 
 export function resolveExternalProviderCredentialSync(providerId: string, options: { homeDir?: string; env?: Record<string, string | undefined> } = {}): ExternalProviderCredential | undefined {

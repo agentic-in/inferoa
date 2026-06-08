@@ -24,6 +24,196 @@ function anthropicConfig(baseUrl: string): VllmAgentConfig {
   return next;
 }
 
+test("Codex Responses requests send system prompt as instructions", async () => {
+  let requestPath = "";
+  let requestBody: Record<string, unknown> | undefined;
+  const server = createServer((req, res) => {
+    requestPath = req.url ?? "";
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requestBody = JSON.parse(body) as Record<string, unknown>;
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      writeSse(res, {
+        type: "response.created",
+        response: { id: "resp_codex", model: "gpt-5.4", usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 } },
+      });
+      writeSse(res, { type: "response.output_text.delta", delta: "ok" });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}/backend-api/codex`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "openai-codex";
+    next.model_setup.profile = "openai_responses";
+    next.model_setup.api_key = "codex-token";
+    next.model_setup.model = "gpt-5.4";
+    const gateway = new ModelGateway(next);
+    const response = await gateway.stream({
+      session_id: "s",
+      run_id: "r",
+      mode: "direct",
+      provider_id: "openai-codex",
+      model: "gpt-5.4",
+      messages: [
+        { role: "system", content: "Be concise." },
+        { role: "user", content: "ping" },
+      ],
+      tools: [],
+      max_tokens: 16,
+    });
+    assert.equal(response.content, "ok");
+    assert.equal(requestPath, "/backend-api/codex/responses");
+    assert.equal(requestBody?.instructions, "Be concise.");
+    assert.equal(requestBody?.store, false);
+    assert.equal(Object.hasOwn(requestBody ?? {}, "temperature"), false);
+    assert.equal(Object.hasOwn(requestBody ?? {}, "max_output_tokens"), false);
+    const input = requestBody?.input as Array<Record<string, unknown>>;
+    assert.equal(input.length, 1);
+    assert.equal(input[0]?.role, "user");
+  } finally {
+    server.close();
+  }
+});
+
+test("Copilot Claude models use Anthropic Messages with Copilot bearer auth", async () => {
+  let requestPath = "";
+  let authorization = "";
+  let anthropicVersion = "";
+  let requestBody: Record<string, unknown> | undefined;
+  const server = createServer((req, res) => {
+    requestPath = req.url ?? "";
+    authorization = String(req.headers.authorization ?? "");
+    anthropicVersion = String(req.headers["anthropic-version"] ?? "");
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requestBody = JSON.parse(body) as Record<string, unknown>;
+      if (requestPath === "/v1/messages") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "msg_copilot_claude",
+            model: "claude-sonnet-4.6",
+            content: [{ type: "text", text: "ok" }],
+            usage: { input_tokens: 4, output_tokens: 1 },
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      writeSse(res, { id: "wrong_route", model: "claude-sonnet-4.6", choices: [{ delta: { content: "wrong" } }] });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "copilot";
+    next.model_setup.profile = "openai_compatible";
+    next.model_setup.api_key = "copilot-token";
+    next.model_setup.model = "claude-sonnet-4.6";
+    const gateway = new ModelGateway(next);
+    const response = await gateway.stream({
+      session_id: "s",
+      run_id: "r",
+      mode: "direct",
+      provider_id: "copilot",
+      model: "claude-sonnet-4.6",
+      messages: [
+        { role: "system", content: "System prompt." },
+        { role: "user", content: "ping" },
+      ],
+      tools: [],
+    });
+    assert.equal(response.content, "ok");
+    assert.equal(requestPath, "/v1/messages");
+    assert.equal(authorization, "Bearer copilot-token");
+    assert.equal(anthropicVersion, "2023-06-01");
+    assert.equal(requestBody?.system, "System prompt.");
+  } finally {
+    server.close();
+  }
+});
+
+test("Copilot GPT-5 models use Responses payload shape", async () => {
+  let requestPath = "";
+  let requestBody: Record<string, unknown> | undefined;
+  const server = createServer((req, res) => {
+    requestPath = req.url ?? "";
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requestBody = JSON.parse(body) as Record<string, unknown>;
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      if (requestPath === "/responses") {
+        writeSse(res, {
+          type: "response.created",
+          response: { id: "resp_copilot_gpt", model: "gpt-5.4", usage: { input_tokens: 4, output_tokens: 1 } },
+        });
+        writeSse(res, { type: "response.output_text.delta", delta: "ok" });
+      } else {
+        writeSse(res, { id: "wrong_route", model: "gpt-5.4", choices: [{ delta: { content: "wrong" } }] });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "copilot";
+    next.model_setup.profile = "openai_compatible";
+    next.model_setup.api_key = "copilot-token";
+    next.model_setup.model = "gpt-5.4";
+    const gateway = new ModelGateway(next);
+    const response = await gateway.stream({
+      session_id: "s",
+      run_id: "r",
+      mode: "direct",
+      provider_id: "copilot",
+      model: "gpt-5.4",
+      messages: [
+        { role: "system", content: "System prompt." },
+        { role: "user", content: "ping" },
+      ],
+      tools: [],
+    });
+    assert.equal(response.content, "ok");
+    assert.equal(requestPath, "/responses");
+    assert.equal(requestBody?.instructions, "System prompt.");
+  } finally {
+    server.close();
+  }
+});
+
 test("OpenAI-compatible streaming tool calls survive chunks without index fields", async () => {
   const server = createServer((_req, res) => {
     res.writeHead(200, {

@@ -6,6 +6,7 @@ import {
   externalProviderRequiresApiKey,
   probeExternalProviderModels,
 } from "./providers.js";
+import type { ExternalProviderRequestFamily } from "./providers.js";
 
 export function providerId(config: VllmAgentConfig): string {
   const setup = config.model_setup;
@@ -23,10 +24,13 @@ export function modelBaseUrl(setup: ModelSetup): string {
   return setup.base_url.replace(/\/$/, "");
 }
 
-export function authHeaders(endpoint: { api_key?: string; api_key_ref?: string; headers?: Record<string, string> }): HeadersInit {
+export function authHeaders(
+  endpoint: { api_key?: string; api_key_ref?: string; headers?: Record<string, string> },
+  requestFamily?: ExternalProviderRequestFamily,
+): HeadersInit {
   const provider = externalProviderById(typeof (endpoint as { provider_id?: unknown }).provider_id === "string" ? (endpoint as { provider_id: string }).provider_id : undefined);
   const apiKey = endpointApiKey(endpoint);
-  return externalProviderAuthHeaders(provider, apiKey, endpoint.headers);
+  return externalProviderAuthHeaders(provider, apiKey, endpoint.headers, requestFamily);
 }
 
 export function normalizeUsage(raw: unknown): ModelUsage | undefined {
