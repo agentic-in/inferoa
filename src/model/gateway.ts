@@ -14,6 +14,7 @@ import { endpointApiKey } from "../config/config.js";
 import { throwIfAborted } from "../util/abort.js";
 import { stableJson } from "../util/hash.js";
 import { authHeaders, modelBaseUrl, normalizeUsage, providerId, signalHeaders } from "./endpoint-signals.js";
+import { externalProviderById, externalProviderRequiresApiKey } from "./providers.js";
 
 interface OpenAiToolCallAccumulator {
   id?: string;
@@ -46,8 +47,12 @@ export class ModelGateway {
     if (!setup.model && !request.model) {
       throw new Error("No model configured. Set model_setup.model or INFEROA_MODEL.");
     }
-    if (setup.provider === "external" && !endpointApiKey(setup)) {
-      throw new Error("No API key found in the local vault for the external provider. Run /setup and paste the key once; config stores only api_key_ref.");
+    const externalProvider = setup.provider === "external" ? externalProviderById(setup.provider_id) : undefined;
+    if (setup.provider === "external" && (!externalProvider || externalProviderRequiresApiKey(externalProvider)) && !endpointApiKey(setup)) {
+      throw new Error(`No API key found for ${externalProvider?.label ?? "the external provider"}. Run /setup and paste the key once; config stores only api_key_ref.`);
+    }
+    if (setup.provider === "external" && setup.profile === "openai_responses") {
+      return await this.callOpenAiResponses(setup, request, onDelta, signal);
     }
     if (setup.provider === "external" && setup.profile === "anthropic") {
       return await this.callAnthropic(setup, request, onDelta, signal);
@@ -293,6 +298,126 @@ export class ModelGateway {
     };
   }
 
+  private async callOpenAiResponses(
+    setup: ModelSetup,
+    request: ModelRequest,
+    onDelta?: (text: string) => void,
+    signal?: AbortSignal,
+  ): Promise<ModelResponse> {
+    throwIfAborted(signal);
+    const base = modelBaseUrl(setup);
+    const headers = new Headers(authHeaders(setup));
+    headers.set("accept", "text/event-stream");
+    headers.set("x-session-id", request.session_id);
+    headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-run-id", request.run_id);
+    const body = {
+      model: request.model || setup.model,
+      input: request.messages.map(toOpenAiResponseInputItem),
+      tools: sortedTools(request.tools).map(toOpenAiResponseTool),
+      stream: true,
+      temperature: request.temperature ?? 0.2,
+      max_output_tokens: request.max_tokens,
+    };
+    const response = await fetch(`${base}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    const headerSignals = signalHeaders(response.headers);
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Responses request failed ${response.status}: ${text}`);
+    }
+
+    const decoder = new TextDecoder();
+    const reader = response.body.getReader();
+    const streamWarnings: string[] = [];
+    const toolCalls = new Map<number, OpenAiToolCallAccumulator>();
+    let buffer = "";
+    let content = "";
+    let responseId: string | undefined;
+    let responseModel: string | undefined;
+    let usage: ReturnType<typeof normalizeUsage>;
+    let lastRaw: JsonObject | undefined;
+
+    while (true) {
+      throwIfAborted(signal);
+      const { done, value } = await reader.read();
+      throwIfAborted(signal);
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data:")) {
+          continue;
+        }
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") {
+          continue;
+        }
+        const json = parseSseJsonPayload(payload, streamWarnings);
+        if (!json) {
+          continue;
+        }
+        lastRaw = json as JsonObject;
+        const eventType = typeof json.type === "string" ? json.type : "";
+        const responsePayload = json.response as Record<string, unknown> | undefined;
+        responseId = typeof responsePayload?.id === "string" ? responsePayload.id : responseId;
+        responseModel = typeof responsePayload?.model === "string" ? responsePayload.model : responseModel;
+        usage = normalizeUsage(responsePayload?.usage) ?? usage;
+        if (eventType === "response.output_text.delta" && typeof json.delta === "string") {
+          content += json.delta;
+          onDelta?.(json.delta);
+        }
+        if (eventType === "response.function_call_arguments.delta" && typeof json.delta === "string") {
+          const index = typeof json.output_index === "number" ? json.output_index : toolCalls.size;
+          const current = toolCalls.get(index) ?? { arguments: "" };
+          current.arguments += json.delta;
+          toolCalls.set(index, current);
+        }
+        const item = (json.item ?? json.output_item) as Record<string, unknown> | undefined;
+        if (item?.type === "function_call") {
+          const index = typeof json.output_index === "number" ? json.output_index : toolCalls.size;
+          const current = toolCalls.get(index) ?? { arguments: "" };
+          if (typeof item.call_id === "string") {
+            current.id = item.call_id;
+          } else if (typeof item.id === "string") {
+            current.id = item.id;
+          }
+          if (typeof item.name === "string") {
+            current.name = item.name;
+          }
+          if (typeof item.arguments === "string") {
+            current.arguments = item.arguments;
+          }
+          toolCalls.set(index, current);
+        }
+      }
+    }
+
+    const parsedToolCalls = [...toolCalls.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, call], index) => parseToolCall(call, index))
+      .filter((call): call is ToolCall => Boolean(call));
+
+    return {
+      content,
+      tool_calls: parsedToolCalls,
+      usage,
+      request_id: headerSignals["x-request-id"] ?? headerSignals["request-id"],
+      response_id: responseId,
+      model: responseModel ?? request.model,
+      route: routeFromHeaders(headerSignals),
+      raw: streamWarnings.length ? { ...(lastRaw ?? {}), stream_warnings: streamWarnings as never } : lastRaw,
+    };
+  }
+
   evidenceFromResponse(request: ModelRequest, response: ModelResponse): EndpointSignalSnapshot {
     return {
       mode: this.config.model_setup.mode,
@@ -326,6 +451,15 @@ function toOpenAiTool(tool: ToolDefinition): JsonObject {
   };
 }
 
+function toOpenAiResponseTool(tool: ToolDefinition): JsonObject {
+  return {
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: canonicalJsonObject(tool.parameters),
+  };
+}
+
 function toOpenAiMessage(message: ModelMessage): JsonObject {
   const base: JsonObject = {
     role: message.role,
@@ -348,6 +482,22 @@ function toOpenAiMessage(message: ModelMessage): JsonObject {
     }));
   }
   return base;
+}
+
+function toOpenAiResponseInputItem(message: ModelMessage): JsonObject {
+  if (message.role === "tool") {
+    return {
+      type: "function_call_output",
+      call_id: message.tool_call_id ?? message.name ?? "tool",
+      output: messageTextContent(message),
+    };
+  }
+  const role = message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user";
+  const contentType = role === "assistant" ? "output_text" : "input_text";
+  return {
+    role,
+    content: [{ type: contentType, text: messageTextContent(message) }],
+  };
 }
 
 function stableMessageContent(content: ModelMessage["content"]): ModelMessage["content"] {

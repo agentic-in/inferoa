@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG } from "./defaults.js";
 import type { VllmAgentConfig } from "../types.js";
 import { ensureDir, homeStateDir, pathExists, realpathOrResolve } from "../util/fs.js";
 import { readSecret } from "./secret-vault.js";
+import { resolveExternalProviderCredentialSync } from "../model/providers.js";
 
 function deepMerge<T>(base: T, override: unknown): T {
   if (override === undefined || override === null) {
@@ -116,6 +117,10 @@ export function endpointApiKey(endpoint: { api_key?: string; api_key_ref?: strin
   if (fromVault) {
     return fromVault;
   }
+  const providerId = typeof (endpoint as { provider_id?: unknown }).provider_id === "string" ? (endpoint as { provider_id: string }).provider_id : undefined;
+  if (providerId) {
+    return resolveExternalProviderCredentialSync(providerId)?.value;
+  }
   return undefined;
 }
 
@@ -203,7 +208,7 @@ function stringValue(value: unknown): string | undefined {
 function pruneConfig(config: VllmAgentConfig): void {
   pruneKeys(config, ["workspace", "model_setup", "model_retry", "omni", "permissions", "context", "skills", "web_search", "rtk", "daemon"]);
   pruneKeys(config.workspace, ["root"]);
-  pruneKeys(config.model_setup, ["mode", "provider", "profile", "router", "base_url", "model", "api_key_ref", "api_key", "headers", "context_window"]);
+  pruneKeys(config.model_setup, ["mode", "provider", "provider_id", "profile", "router", "base_url", "model", "api_key_ref", "api_key", "headers", "context_window"]);
   pruneKeys(config.model_retry, [
     "max_attempts",
     "initial_delay_ms",

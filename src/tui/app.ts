@@ -2,10 +2,20 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { saveUserConfig, userConfigPath } from "../config/config.js";
+import { endpointApiKey, saveUserConfig, userConfigPath } from "../config/config.js";
 import { readSecret, secretRef, writeSecret } from "../config/secret-vault.js";
 import { EndpointSignals } from "../model/endpoint-signals.js";
 import { authHeaders } from "../model/endpoint-signals.js";
+import {
+  discoverExternalProviderStates,
+  externalProviderById,
+  externalProviderRequiresApiKey,
+  externalProviderSetupOptions,
+  probeExternalProviderModels,
+  type ExternalProviderDefinition,
+  type ExternalProviderSetupOption,
+  type ExternalProviderState,
+} from "../model/providers.js";
 import { resolveRtkStatus, type RtkStatus } from "../rtk/manager.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { SkillRegistry, type SkillDescriptor } from "../skills/registry.js";
@@ -55,6 +65,7 @@ import { renderPlanDocumentSurface } from "./plan-view.js";
 import { renderRtkSessionLines } from "./rtk-view.js";
 import { composerEraseRowsForResize } from "./resize.js";
 import { RESUME_SESSION_PAGE_SIZE, resumeSessionPage } from "./session-picker.js";
+import { filterProviderPickerOptions, providerPickerPage } from "./provider-picker.js";
 import { renderSessionTranscript } from "./session-transcript.js";
 import { renderUnknownSlashCommandNotice } from "./slash-notice.js";
 import { effectiveWorkspacePermission, setWorkspacePermissionMode } from "../tools/permissions.js";
@@ -1114,19 +1125,23 @@ export class TuiApp {
 
     const provider = await this.chooseProvider();
     this.applyProviderChoice(nextConfig.model_setup, provider);
-    this.renderCenteredPanel("Setup", [setupProgress(2, SETUP_TOTAL_STEPS, "endpoint"), "", fg256(244, "OpenAI-compatible endpoint URL.")], true);
-    nextConfig.model_setup.base_url = await this.askRequired("Chat endpoint base URL", nextConfig.model_setup.base_url ?? defaultBaseUrl(provider));
-    this.applyApiKeySelection(nextConfig.model_setup, await this.askApiKeySelection(
-      secretRef(`chat-${provider}-${nextConfig.model_setup.base_url ?? "endpoint"}`, "api-key"),
-      `${providerLabel(provider)} API key`,
-      nextConfig.model_setup.api_key_ref,
-      provider === "external",
-    ));
-    delete nextConfig.model_setup.api_key;
+    if (provider === "external") {
+      await this.configureExternalModelSetup(nextConfig);
+    } else {
+      this.renderCenteredPanel("Setup", [setupProgress(2, SETUP_TOTAL_STEPS, "endpoint"), "", fg256(244, "OpenAI-compatible endpoint URL.")], true);
+      nextConfig.model_setup.base_url = await this.askRequired("Chat endpoint base URL", nextConfig.model_setup.base_url ?? defaultBaseUrl(provider));
+      this.applyApiKeySelection(nextConfig.model_setup, await this.askApiKeySelection(
+        secretRef(`chat-${provider}-${nextConfig.model_setup.base_url ?? "endpoint"}`, "api-key"),
+        `${providerLabel(provider)} API key`,
+        nextConfig.model_setup.api_key_ref,
+        false,
+      ));
+      delete nextConfig.model_setup.api_key;
 
-    this.renderCenteredPanel("Setup", [setupProgress(3, SETUP_TOTAL_STEPS, "model"), "", fg256(244, "Listing endpoint models.")], true);
-    const chatProbe = await this.probeChatModels(nextConfig);
-    nextConfig.model_setup.model = await this.pickModel("Chat model", chatProbe, nextConfig.model_setup.model);
+      this.renderCenteredPanel("Setup", [setupProgress(3, SETUP_TOTAL_STEPS, "model"), "", fg256(244, "Listing endpoint models.")], true);
+      const chatProbe = await this.probeChatModels(nextConfig);
+      nextConfig.model_setup.model = await this.pickModel("Chat model", chatProbe, nextConfig.model_setup.model);
+    }
     this.renderCenteredPanel("Setup", [setupProgress(4, SETUP_TOTAL_STEPS, "context"), "", fg256(244, "Model context window in tokens.")], true);
     const currentContextWindow = nextConfig.model_setup.context_window ?? nextConfig.context.context_window;
     const contextWindowInput = await this.ask("Context window tokens", String(currentContextWindow));
@@ -1185,11 +1200,140 @@ export class TuiApp {
     const options: SelectOption<ProviderChoice>[] = [
       { value: "direct", label: "Direct", description: "Use your vLLM endpoint for the fastest, most predictable path" },
       { value: "auto", label: "Auto", description: "Let vLLM Semantic Router choose the best route for each request" },
-      { value: "external", label: "External", description: "Connect a hosted OpenAI-compatible provider when you need one" },
+      { value: "external", label: "External", description: "Choose a built-in provider, discovered local session, or custom endpoint" },
     ];
     const current = this.app.config.model_setup.mode === "auto" ? "auto" : this.app.config.model_setup.provider === "external" ? "external" : "direct";
     const defaultIndex = Math.max(0, options.findIndex((option) => option.value === current));
     return await this.selectOption("Provider", options, defaultIndex);
+  }
+
+  private async chooseExternalProvider(options: ExternalProviderSetupOption[], currentProviderId?: string): Promise<ExternalProviderSetupOption> {
+    if (!options.length) {
+      throw new Error("No external providers are available.");
+    }
+    let query = "";
+    let filtered = filterProviderPickerOptions(options, query);
+    let defaultIndex = Math.max(0, filtered.findIndex((option) => option.provider.id === currentProviderId));
+    let pageIndex = Math.floor(defaultIndex / 5);
+    let selected = defaultIndex % 5;
+    this.#rl?.pause();
+
+    const clampSelection = () => {
+      filtered = filterProviderPickerOptions(options, query);
+      const page = providerPickerPage(filtered, pageIndex);
+      pageIndex = page.pageIndex;
+      selected = Math.max(0, Math.min(selected, Math.max(0, page.items.length - 1)));
+      return page;
+    };
+
+    const render = () => {
+      const page = clampSelection();
+      const lines = page.items.length
+        ? page.items.map((option, index) => {
+          return renderProviderSetupOptionLine(option, index === selected);
+        })
+        : [fg256(244, query ? `No providers matched ${query}.` : "No providers available.")];
+      const searchLabel = query ? ` · search ${query}` : "";
+      const pageHint = `${page.pageIndex + 1}/${page.totalPages} · ${page.totalItems} providers${searchLabel} · ←/→ page · type search · enter select · esc cancel`;
+      this.renderCenteredPanel("External Provider", [...lines, "", setupHint(pageHint)], true);
+    };
+
+    render();
+    return await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        stdin.off("data", onData);
+        stdout.off("resize", onResize);
+        if (stdin.isTTY) {
+          stdin.setRawMode(false);
+        }
+        this.resumeReadline();
+      };
+      const finish = () => {
+        const page = clampSelection();
+        const option = page.items[selected];
+        if (!option) {
+          render();
+          return;
+        }
+        cleanup();
+        stdout.write("\n");
+        resolve(option);
+      };
+      const cancel = () => {
+        cleanup();
+        reject(new Error("Provider selection cancelled"));
+      };
+      const resetSearchPosition = () => {
+        pageIndex = 0;
+        selected = 0;
+      };
+      const movePage = (delta: number) => {
+        const current = providerPickerPage(filtered, pageIndex);
+        pageIndex = Math.max(0, Math.min(current.totalPages - 1, pageIndex + delta));
+        clampSelection();
+        render();
+      };
+      const onData = (chunk: Buffer) => {
+        for (const key of terminalInputTokens(chunk.toString("utf8"))) {
+          if (key === "\u0003" || key === "\u001b") {
+            cancel();
+            return;
+          }
+          if (key === "\u001b[A" || key === "k") {
+            const page = clampSelection();
+            if (page.items.length) {
+              selected = (selected - 1 + page.items.length) % page.items.length;
+            }
+            render();
+            continue;
+          }
+          if (key === "\u001b[B" || key === "j") {
+            const page = clampSelection();
+            if (page.items.length) {
+              selected = (selected + 1) % page.items.length;
+            }
+            render();
+            continue;
+          }
+          if (key === "\u001b[D" || key === "p") {
+            movePage(-1);
+            continue;
+          }
+          if (key === "\u001b[C" || key === "n") {
+            movePage(1);
+            continue;
+          }
+          if (key === "\u007f") {
+            query = query.slice(0, -1);
+            resetSearchPosition();
+            render();
+            continue;
+          }
+          if (key === "/" && !query) {
+            render();
+            continue;
+          }
+          if (key === " " || key === "\r" || key === "\n") {
+            finish();
+            return;
+          }
+          const printable = printableText(key);
+          if (printable) {
+            query += printable;
+            resetSearchPosition();
+            render();
+          }
+        }
+      };
+      const onResize = () => {
+        render();
+      };
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on("data", onData);
+      stdout.on("resize", onResize);
+      render();
+    });
   }
 
   private async chooseSlashCommand(query = ""): Promise<SlashCommandName> {
@@ -1213,6 +1357,7 @@ export class TuiApp {
     if (provider === "auto") {
       setup.mode = "auto";
       setup.provider = "vllm";
+      delete setup.provider_id;
       setup.router = "vllm-sr";
       setup.profile = "openai_compatible";
       setup.base_url = setup.base_url ?? defaultBaseUrl(provider);
@@ -1220,9 +1365,101 @@ export class TuiApp {
     }
     setup.mode = "direct";
     delete setup.router;
+    delete setup.provider_id;
     setup.profile = "openai_compatible";
     setup.provider = provider === "external" ? "external" : "vllm";
     setup.base_url = setup.base_url ?? defaultBaseUrl(provider);
+  }
+
+  private async configureExternalModelSetup(config: VllmAgentConfig): Promise<void> {
+    this.renderCenteredPanel("Setup", [
+      setupProgress(2, SETUP_TOTAL_STEPS, "provider"),
+      "",
+      fg256(244, "Discovering available external providers."),
+    ], true);
+    const states = await discoverExternalProviderStates();
+    const option = await this.chooseExternalProvider(externalProviderSetupOptions(states), config.model_setup.provider_id);
+    const provider = option.provider;
+    this.applyExternalProviderChoice(config.model_setup, provider);
+    const state = option.state ?? states.find((candidate) => candidate.provider.id === provider.id);
+
+    this.renderCenteredPanel("Setup", [
+      setupProgress(2, SETUP_TOTAL_STEPS, "endpoint"),
+      "",
+      fg256(244, provider.description),
+    ], true);
+    if (provider.supports_custom_base_url || !provider.base_url) {
+      config.model_setup.base_url = await this.askRequired(`${provider.label} base URL`, config.model_setup.base_url ?? provider.base_url ?? defaultBaseUrl("external"));
+    } else {
+      config.model_setup.base_url = state?.base_url ?? provider.base_url;
+    }
+
+    await this.configureExternalProviderAuth(config.model_setup, provider, state);
+
+    this.renderCenteredPanel("Setup", [
+      setupProgress(3, SETUP_TOTAL_STEPS, "model"),
+      "",
+      fg256(244, `Listing ${provider.label} models.`),
+    ], true);
+    const chatProbe = await this.probeExternalModels(config.model_setup, provider);
+    config.model_setup.model = await this.pickModel(`${provider.label} model`, chatProbe, config.model_setup.model ?? provider.default_model);
+  }
+
+  private applyExternalProviderChoice(setup: ModelSetup, provider: ExternalProviderDefinition): void {
+    const previousProviderId = setup.provider_id;
+    setup.mode = "direct";
+    setup.provider = "external";
+    setup.provider_id = provider.id;
+    setup.profile = provider.profile;
+    setup.base_url = provider.base_url ?? setup.base_url ?? defaultBaseUrl("external");
+    setup.model = provider.default_model ?? setup.model;
+    setup.headers = provider.extra_headers ? { ...provider.extra_headers } : undefined;
+    delete setup.router;
+    delete setup.api_key;
+    if (previousProviderId !== provider.id) {
+      delete setup.api_key_ref;
+    }
+  }
+
+  private async configureExternalProviderAuth(
+    setup: ModelSetup,
+    provider: ExternalProviderDefinition,
+    state?: ExternalProviderState,
+  ): Promise<void> {
+    if (!externalProviderRequiresApiKey(provider)) {
+      delete setup.api_key_ref;
+      delete setup.api_key;
+      return;
+    }
+    if (state?.credential?.value) {
+      const ref = secretRef(`chat-${provider.id}`, "api-key");
+      await writeSecret(ref, state.credential.value);
+      setup.api_key_ref = ref;
+      delete setup.api_key;
+      this.renderCenteredPanel("Auto Auth", [
+        `${fg256(48, "auto")} ${provider.label}`,
+        fg256(243, `source ${state.credential.source}`),
+        fg256(243, "Config stores only api_key_ref."),
+      ], true);
+      return;
+    }
+    this.applyApiKeySelection(
+      setup,
+      await this.askApiKeySelection(
+        secretRef(`chat-${provider.id}`, "api-key"),
+        `${provider.label} API key`,
+        setup.api_key_ref,
+        true,
+      ),
+    );
+    delete setup.api_key;
+  }
+
+  private async probeExternalModels(setup: ModelSetup, provider: ExternalProviderDefinition): Promise<EndpointProbeResult> {
+    return await probeExternalProviderModels(provider, {
+      baseUrl: setup.base_url,
+      apiKey: endpointApiKey(setup),
+    });
   }
 
   private async configureWebSearch(config: VllmAgentConfig): Promise<void> {
@@ -1369,12 +1606,7 @@ export class TuiApp {
     if (probe.models.length) {
       const defaultModel = current && probe.models.includes(current) ? current : probe.models[0] ?? current;
       const defaultIndex = defaultModel && probe.models.includes(defaultModel) ? probe.models.indexOf(defaultModel) : 0;
-      return await this.selectOption(
-        title,
-        probe.models.map((model) => ({ value: model, label: model })),
-        defaultIndex,
-        probe.errors.length ? [fg256(203, "Probe errors"), ...probe.errors.map((error) => `  ${error}`)] : [],
-      );
+      return await this.selectModelOption(title, probe.models, defaultIndex, probe.errors);
     }
     this.renderCenteredPanel(title, ["No models returned. Type a model id manually.", ...probe.errors.map((error) => fg256(203, error))]);
     while (true) {
@@ -1386,6 +1618,127 @@ export class TuiApp {
       }
       this.renderNotice("A model id is required.");
     }
+  }
+
+  private async selectModelOption(title: string, models: string[], defaultIndex = 0, errors: string[] = []): Promise<string> {
+    let query = "";
+    let filtered = models;
+    let pageIndex = Math.floor(Math.max(0, defaultIndex) / RESUME_SESSION_PAGE_SIZE);
+    let selected = Math.max(0, defaultIndex) % RESUME_SESSION_PAGE_SIZE;
+    this.#rl?.pause();
+
+    const clampSelection = () => {
+      const normalized = query.trim().toLowerCase();
+      filtered = normalized ? models.filter((model) => model.toLowerCase().includes(normalized)) : models;
+      const page = resumeSessionPage(filtered, pageIndex, RESUME_SESSION_PAGE_SIZE);
+      pageIndex = page.pageIndex;
+      selected = Math.max(0, Math.min(selected, Math.max(0, page.items.length - 1)));
+      return page;
+    };
+
+    const render = () => {
+      const page = clampSelection();
+      const lines = page.items.length
+        ? page.items.map((model, index) => renderSetupOptionLine(model, undefined, index === selected))
+        : [fg256(244, query ? `No models matched ${query}. Enter uses the typed id.` : "No models available.")];
+      const searchLabel = query ? ` · search ${query}` : "";
+      const hint = `${page.pageIndex + 1}/${page.totalPages} · ${page.totalItems} models${searchLabel} · ←/→ page · type search · enter select · esc cancel`;
+      const footer = errors.length ? ["", fg256(203, "Probe errors"), ...errors.map((error) => `  ${error}`)] : [];
+      this.renderCenteredPanel(title, [...lines, "", setupHint(hint), ...footer], true);
+    };
+
+    render();
+    return await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        stdin.off("data", onData);
+        stdout.off("resize", onResize);
+        if (stdin.isTTY) {
+          stdin.setRawMode(false);
+        }
+        this.resumeReadline();
+      };
+      const finish = () => {
+        const page = clampSelection();
+        const model = page.items[selected] ?? query.trim();
+        if (!model) {
+          render();
+          return;
+        }
+        cleanup();
+        stdout.write("\n");
+        resolve(model);
+      };
+      const cancel = () => {
+        cleanup();
+        reject(new Error("Model selection cancelled"));
+      };
+      const resetSearchPosition = () => {
+        pageIndex = 0;
+        selected = 0;
+      };
+      const movePage = (delta: number) => {
+        const current = resumeSessionPage(filtered, pageIndex, RESUME_SESSION_PAGE_SIZE);
+        pageIndex = Math.max(0, Math.min(current.totalPages - 1, pageIndex + delta));
+        clampSelection();
+        render();
+      };
+      const onData = (chunk: Buffer) => {
+        for (const key of terminalInputTokens(chunk.toString("utf8"))) {
+          if (key === "\u0003" || key === "\u001b") {
+            cancel();
+            return;
+          }
+          if (key === "\u001b[A" || key === "k") {
+            const page = clampSelection();
+            if (page.items.length) {
+              selected = (selected - 1 + page.items.length) % page.items.length;
+            }
+            render();
+            continue;
+          }
+          if (key === "\u001b[B" || key === "j") {
+            const page = clampSelection();
+            if (page.items.length) {
+              selected = (selected + 1) % page.items.length;
+            }
+            render();
+            continue;
+          }
+          if (key === "\u001b[D" || key === "p") {
+            movePage(-1);
+            continue;
+          }
+          if (key === "\u001b[C" || key === "n") {
+            movePage(1);
+            continue;
+          }
+          if (key === "\u007f") {
+            query = query.slice(0, -1);
+            resetSearchPosition();
+            render();
+            continue;
+          }
+          if (key === " " || key === "\r" || key === "\n") {
+            finish();
+            return;
+          }
+          const printable = printableText(key);
+          if (printable) {
+            query += printable;
+            resetSearchPosition();
+            render();
+          }
+        }
+      };
+      const onResize = () => {
+        render();
+      };
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on("data", onData);
+      stdout.on("resize", onResize);
+      render();
+    });
   }
 
   private async ask(label: string, defaultValue?: string, options: { secret?: boolean } = {}): Promise<string> {
@@ -3936,7 +4289,8 @@ export function normalizeContextWindowInput(input: string, fallback: number): nu
 
 export function describeModelSetupForDisplay(setup: ModelSetup): string {
   const contextWindow = setup.context_window ? ` · ctx ${setup.context_window}` : "";
-  return `${setup.mode} · ${setup.provider ?? setup.router ?? "unknown"} · ${setup.model ?? "unconfigured"} · ${setup.base_url ?? "unconfigured"}${contextWindow}`;
+  const provider = setup.provider_id ? `${setup.provider}:${setup.provider_id}` : setup.provider ?? setup.router ?? "unknown";
+  return `${setup.mode} · ${provider} · ${setup.model ?? "unconfigured"} · ${setup.base_url ?? "unconfigured"}${contextWindow}`;
 }
 
 export function endpointStatusLinesForDisplay(snapshot: EndpointSignalSnapshot, config: VllmAgentConfig, webDescription: string, rtk?: RtkStatus): string[] {
@@ -3978,11 +4332,11 @@ export function setupReviewLinesForDisplay(config: VllmAgentConfig, contentWidth
     "",
     `${fg256(244, "chat")} ${chat.mode}`,
   ];
-  appendReviewField(lines, "provider", chat.provider ?? chat.router ?? "unknown", contentWidth);
+  appendReviewField(lines, "provider", chat.provider_id ?? chat.provider ?? chat.router ?? "unknown", contentWidth);
   appendReviewField(lines, "model", chat.model ?? "unconfigured", contentWidth);
   appendReviewField(lines, "endpoint", chat.base_url ?? "unconfigured", contentWidth);
   appendReviewField(lines, "context", String(chat.context_window ?? config.context.context_window), contentWidth);
-  lines.push(`${fg256(244, "auth")} ${chat.api_key_ref ? "local vault" : "none"}`, "");
+  lines.push(`${fg256(244, "auth")} ${modelSetupAuthSummary(chat)}`, "");
 
   const web = config.web_search;
   lines.push(`${fg256(244, "web")} ${webSearchProviderLabel(web.provider)}`);
@@ -4121,6 +4475,23 @@ function webSearchModeSummary(web: VllmAgentConfig["web_search"]): string {
     return "zero-key fallback";
   }
   return web.api_key_ref ? "vault auth" : web.provider === "jina" ? "public/no auth" : "no auth";
+}
+
+function modelSetupAuthSummary(setup: ModelSetup): string {
+  if (setup.api_key_ref) {
+    return "local vault";
+  }
+  const provider = externalProviderById(setup.provider_id);
+  if (!provider) {
+    return "none";
+  }
+  if (provider.auth_type === "none") {
+    return "no auth";
+  }
+  if (provider.auth_type === "oauth_external") {
+    return "auto auth";
+  }
+  return "not stored";
 }
 
 function isEnvVarName(value: string): boolean {
@@ -4285,6 +4656,17 @@ function renderSetupOptionLine(label: string, description: string | undefined, a
   const name = active ? fg256(252, label) : fg256(248, label);
   const detail = description ? `  ${fg256(244, description)}` : "";
   return `${marker} ${name}${detail}`;
+}
+
+function renderProviderSetupOptionLine(option: ExternalProviderSetupOption, active: boolean): string {
+  const marker = active ? fg256(75, "›") : fg256(238, " ");
+  const nameColor = active ? 252 : 248;
+  const prefix = option.discovered
+    ? `${fg256(48, "●")} ${fg256(nameColor, "[discovered]")}`
+    : fg256(244, option.provider.auth_type === "none" ? "[open]" : "[key]");
+  const name = fg256(nameColor, option.provider.label);
+  const detail = option.description ? `  ${fg256(244, option.description)}` : "";
+  return `${marker} ${prefix} ${name}${detail}`;
 }
 
 function commandScore(name: string, description: string, query: string): number {

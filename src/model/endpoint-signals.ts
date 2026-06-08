@@ -1,12 +1,19 @@
 import type { EndpointSignalSnapshot, JsonObject, ModelSetup, ModelUsage, VllmAgentConfig } from "../types.js";
 import { endpointApiKey } from "../config/config.js";
+import {
+  externalProviderAuthHeaders,
+  externalProviderById,
+  externalProviderRequiresApiKey,
+  probeExternalProviderModels,
+} from "./providers.js";
 
 export function providerId(config: VllmAgentConfig): string {
   const setup = config.model_setup;
   if (setup.mode === "auto") {
     return `auto:${setup.router ?? "vllm-sr"}:${setup.base_url ?? "unconfigured"}`;
   }
-  return `${setup.provider ?? "vllm"}:${setup.profile ?? "openai_compatible"}:${setup.base_url ?? "unconfigured"}`;
+  const provider = setup.provider_id ?? setup.provider ?? "vllm";
+  return `${provider}:${setup.profile ?? "openai_compatible"}:${setup.base_url ?? "unconfigured"}`;
 }
 
 export function modelBaseUrl(setup: ModelSetup): string {
@@ -17,15 +24,9 @@ export function modelBaseUrl(setup: ModelSetup): string {
 }
 
 export function authHeaders(endpoint: { api_key?: string; api_key_ref?: string; headers?: Record<string, string> }): HeadersInit {
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    ...(endpoint.headers ?? {}),
-  };
+  const provider = externalProviderById(typeof (endpoint as { provider_id?: unknown }).provider_id === "string" ? (endpoint as { provider_id: string }).provider_id : undefined);
   const apiKey = endpointApiKey(endpoint);
-  if (apiKey) {
-    headers.authorization = `Bearer ${apiKey}`;
-  }
-  return headers;
+  return externalProviderAuthHeaders(provider, apiKey, endpoint.headers);
 }
 
 export function normalizeUsage(raw: unknown): ModelUsage | undefined {
@@ -108,8 +109,18 @@ export class EndpointSignals {
       snapshot.errors?.push("model_setup.base_url is not configured");
       return snapshot;
     }
-    if (setup.provider === "external" && !endpointApiKey(setup)) {
-      snapshot.errors?.push("external provider API key is missing from the local vault; run /setup and paste the key once");
+    const externalProvider = setup.provider === "external" ? externalProviderById(setup.provider_id) : undefined;
+    if (setup.provider === "external" && (!externalProvider || externalProviderRequiresApiKey(externalProvider)) && !endpointApiKey(setup)) {
+      snapshot.errors?.push(`${externalProvider?.label ?? "external provider"} API key is missing from the local vault; run /setup and paste the key once`);
+      return snapshot;
+    }
+    if (externalProvider) {
+      const probe = await probeExternalProviderModels(externalProvider, {
+        baseUrl: setup.base_url,
+        apiKey: endpointApiKey(setup),
+      });
+      snapshot.models = probe.models.map((id) => ({ id }));
+      snapshot.errors?.push(...probe.errors);
       return snapshot;
     }
     const base = modelBaseUrl(setup);

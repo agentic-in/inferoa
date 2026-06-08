@@ -9,7 +9,8 @@ export type PermissionMode = "ask" | "auto_approve" | "full_access" | "custom";
 export interface ModelSetup {
   mode: EndpointMode;
   provider?: ProviderKind;
-  profile?: "openai" | "anthropic" | "gemini" | "deepseek" | "openai_compatible";
+  provider_id?: string;
+  profile?: "openai" | "anthropic" | "gemini" | "deepseek" | "openai_compatible" | "openai_responses";
   router?: "vllm-sr";
   base_url?: string;
   model?: string;
