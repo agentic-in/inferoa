@@ -1,51 +1,139 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { JsonObject, OmniEndpointConfig, ToolResult } from "../types.js";
+import type { JsonObject, OmniCapabilityName, OmniEndpointConfig, OmniEndpointName, ToolResult } from "../types.js";
 import { endpointApiKey } from "../config/config.js";
 import { fail, ok, truncateText } from "../util/limit.js";
 import { delay, numberOrDefault, stringField } from "../util/types.js";
 import { resolveReadablePath } from "../util/fs.js";
 import type { ToolExecutionContext } from "./context.js";
 
-type OmniCapability =
-  | "vision"
-  | "image_generation"
-  | "video_understanding"
-  | "video_generation"
-  | "audio_understanding"
-  | "audio_generation";
-
 export async function visionUnderstanding(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
-  return await understanding("vision", args, context, "image_url");
+  return await understanding("vision", "vision", args, context, "image_url");
 }
 
 export async function videoUnderstanding(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
-  return await understanding("video_understanding", args, context, "video_url");
+  return await understanding("video_understanding", "video_understanding", args, context, "video_url");
 }
 
 export async function audioUnderstanding(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
-  return await understanding("audio_understanding", args, context, "audio_url");
+  return await understanding("audio_understanding", "audio_understanding", args, context, "audio_url");
 }
 
 export async function imageGeneration(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
-  return await generation("image_generation", "/images/generations", args, context);
+  const body = generationJsonBody(args, endpointModel("image_generation", context), ["prompt"]);
+  return await postManagedJsonOrMedia("image_generation", "image_generation", "/images/generations", body, context);
+}
+
+export async function imageEdit(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  const endpoint = endpointFor("image_edit", context);
+  if (!endpoint.ok) {
+    return endpoint.result;
+  }
+  const form = new FormData();
+  form.set("model", String(args.model ?? endpoint.config.model));
+  form.set("prompt", String(args.prompt));
+  appendOptionalFormFields(form, args, [
+    "n",
+    "size",
+    "response_format",
+    "output_format",
+    "background",
+    "output_compression",
+    "user",
+    "negative_prompt",
+    "num_inference_steps",
+    "guidance_scale",
+    "strength",
+    "true_cfg_scale",
+    "seed",
+    "generator_device",
+    "lora",
+    "layers",
+    "resolution",
+  ]);
+  for (const input of arrayOfStrings(args.images ?? args.image)) {
+    await appendImageEditInput(form, input, context);
+  }
+  if (typeof args.mask_image === "string") {
+    await appendFormInput(form, "mask_image", args.mask_image, context);
+  }
+  if (typeof args.reference_image === "string") {
+    await appendFormInput(form, "reference_image", args.reference_image, context);
+  }
+  const response = await postFormJson(endpoint.config, "/images/edits", form);
+  if (!response.ok) {
+    return fail("image_edit_failed", response.error);
+  }
+  return managedJsonResult("image_edit", endpoint.config.model, formFieldsPreview(form), response.json, context);
 }
 
 export async function videoGeneration(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  if (args.mode === "sync" || args.sync === true) {
+    return await videoGenerationSync(args, context);
+  }
   return await videoGenerationJob(args, context);
 }
 
 export async function audioGeneration(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
-  return await generation("audio_generation", "/audio/generations", args, context);
+  const body = generationJsonBody(args, endpointModel("audio_generation", context), ["input", "prompt"]);
+  if (body.input === undefined && body.prompt !== undefined) {
+    body.input = body.prompt;
+  }
+  if (body.audio_length === undefined && body.duration !== undefined) {
+    body.audio_length = body.duration;
+  }
+  delete body.prompt;
+  delete body.duration;
+  return await postManagedJsonOrMedia("audio_generation", "audio_generation", "/audio/generate", body, context);
+}
+
+export async function speechGeneration(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  const body = generationJsonBody(args, endpointModel("speech", context), ["input"]);
+  if (typeof args.ref_audio === "string") {
+    body.ref_audio = await normalizeInput(args.ref_audio, context);
+  }
+  return await postManagedJsonOrMedia("speech_generation", "speech", "/audio/speech", body, context);
+}
+
+export async function speechVoices(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  const endpoint = endpointFor("speech", context);
+  if (!endpoint.ok) {
+    return endpoint.result;
+  }
+  const response = await getJson(endpoint.config, "/audio/voices");
+  if (!response.ok) {
+    return fail("speech_voices_failed", response.error);
+  }
+  const voices = voicesFromResponse(response.json);
+  const resource =
+    JSON.stringify(response.json).length > 20_000
+      ? context.store.putResource(context.session_id, "omni.speech_voices", JSON.stringify(response.json, null, 2), {
+          capability: "speech_voices",
+          model: endpoint.config.model,
+          voice_count: voices.length,
+        }).uri
+      : undefined;
+  return {
+    ok: true,
+    summary: `speech_voices listed ${voices.length} voice(s)`,
+    data: {
+      capability: "speech_voices",
+      model: endpoint.config.model,
+      voices: voices as never,
+      resource_uri: resource,
+    },
+    resource_uri: resource,
+  };
 }
 
 async function understanding(
-  capability: OmniCapability,
+  capability: OmniCapabilityName,
+  endpointKey: OmniEndpointName,
   args: JsonObject,
   context: ToolExecutionContext,
   inputType: "image_url" | "video_url" | "audio_url",
 ): Promise<ToolResult> {
-  const endpoint = endpointFor(capability, context);
+  const endpoint = endpointFor(endpointKey, context);
   if (!endpoint.ok) {
     return endpoint.result;
   }
@@ -89,42 +177,78 @@ async function understanding(
   };
 }
 
-async function generation(
-  capability: OmniCapability,
-  apiPath: string,
-  args: JsonObject,
-  context: ToolExecutionContext,
-): Promise<ToolResult> {
-  const endpoint = endpointFor(capability, context);
-  if (!endpoint.ok) {
-    return endpoint.result;
-  }
+function generationJsonBody(args: JsonObject, model: string | undefined, promptKeys: string[]): JsonObject {
   const body: JsonObject = {
-    model: String(args.model ?? endpoint.config.model),
-    prompt: String(args.prompt),
+    model: String(args.model ?? model),
   };
-  for (const key of ["size", "seed", "duration", "voice"]) {
+  for (const key of promptKeys) {
+    if (args[key] !== undefined) {
+      body[key] = String(args[key]);
+      break;
+    }
+  }
+  for (const key of [
+    "n",
+    "size",
+    "seed",
+    "response_format",
+    "output_format",
+    "duration",
+    "audio_length",
+    "audio_start",
+    "negative_prompt",
+    "guidance_scale",
+    "true_cfg_scale",
+    "num_inference_steps",
+    "speed",
+    "stream_format",
+    "voice",
+    "instructions",
+    "task_type",
+    "language",
+    "ref_text",
+    "x_vector_only_mode",
+    "speaker_embedding",
+    "max_new_tokens",
+    "initial_codec_chunk_frames",
+    "extra_params",
+    "system_prompt",
+    "use_system_prompt",
+    "layers",
+    "generator_device",
+    "lora",
+    "vae_use_slicing",
+    "vae_use_tiling",
+  ]) {
     if (args[key] !== undefined) {
       body[key] = args[key] as never;
     }
   }
-  const response = await postJson(endpoint.config, apiPath, body);
+  if (body.audio_length === undefined && args.duration !== undefined) {
+    body.audio_length = args.duration as never;
+  }
+  return body;
+}
+
+async function postManagedJsonOrMedia(
+  capability: OmniCapabilityName,
+  endpointKey: OmniEndpointName,
+  apiPath: string,
+  body: JsonObject,
+  context: ToolExecutionContext,
+): Promise<ToolResult> {
+  const endpoint = endpointFor(endpointKey, context);
+  if (!endpoint.ok) {
+    return endpoint.result;
+  }
+  const response = await postJsonOrBytes(endpoint.config, apiPath, body);
   if (!response.ok) {
     return fail(`${capability}_failed`, response.error);
   }
-  const media = extractMedia(response.json);
-  const content = JSON.stringify({ capability, request: body, response: response.json }, null, 2);
-  const resource = context.store.putResource(context.session_id, `omni.${capability}`, content, {
-    capability,
-    model: endpoint.config.model,
-    media_count: media.length,
-  });
-  return ok(`${capability} completed with ${media.length} media item(s)`, {
-    capability,
-    model: endpoint.config.model,
-    media: media as never,
-    resource_uri: resource.uri,
-  });
+  if (response.bytes) {
+    return managedBytesResult(capability, endpoint.config.model, body, response.bytes, response.content_type, context, response.headers);
+  }
+  return managedJsonResult(capability, endpoint.config.model, body, response.json ?? {}, context);
 }
 
 async function videoGenerationJob(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -133,35 +257,14 @@ async function videoGenerationJob(args: JsonObject, context: ToolExecutionContex
     return endpoint.result;
   }
 
-  const fields: Record<string, string> = {
-    model: String(args.model ?? endpoint.config.model),
-    prompt: String(args.prompt),
-  };
-  for (const key of ["seed", "duration", "size", "width", "height", "num_frames", "fps"]) {
-    if (args[key] !== undefined) {
-      fields[key] = String(args[key]);
-    }
-  }
-
-  const submitted = await postForm(endpoint.config, "/videos", fields);
+  const form = videoForm(args, endpoint.config.model);
+  const submitted = await postFormJson(endpoint.config, "/videos", form);
   if (!submitted.ok) {
     return fail("video_generation_failed", submitted.error);
   }
   const jobId = stringField(submitted.json.id) ?? stringField(submitted.json.video_id) ?? stringField(submitted.json.job_id);
   if (!jobId) {
-    const media = extractMedia(submitted.json);
-    const resource = context.store.putResource(
-      context.session_id,
-      "omni.video_generation",
-      JSON.stringify({ capability: "video_generation", request: fields, response: submitted.json }, null, 2),
-      { capability: "video_generation", model: endpoint.config.model, media_count: media.length },
-    );
-    return ok(`video_generation completed with ${media.length} media item(s)`, {
-      capability: "video_generation",
-      model: endpoint.config.model,
-      media: media as never,
-      resource_uri: resource.uri,
-    });
+    return managedJsonResult("video_generation", endpoint.config.model, formFieldsPreview(form), submitted.json, context);
   }
 
   const deadline = Date.now() + numberOrDefault(args.timeout_ms, 180_000);
@@ -193,45 +296,83 @@ async function videoGenerationJob(args: JsonObject, context: ToolExecutionContex
   if (!content.ok) {
     return fail("video_generation_download_failed", content.error, { job_id: jobId, status: statusJson });
   }
-  const mediaResource = context.store.putResource(
-    context.session_id,
-    "omni.video_generation.media",
-    content.bytes.toString("base64"),
-    {
-      capability: "video_generation",
-      model: endpoint.config.model,
-      job_id: jobId,
-      content_type: content.content_type,
-      encoding: "base64",
-      bytes: content.bytes.length,
-    },
+  return managedBytesResult(
+    "video_generation",
+    endpoint.config.model,
+    { request: formFieldsPreview(form), job_id: jobId, status: statusJson },
+    content.bytes,
+    content.content_type,
+    context,
+    content.headers,
   );
-  const evidenceResource = context.store.putResource(
-    context.session_id,
-    "omni.video_generation",
-    JSON.stringify({ capability: "video_generation", request: fields, status: statusJson, media_resource: mediaResource.uri }, null, 2),
-    { capability: "video_generation", model: endpoint.config.model, job_id: jobId },
-  );
-  return ok("video_generation completed with 1 media item(s)", {
-    capability: "video_generation",
-    model: endpoint.config.model,
-    job_id: jobId,
-    media: [{ resource_uri: mediaResource.uri, content_type: content.content_type, bytes: content.bytes.length }] as never,
-    resource_uri: evidenceResource.uri,
-  });
 }
 
-function endpointFor(capability: OmniCapability, context: ToolExecutionContext):
+async function videoGenerationSync(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  const endpoint = endpointFor("video_generation", context);
+  if (!endpoint.ok) {
+    return endpoint.result;
+  }
+  const form = videoForm(args, endpoint.config.model);
+  const response = await postFormBytes(endpoint.config, "/videos/sync", form);
+  if (!response.ok) {
+    return fail("video_generation_failed", response.error);
+  }
+  return managedBytesResult("video_generation", endpoint.config.model, formFieldsPreview(form), response.bytes, response.content_type, context, response.headers);
+}
+
+function videoForm(args: JsonObject, model: string | undefined): FormData {
+  const form = new FormData();
+  form.set("model", String(args.model ?? model));
+  form.set("prompt", String(args.prompt));
+  if (args.duration !== undefined && args.seconds === undefined) {
+    form.set("seconds", String(args.duration));
+  }
+  appendOptionalFormFields(form, args, [
+    "seconds",
+    "size",
+    "user",
+    "width",
+    "height",
+    "num_frames",
+    "fps",
+    "num_inference_steps",
+    "guidance_scale",
+    "guidance_scale_2",
+    "boundary_ratio",
+    "flow_shift",
+    "true_cfg_scale",
+    "seed",
+    "negative_prompt",
+    "enable_frame_interpolation",
+    "frame_interpolation_exp",
+    "frame_interpolation_scale",
+    "frame_interpolation_model_path",
+    "lora",
+    "extra_params",
+    "image_reference",
+    "input_reference",
+  ]);
+  if (args.extra_params && typeof args.extra_params === "object") {
+    form.set("extra_params", JSON.stringify(args.extra_params));
+  }
+  return form;
+}
+
+function endpointModel(endpointKey: OmniEndpointName, context: ToolExecutionContext): string | undefined {
+  return context.config.omni.endpoints[endpointKey]?.model;
+}
+
+function endpointFor(endpointKey: OmniEndpointName, context: ToolExecutionContext):
   | { ok: true; config: OmniEndpointConfig }
   | { ok: false; result: ToolResult } {
   if (!context.config.omni.enabled) {
     return { ok: false, result: fail("omni_disabled", "Omni tools are not enabled in config.") };
   }
-  const config = context.config.omni.endpoints[capability];
+  const config = context.config.omni.endpoints[endpointKey];
   if (!config?.base_url || !config.model) {
     return {
       ok: false,
-      result: fail("omni_capability_unavailable", `Omni capability ${capability} is not configured with base_url and model.`),
+      result: fail("omni_capability_unavailable", `Omni endpoint ${endpointKey} is not configured with base_url and model.`),
     };
   }
   return { ok: true, config };
@@ -242,6 +383,21 @@ async function postJson(
   apiPath: string,
   body: JsonObject,
 ): Promise<{ ok: true; json: JsonObject } | { ok: false; error: string }> {
+  const response = await postJsonOrBytes(endpoint, apiPath, body);
+  if (!response.ok) {
+    return response;
+  }
+  if (response.json) {
+    return { ok: true, json: response.json };
+  }
+  return { ok: false, error: `Expected JSON response from ${apiPath}, got ${response.content_type}` };
+}
+
+async function postJsonOrBytes(
+  endpoint: OmniEndpointConfig,
+  apiPath: string,
+  body: JsonObject,
+): Promise<{ ok: true; json?: JsonObject; bytes?: Buffer; content_type: string; headers: JsonObject } | { ok: false; error: string }> {
   const base = endpoint.base_url?.replace(/\/$/, "");
   const apiKey = endpointApiKey(endpoint);
   const headers: Record<string, string> = {
@@ -257,27 +413,62 @@ async function postJson(
       headers,
       body: JSON.stringify(body),
     });
-    const text = await response.text();
-    if (!response.ok) {
-      return { ok: false, error: `${response.status}: ${text}` };
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    const responseHeaders = responseHeadersObject(response.headers);
+    if (contentType.includes("application/json")) {
+      const text = await response.text();
+      if (!response.ok) {
+        return { ok: false, error: `${response.status}: ${text}` };
+      }
+      return { ok: true, json: text ? (JSON.parse(text) as JsonObject) : {}, content_type: contentType, headers: responseHeaders };
     }
-    return { ok: true, json: text ? (JSON.parse(text) as JsonObject) : {} };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      return { ok: false, error: `${response.status}: ${bytes.toString("utf8")}` };
+    }
+    return { ok: true, bytes, content_type: contentType, headers: responseHeaders };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
+async function postFormJson(
+  endpoint: OmniEndpointConfig,
+  apiPath: string,
+  form: FormData,
+): Promise<{ ok: true; json: JsonObject } | { ok: false; error: string }> {
+  const response = await postForm(endpoint, apiPath, form);
+  if (!response.ok) {
+    return response;
+  }
+  if (!response.json) {
+    return { ok: false, error: `Expected JSON response from ${apiPath}, got ${response.content_type}` };
+  }
+  return { ok: true, json: response.json };
+}
+
+async function postFormBytes(
+  endpoint: OmniEndpointConfig,
+  apiPath: string,
+  form: FormData,
+): Promise<{ ok: true; bytes: Buffer; content_type: string; headers: JsonObject } | { ok: false; error: string }> {
+  const response = await postForm(endpoint, apiPath, form);
+  if (!response.ok) {
+    return response;
+  }
+  if (!response.bytes) {
+    return { ok: false, error: `Expected binary response from ${apiPath}, got ${response.content_type}` };
+  }
+  return { ok: true, bytes: response.bytes, content_type: response.content_type, headers: response.headers };
+}
+
 async function postForm(
   endpoint: OmniEndpointConfig,
   apiPath: string,
-  fields: Record<string, string>,
-): Promise<{ ok: true; json: JsonObject } | { ok: false; error: string }> {
+  form: FormData,
+): Promise<{ ok: true; json?: JsonObject; bytes?: Buffer; content_type: string; headers: JsonObject } | { ok: false; error: string }> {
   const base = endpoint.base_url?.replace(/\/$/, "");
   const apiKey = endpointApiKey(endpoint);
-  const form = new FormData();
-  for (const [key, value] of Object.entries(fields)) {
-    form.set(key, value);
-  }
   const headers: Record<string, string> = { ...(endpoint.headers ?? {}) };
   if (apiKey) {
     headers.authorization = `Bearer ${apiKey}`;
@@ -288,11 +479,20 @@ async function postForm(
       headers,
       body: form,
     });
-    const text = await response.text();
-    if (!response.ok) {
-      return { ok: false, error: `${response.status}: ${text}` };
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    const responseHeaders = responseHeadersObject(response.headers);
+    if (contentType.includes("application/json")) {
+      const text = await response.text();
+      if (!response.ok) {
+        return { ok: false, error: `${response.status}: ${text}` };
+      }
+      return { ok: true, json: text ? (JSON.parse(text) as JsonObject) : {}, content_type: contentType, headers: responseHeaders };
     }
-    return { ok: true, json: text ? (JSON.parse(text) as JsonObject) : {} };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      return { ok: false, error: `${response.status}: ${bytes.toString("utf8")}` };
+    }
+    return { ok: true, bytes, content_type: contentType, headers: responseHeaders };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -317,7 +517,7 @@ async function getJson(
 async function getBytes(
   endpoint: OmniEndpointConfig,
   apiPath: string,
-): Promise<{ ok: true; bytes: Buffer; content_type: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; bytes: Buffer; content_type: string; headers: JsonObject } | { ok: false; error: string }> {
   const base = endpoint.base_url?.replace(/\/$/, "");
   const apiKey = endpointApiKey(endpoint);
   const headers: Record<string, string> = { ...(endpoint.headers ?? {}) };
@@ -334,6 +534,7 @@ async function getBytes(
       ok: true,
       bytes,
       content_type: response.headers.get("content-type") ?? "application/octet-stream",
+      headers: responseHeadersObject(response.headers),
     };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -361,6 +562,126 @@ async function get(
   }
 }
 
+function managedJsonResult(
+  capability: OmniCapabilityName,
+  model: string | undefined,
+  request: JsonObject,
+  response: JsonObject,
+  context: ToolExecutionContext,
+): ToolResult {
+  const media = extractMedia(response);
+  const content = JSON.stringify({ capability, request, response }, null, 2);
+  const resource = context.store.putResource(context.session_id, `omni.${capability}`, content, {
+    capability,
+    model,
+    media_count: media.length,
+    content_type: "application/json",
+  });
+  return {
+    ok: true,
+    summary: `${capability} completed with ${media.length} media item(s); output stored as ${resource.uri}`,
+    data: {
+      capability,
+      model,
+      media_count: media.length,
+      resources: [resourceSummary(resource.uri, "application/json", Buffer.byteLength(content))] as never,
+    },
+    resource_uri: resource.uri,
+  };
+}
+
+function managedBytesResult(
+  capability: OmniCapabilityName,
+  model: string | undefined,
+  request: JsonObject,
+  bytes: Buffer,
+  contentType: string,
+  context: ToolExecutionContext,
+  headers: JsonObject = {},
+): ToolResult {
+  const mediaResource = context.store.putResource(context.session_id, `omni.${capability}.media`, bytes.toString("base64"), {
+    capability,
+    model,
+    content_type: contentType,
+    encoding: "base64",
+    bytes: bytes.length,
+    headers,
+  });
+  const evidenceContent = JSON.stringify({ capability, request, media_resource: mediaResource.uri, content_type: contentType, bytes: bytes.length, headers }, null, 2);
+  const evidenceResource = context.store.putResource(context.session_id, `omni.${capability}`, evidenceContent, {
+    capability,
+    model,
+    media_resource: mediaResource.uri,
+    content_type: "application/json",
+    bytes: bytes.length,
+  });
+  return {
+    ok: true,
+    summary: `${capability} completed with 1 media item; output stored as ${mediaResource.uri}`,
+    data: {
+      capability,
+      model,
+      media_count: 1,
+      resources: [
+        resourceSummary(mediaResource.uri, contentType, bytes.length),
+        resourceSummary(evidenceResource.uri, "application/json", Buffer.byteLength(evidenceContent)),
+      ] as never,
+    },
+    resource_uri: evidenceResource.uri,
+  };
+}
+
+function resourceSummary(uri: string, contentType: string, bytes: number): JsonObject {
+  return { uri, content_type: contentType, bytes };
+}
+
+function appendOptionalFormFields(form: FormData, args: JsonObject, keys: string[]): void {
+  for (const key of keys) {
+    if (args[key] !== undefined) {
+      const value = args[key];
+      form.set(key, typeof value === "object" && value !== null ? JSON.stringify(value) : String(value));
+    }
+  }
+}
+
+async function appendImageEditInput(form: FormData, input: string, context: ToolExecutionContext): Promise<void> {
+  if (/^https?:/.test(input)) {
+    form.append("url", input);
+    return;
+  }
+  await appendFormInput(form, "image", input, context);
+}
+
+async function appendFormInput(form: FormData, key: string, input: string, context: ToolExecutionContext): Promise<void> {
+  if (/^https?:/.test(input)) {
+    form.set(key, input);
+    return;
+  }
+  const file = input.startsWith("data:") ? await dataUriFile(input, key) : await localFile(input, context);
+  const blobBytes = new Uint8Array(file.bytes.length);
+  blobBytes.set(file.bytes);
+  form.set(key, new Blob([blobBytes], { type: file.contentType }), file.name);
+}
+
+async function localFile(input: string, context: ToolExecutionContext): Promise<{ bytes: Buffer; contentType: string; name: string }> {
+  const file = input.startsWith("file:") ? new URL(input) : resolveInside(context.workspace.root, input);
+  const filePath = file instanceof URL ? file : file;
+  const bytes = await fs.readFile(filePath);
+  const name = path.basename(filePath.toString());
+  return { bytes, contentType: mimeType(filePath.toString()), name };
+}
+
+async function dataUriFile(input: string, fallbackName: string): Promise<{ bytes: Buffer; contentType: string; name: string }> {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(input);
+  if (!match) {
+    throw new Error("Invalid data URI.");
+  }
+  const contentType = match[1] || "application/octet-stream";
+  const data = match[3] ?? "";
+  const bytes = match[2] ? Buffer.from(data, "base64") : Buffer.from(decodeURIComponent(data), "utf8");
+  return { bytes, contentType, name: `${fallbackName}.${extensionForMime(contentType)}` };
+}
+
 async function normalizeInput(input: string, context: ToolExecutionContext): Promise<string> {
   if (/^(https?:|data:)/.test(input)) {
     return input;
@@ -380,7 +701,17 @@ function mimeType(file: string): string {
   if (ext === ".webm") return "video/webm";
   if (ext === ".wav") return "audio/wav";
   if (ext === ".mp3") return "audio/mpeg";
+  if (ext === ".flac") return "audio/flac";
   return "application/octet-stream";
+}
+
+function extensionForMime(contentType: string): string {
+  if (contentType.includes("png")) return "png";
+  if (contentType.includes("jpeg")) return "jpg";
+  if (contentType.includes("webp")) return "webp";
+  if (contentType.includes("wav")) return "wav";
+  if (contentType.includes("mpeg")) return "mp3";
+  return "bin";
 }
 
 function extractChatText(json: JsonObject): string {
@@ -412,4 +743,49 @@ function extractMedia(json: JsonObject): JsonObject[] {
 function statusText(json: JsonObject): string {
   const status = stringField(json.status) ?? stringField(json.state) ?? stringField((json.data as JsonObject | undefined)?.status);
   return (status ?? "queued").toLowerCase();
+}
+
+function voicesFromResponse(json: JsonObject): string[] {
+  const voices = json.voices ?? json.data ?? json.items;
+  if (Array.isArray(voices)) {
+    return voices.map((voice) => (typeof voice === "string" ? voice : stringField((voice as JsonObject).name) ?? stringField((voice as JsonObject).id) ?? JSON.stringify(voice)));
+  }
+  if (voices && typeof voices === "object") {
+    return Object.keys(voices);
+  }
+  return [];
+}
+
+function arrayOfStrings(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(String);
+  }
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return [String(value)];
+}
+
+function formFieldsPreview(form: FormData): JsonObject {
+  const preview: JsonObject = {};
+  const entries = (form as unknown as { entries(): Iterable<[string, FormDataEntryValue]> }).entries();
+  for (const [key, value] of entries) {
+    if (typeof value === "string") {
+      preview[key] = value;
+    } else {
+      preview[key] = { file: value.name, type: value.type, size: value.size };
+    }
+  }
+  return preview;
+}
+
+function responseHeadersObject(headers: Headers): JsonObject {
+  const out: JsonObject = {};
+  for (const key of ["x-request-id", "x-model", "x-inference-time-s", "content-type"]) {
+    const value = headers.get(key);
+    if (value) {
+      out[key] = value;
+    }
+  }
+  return out;
 }

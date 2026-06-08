@@ -13,7 +13,7 @@ test("configured tool list excludes unconfigured Omni capabilities from chat inj
   const config = structuredClone(DEFAULT_CONFIG);
   const names = configuredToolDefinitions(config).map((tool) => tool.name);
 
-  assert.doesNotMatch(names.join("\n"), /vision_understanding|image_generation|video_generation|audio_generation|audio_understanding|video_understanding/);
+  assert.doesNotMatch(names.join("\n"), /vision_understanding|image_generation|image_edit|video_generation|audio_generation|speech_generation|speech_voices|audio_understanding|video_understanding/);
   assert.ok(names.includes("clarify"));
   assert.ok(names.includes("read_file"));
 
@@ -21,7 +21,7 @@ test("configured tool list excludes unconfigured Omni capabilities from chat inj
   config.omni.endpoints.vision = { base_url: "http://localhost:8000/v1", model: "vision-model" };
   const configuredNames = configuredToolDefinitions(config).map((tool) => tool.name);
   assert.ok(configuredNames.includes("vision_understanding"));
-  assert.doesNotMatch(configuredNames.join("\n"), /image_generation|video_generation|audio_generation|audio_understanding|video_understanding/);
+  assert.doesNotMatch(configuredNames.join("\n"), /image_generation|image_edit|video_generation|audio_generation|speech_generation|speech_voices|audio_understanding|video_understanding/);
 });
 
 test("ToolRegistry list follows configured tool availability", async () => {
@@ -37,6 +37,11 @@ test("ToolRegistry list follows configured tool availability", async () => {
     config.omni.enabled = true;
     config.omni.endpoints.image_generation = { base_url: "http://localhost:8000/v1", model: "image-model" };
     assert.equal(new ToolRegistry(config, workspace, store).list().some((tool) => tool.name === "image_generation"), true);
+
+    config.omni.endpoints.speech = { base_url: "http://localhost:8000/v1", model: "speech-model" };
+    const speechTools = new ToolRegistry(config, workspace, store).list().map((tool) => tool.name);
+    assert.equal(speechTools.includes("speech_generation"), true);
+    assert.equal(speechTools.includes("speech_voices"), true);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

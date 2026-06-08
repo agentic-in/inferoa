@@ -15,6 +15,18 @@ import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 function config(baseUrl: string): VllmAgentConfig {
   const next = structuredClone(DEFAULT_CONFIG);
   next.omni.enabled = true;
+  next.omni.endpoints.audio_generation = {
+    base_url: baseUrl,
+    model: "stable-audio",
+  };
+  next.omni.endpoints.image_edit = {
+    base_url: baseUrl,
+    model: "image-edit-model",
+  };
+  next.omni.endpoints.speech = {
+    base_url: baseUrl,
+    model: "qwen3-tts",
+  };
   next.omni.endpoints.video_generation = {
     base_url: baseUrl,
     model: "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
@@ -76,13 +88,106 @@ test("video_generation follows the vLLM-Omni async video job lifecycle", async (
     );
 
     assert.equal(result.ok, true);
-    assert.equal(result.data?.job_id, "vid_1");
     assert.equal(polls, 2);
-    const media = result.data?.media as Array<{ resource_uri?: string; content_type?: string; bytes?: number }>;
-    assert.equal(media[0]?.content_type, "video/mp4");
-    assert.equal(media[0]?.bytes, Buffer.byteLength("fake-video"));
-    const stored = store.readResource(media[0]!.resource_uri!);
+    assert.equal(result.data?.media_count, 1);
+    const resources = result.data?.resources as Array<{ uri?: string; content_type?: string; bytes?: number }>;
+    assert.equal(resources[0]?.content_type, "video/mp4");
+    assert.equal(resources[0]?.bytes, Buffer.byteLength("fake-video"));
+    const stored = store.readResource(resources[0]!.uri!);
     assert.equal(stored?.content, Buffer.from("fake-video").toString("base64"));
+    assert.equal(store.readResource(result.resource_uri!)?.metadata.media_resource, resources[0]!.uri);
+  } finally {
+    store.close();
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("generation tools store audio, speech, image edit, and sync video results as managed resources", async () => {
+  const seen: Array<{ method?: string; url?: string; body?: string; contentType?: string }> = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      seen.push({ method: req.method, url: req.url, body, contentType: req.headers["content-type"] });
+      if (req.method === "POST" && req.url === "/v1/audio/generate") {
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from("fake-audio"));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/audio/speech") {
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from("fake-speech"));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/v1/audio/voices") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ voices: ["vivian", "ryan"] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/images/edits") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: "ZmFrZS1pbWFnZQ==" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/videos/sync") {
+        res.writeHead(200, { "content-type": "video/mp4", "x-model": "video-model" });
+        res.end(Buffer.from("fake-sync-video"));
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-omni-tools-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_omni_tools", root: dir, alias: "omni-tools" };
+    const session = store.createSession(workspace, "omni-tools");
+    const registry = new ToolRegistry(config(baseUrl), workspace, store);
+
+    const audio = await registry.call(
+      { id: "audio", name: "audio_generation", arguments: { input: "rain on glass", response_format: "wav" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(audio.ok, true);
+    assert.match(seen.find((entry) => entry.url === "/v1/audio/generate")?.body ?? "", /"input":"rain on glass"/);
+    assert.equal(store.readResource((audio.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-audio").toString("base64"));
+
+    const speech = await registry.call(
+      { id: "speech", name: "speech_generation", arguments: { input: "hello", voice: "vivian" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(speech.ok, true);
+    assert.equal(store.readResource((speech.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-speech").toString("base64"));
+
+    const voices = await registry.call(
+      { id: "voices", name: "speech_voices", arguments: {} },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.deepEqual(voices.data?.voices, ["vivian", "ryan"]);
+
+    const imageEdit = await registry.call(
+      { id: "image-edit", name: "image_edit", arguments: { prompt: "make it brighter", images: ["https://example.test/image.png"] } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(imageEdit.ok, true);
+    assert.equal(imageEdit.data?.media_count, 1);
+    assert.match(seen.find((entry) => entry.url === "/v1/images/edits")?.body ?? "", /make it brighter/);
+
+    const video = await registry.call(
+      { id: "video-sync", name: "video_generation", arguments: { prompt: "short clip", mode: "sync", seconds: "1", extra_params: { scheduler: "fast" } } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(video.ok, true);
+    assert.equal(store.readResource((video.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-sync-video").toString("base64"));
+    assert.match(seen.find((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /scheduler/);
   } finally {
     store.close();
     server.close();
