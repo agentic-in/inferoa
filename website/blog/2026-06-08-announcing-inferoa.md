@@ -1,6 +1,7 @@
 ---
 slug: announcing-inferoa
 title: "Inferoa: Inference-native Tokenmaxxing Agent Harness"
+title_meta: "Inferoa: Inference-native Tokenmaxxing Agent Harness"
 description: "Inferoa is an Inference-native Tokenmaxxing Agent Harness for long-horizon coding work across prefix-cache discipline, context optimization, routing, and high-throughput model serving."
 image: /img/inferoa-line-hero.png
 authors: []
@@ -118,28 +119,42 @@ model-selection cost pressure.
 ## Proof Of Value
 
 The value story is not one benchmark score. It is whether the tokenmaxxing path
-stays stable, measurable, and cheaper as the work gets longer.
+stays stable, measurable, and cheaper as the horizon grows. The eval is split
+into measured stress runs and calibrated projections: measured runs check
+invariants and continuity; projections ask what happens if the measured shape is
+carried to 1k-10k loops.
 
-Key results from the long-horizon stress suite:
+Key results:
 
-- **Stable prefixes**: the longest simulated run completed **64 tool loops**
-  with **one prompt epoch, one tool schema hash, and one cache salt**.
-- **Provider cache evidence**: repeated stable-prefix requests reported
-  **99.2% cached prompt tokens** after warmup.
-- **Bounded prompt path**: a **3.48M prompt-token** raw transcript baseline fell
-  to **987.6K prompt tokens**, then **507.1K input-token-equivalent tokens**
-  after cache-adjusted prefill work.
-- **Independent context savings**:
+- **Prefix stability across turns**: measured loop profiles kept **one prompt
+  epoch, one tool schema hash, and one cache salt** while cache reuse improved
+  as the session warmed. The multi-turn profile reached **44.7%** steady-state
+  cache reuse, and repeated stable-prefix provider probes reported **99.2%**
+  cached prompt tokens after warmup.
+- **Compression continuity**: a **256-turn measured run** forced compression
+  every 8 turns, for **32 compression cycles**. Continuity markers and archive
+  references survived **100%** of post-compression turns, and the interactive
+  path recovered **31.8%** steady cache reuse after compression.
+- **Long-horizon projection**: using the measured tail slope, a **1k-loop**
+  reference projects **97.7%** lower input-token-equivalent work than a raw
+  transcript baseline; the **10k-loop** projection reaches **98.6%**. The 10k
+  reference is a projection, not a claim that we ran 10,001 live model requests.
+- **Independent optimization surfaces**:
   [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph)-style
-  symbol/range context saved **80.8%** and
+  symbol/range context saved **80.8%** of inspected context,
   [RTK](https://github.com/rtk-ai/rtk) command records saved **61.4%** of
-  command-token footprint.
+  command-token footprint, and routing projections lifted the DeepSeek-priced
+  same-budget reference from **39.6%** single-model accuracy to **91.0%**
+  oracle-routed accuracy.
+
+![Inferoa compression continuity](/img/experiments/inferoa-compression-continuity.svg)
 
 ![Inferoa optimization surfaces](/img/experiments/inferoa-optimization-surfaces.svg)
 
-The exact numbers will move with workload and pricing. The direction is the
-important part: long-horizon agents need a harness that protects stability and
-uses every inference surface available.
+The exact numbers will move with workload, model pricing, and local RTK command
+corpus. The direction is the important part: long-horizon agents need a harness
+that protects stability, preserves continuity through compression, and uses
+every inference surface available.
 
 ## Built With The vLLM Ecosystem
 
