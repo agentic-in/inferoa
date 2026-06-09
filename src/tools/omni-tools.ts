@@ -6,6 +6,7 @@ import { fail, ok, truncateText } from "../util/limit.js";
 import { delay, numberOrDefault, stringField } from "../util/types.js";
 import { resolveReadablePath } from "../util/fs.js";
 import type { ToolExecutionContext } from "./context.js";
+import { dataUriToBuffer } from "./resource-resolver.js";
 
 export async function visionUnderstanding(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   return await understanding("vision", "vision", args, context, "image_url");
@@ -569,24 +570,53 @@ function managedJsonResult(
   response: JsonObject,
   context: ToolExecutionContext,
 ): ToolResult {
-  const media = extractMedia(response);
-  const content = JSON.stringify({ capability, request, response }, null, 2);
-  const resource = context.store.putResource(context.session_id, `omni.${capability}`, content, {
+  const mediaItems = extractEmbeddedMedia(response, request);
+  const mediaResources = mediaItems.map((item, index) =>
+    context.store.putResource(context.session_id, `omni.${capability}.media`, item.bytes.toString("base64"), {
+      capability,
+      model,
+      content_type: item.contentType,
+      encoding: "base64",
+      bytes: item.bytes.length,
+      media_index: index,
+      revised_prompt: item.revisedPrompt,
+    }),
+  );
+  const mediaResourceUris = mediaResources.map((resource) => resource.uri);
+  const content = JSON.stringify(
+    {
+      capability,
+      request,
+      response,
+      primary_media_resource: mediaResourceUris[0],
+      media_resources: mediaResourceUris,
+    },
+    null,
+    2,
+  );
+  const evidenceResource = context.store.putResource(context.session_id, `omni.${capability}`, content, {
     capability,
     model,
-    media_count: media.length,
+    media_count: mediaResources.length,
+    primary_media_resource: mediaResourceUris[0],
+    media_resources: mediaResourceUris as never,
     content_type: "application/json",
   });
+  const resources = [
+    ...mediaResources.map((resource, index) => resourceSummary(resource.uri, mediaItems[index]?.contentType ?? "application/octet-stream", mediaItems[index]?.bytes.length ?? 0)),
+    resourceSummary(evidenceResource.uri, "application/json", Buffer.byteLength(content)),
+  ];
+  const outputResource = mediaResources[0]?.uri ?? evidenceResource.uri;
   return {
     ok: true,
-    summary: `${capability} completed with ${media.length} media item(s); output stored as ${resource.uri}`,
+    summary: `${capability} completed with ${mediaResources.length} media item(s); output stored as ${outputResource}`,
     data: {
       capability,
       model,
-      media_count: media.length,
-      resources: [resourceSummary(resource.uri, "application/json", Buffer.byteLength(content))] as never,
+      media_count: mediaResources.length,
+      resources: resources as never,
     },
-    resource_uri: resource.uri,
+    resource_uri: evidenceResource.uri,
   };
 }
 
@@ -671,14 +701,7 @@ async function localFile(input: string, context: ToolExecutionContext): Promise<
 }
 
 async function dataUriFile(input: string, fallbackName: string): Promise<{ bytes: Buffer; contentType: string; name: string }> {
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(input);
-  if (!match) {
-    throw new Error("Invalid data URI.");
-  }
-  const contentType = match[1] || "application/octet-stream";
-  const data = match[3] ?? "";
-  const bytes = match[2] ? Buffer.from(data, "base64") : Buffer.from(decodeURIComponent(data), "utf8");
-  return { bytes, contentType, name: `${fallbackName}.${extensionForMime(contentType)}` };
+  return dataUriToBuffer(input, fallbackName);
 }
 
 async function normalizeInput(input: string, context: ToolExecutionContext): Promise<string> {
@@ -704,15 +727,6 @@ function mimeType(file: string): string {
   return "application/octet-stream";
 }
 
-function extensionForMime(contentType: string): string {
-  if (contentType.includes("png")) return "png";
-  if (contentType.includes("jpeg")) return "jpg";
-  if (contentType.includes("webp")) return "webp";
-  if (contentType.includes("wav")) return "wav";
-  if (contentType.includes("mpeg")) return "mp3";
-  return "bin";
-}
-
 function extractChatText(json: JsonObject): string {
   const choices = json.choices as JsonObject[] | undefined;
   const message = choices?.[0]?.message as JsonObject | undefined;
@@ -723,20 +737,37 @@ function extractChatText(json: JsonObject): string {
   return JSON.stringify(json);
 }
 
-function extractMedia(json: JsonObject): JsonObject[] {
+interface EmbeddedMediaItem {
+  bytes: Buffer;
+  contentType: string;
+  revisedPrompt?: string;
+}
+
+function extractEmbeddedMedia(json: JsonObject, request: JsonObject): EmbeddedMediaItem[] {
   const data = json.data as JsonObject[] | undefined;
-  if (Array.isArray(data)) {
-    return data.map((item) => ({
-      url: item.url,
-      b64_json: typeof item.b64_json === "string" ? `[base64:${item.b64_json.length} chars]` : undefined,
-      revised_prompt: item.revised_prompt,
-    }));
+  if (!Array.isArray(data)) {
+    return [];
   }
-  const output = json.output as JsonObject[] | undefined;
-  if (Array.isArray(output)) {
-    return output;
-  }
-  return [];
+  return data
+    .map((item): EmbeddedMediaItem | undefined => {
+      if (typeof item.b64_json !== "string" || !item.b64_json) {
+        return undefined;
+      }
+      return {
+        bytes: Buffer.from(item.b64_json, "base64"),
+        contentType: imageContentTypeFromRequest(request),
+        revisedPrompt: typeof item.revised_prompt === "string" ? item.revised_prompt : undefined,
+      };
+    })
+    .filter((item): item is EmbeddedMediaItem => Boolean(item));
+}
+
+function imageContentTypeFromRequest(request: JsonObject): string {
+  const format = typeof request.output_format === "string" ? request.output_format : typeof request.response_format === "string" ? request.response_format : "png";
+  if (format === "jpeg" || format === "jpg") return "image/jpeg";
+  if (format === "webp") return "image/webp";
+  if (format === "gif") return "image/gif";
+  return "image/png";
 }
 
 function statusText(json: JsonObject): string {

@@ -2,13 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { JsonObject, ToolResult } from "../types.js";
-import type { ResourceRecord } from "../session/store.js";
 import { resolveInside, resolveReadablePath, resolveWritablePath, runSmallCommand, toPosixPath } from "../util/fs.js";
 import { clampLimit, DEFAULT_LIST_LIMIT, fail, ok, truncateText } from "../util/limit.js";
 import type { ToolExecutionContext } from "./context.js";
 import { decodeEscapedTextArgument, textArgumentCandidates } from "./text-args.js";
 import { workspaceExternalPathsAllowed } from "./permissions.js";
 import { runRtkAwareShellCommand, type RtkShellCommandResult } from "../rtk/command.js";
+import { listResourceSummaries, resolveResourceReference, resourceRecordSummary } from "./resource-resolver.js";
 
 export async function listDir(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   try {
@@ -64,22 +64,22 @@ export async function readResource(args: JsonObject, context: ToolExecutionConte
     const resources = listResourceSummaries(context);
     return ok(`Listed ${resources.length} resources`, { resources: resources as never });
   }
-  const resolved = resolveResource(uri, context);
-  if (resolved.ambiguous) {
+  const resolved = resolveResourceReference(uri, context);
+  if (!resolved.ok && resolved.failure.code === "resource_uri_ambiguous") {
     return fail("resource_uri_ambiguous", `Resource URI is ambiguous: ${uri}`, {
       uri,
       hint: "Use the full resource URI from available_resources.",
-      available_resources: resolved.ambiguous.map(resourceSummary) as never,
+      available_resources: (resolved.failure.ambiguous ?? []).map(resourceRecordSummary) as never,
     });
   }
-  const resource = resolved.resource;
-  if (!resource) {
+  if (!resolved.ok) {
     return fail("resource_not_found", `Resource not found: ${uri}`, {
       uri,
       hint: "Use read_resource with uri='list' to discover resources, or pass the full resource:// URI.",
       available_resources: listResourceSummaries(context) as never,
     });
   }
+  const resource = resolved.resource;
   const lines = resource.content.split(/\r?\n/);
   const page = Number(args.page ?? 1);
   const start = Math.max(1, page);
@@ -502,36 +502,6 @@ export function simpleUnifiedDiff(rel: string, oldText: string, newText: string,
     ...oldLines.map((line) => `-${line}`),
     ...newLines.map((line) => `+${line}`),
   ].join("\n");
-}
-
-function resolveResource(uri: string, context: ToolExecutionContext): { resource?: ResourceRecord; ambiguous?: ResourceRecord[] } {
-  const exact = context.store.readResource(uri);
-  if (exact) {
-    return { resource: exact };
-  }
-  const resources = context.store.listResources(context.session_id, 50);
-  const matches = resources.filter((resource) => resource.uri === uri || resource.uri.endsWith(uri) || resource.uri.includes(uri));
-  if (matches.length === 1) {
-    return { resource: matches[0] };
-  }
-  if (matches.length > 1) {
-    return { ambiguous: matches };
-  }
-  return {};
-}
-
-function listResourceSummaries(context: ToolExecutionContext): JsonObject[] {
-  return context.store.listResources(context.session_id, 20).map(resourceSummary);
-}
-
-function resourceSummary(resource: ResourceRecord): JsonObject {
-  return {
-    uri: resource.uri,
-    kind: resource.kind,
-    created_at: resource.created_at,
-    bytes: Buffer.byteLength(resource.content),
-    metadata: resource.metadata,
-  };
 }
 
 function findOccurrence(

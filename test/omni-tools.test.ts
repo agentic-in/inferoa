@@ -111,9 +111,14 @@ test("vision understanding and image generation use endpoint-backed requests and
     assert.equal(image.data?.media_count, 1);
     assert.equal(Object.hasOwn(image.data ?? {}, "media"), false);
     assert.deepEqual(imageBody, { model: "image-model", prompt: "tiny fixture", size: "256x256", seed: 7 });
+    const imageResources = image.data?.resources as Array<{ uri: string; content_type: string; bytes: number }>;
+    assert.equal(imageResources[0]?.content_type, "image/png");
+    assert.equal(store.readResource(imageResources[0]!.uri)?.content, Buffer.from("fake-image").toString("base64"));
     const stored = store.readResource(image.resource_uri!);
     assert.match(stored?.content ?? "", /ZmFrZS1pbWFnZQ==/);
     assert.equal(stored?.metadata.media_count, 1);
+    assert.equal(stored?.metadata.primary_media_resource, imageResources[0]?.uri);
+    assert.deepEqual(stored?.metadata.media_resources, [imageResources[0]?.uri]);
   } finally {
     store.close();
     server.close();
@@ -256,6 +261,10 @@ test("generation tools store audio, speech, image edit, and sync video results a
     );
     assert.equal(imageEdit.ok, true);
     assert.equal(imageEdit.data?.media_count, 1);
+    const imageEditResources = imageEdit.data?.resources as Array<{ uri: string; content_type: string }>;
+    assert.equal(imageEditResources[0]?.content_type, "image/png");
+    assert.equal(store.readResource(imageEditResources[0]!.uri)?.content, Buffer.from("fake-image").toString("base64"));
+    assert.equal(store.readResource(imageEdit.resource_uri!)?.metadata.primary_media_resource, imageEditResources[0]?.uri);
     assert.match(seen.find((entry) => entry.url === "/v1/images/edits")?.body ?? "", /make it brighter/);
 
     const video = await registry.call(
