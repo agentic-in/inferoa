@@ -21,6 +21,7 @@ export interface ToolRenderOptions {
 }
 
 const COMPACT_TOOL_FOLD_THRESHOLD = 5;
+const HIDDEN_FAILED_TOOL_TRACE_TOOLS = new Set(["read_file", "read_resource", "write_file"]);
 const COMPACT_SUCCESS_TOOLS = new Set([
   "list_dir",
   "glob",
@@ -40,7 +41,7 @@ const COMPACT_SUCCESS_TOOLS = new Set([
 ]);
 
 export function renderToolCards(events: SessionEvent[], store: SessionStore, options: ToolRenderOptions = {}): string[] {
-  const groups = groupToolEvents(events);
+  const groups = groupToolEvents(events).filter((group) => !shouldHideFailedToolTrace(group));
   const rendered = groups.map((group) => {
     const lines = renderToolGroup(group, store);
     return { group, lines, compact: isCompactToolGroup(group, lines) };
@@ -213,6 +214,10 @@ function renderToolBody(group: ToolEventGroup, store: SessionStore): string[] {
 
 function isCompactToolGroup(group: ToolEventGroup, lines: string[]): boolean {
   return group.result?.ok === true && lines.length === 1 && COMPACT_SUCCESS_TOOLS.has(group.name);
+}
+
+function shouldHideFailedToolTrace(group: ToolEventGroup): boolean {
+  return group.result?.ok === false && HIDDEN_FAILED_TOOL_TRACE_TOOLS.has(group.name);
 }
 
 function shouldExpandToolGroup(group: ToolEventGroup, body: string[]): boolean {

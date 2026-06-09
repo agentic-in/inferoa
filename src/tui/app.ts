@@ -4163,6 +4163,9 @@ export class TuiApp {
       return undefined;
     }
     const lines = renderToolCards(events, this.app.store, { collapseCompact: false });
+    if (!lines.length) {
+      return undefined;
+    }
     return `${leadingGap ? "\n" : ""}${lines.join("\n")}\n`;
   }
 
@@ -4178,6 +4181,9 @@ export class TuiApp {
       return undefined;
     }
     const lines = renderToolCards(events, this.app.store, { collapseCompact: this.#toolTraceMode === "compact" });
+    if (!lines.length) {
+      return undefined;
+    }
     return `${leadingGap ? "\n" : ""}${lines.join("\n")}\n`;
   }
 
