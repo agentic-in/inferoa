@@ -83,6 +83,7 @@ import { withConversationGap } from "./transcript-spacing.js";
 import { MarkdownStreamRenderer } from "./markdown.js";
 import { renderHomeFrame } from "./home.js";
 import { applyTextInputToken, createTextInputState, renderTextInputDisplay } from "./text-input.js";
+import { isPathListInput } from "../util/path-input.js";
 import {
   backspaceComposer,
   adjustComposerCompactRanges,
@@ -291,6 +292,10 @@ export class TuiApp {
         } catch (error) {
           this.handleViewError(error);
         }
+        continue;
+      }
+      if (isPathListInput(text)) {
+        this.enqueuePrompt(text);
         continue;
       }
       const parsed = parseSlashCommand(text);

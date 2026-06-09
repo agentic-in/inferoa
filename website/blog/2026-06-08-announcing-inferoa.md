@@ -1,10 +1,10 @@
 ---
 slug: announcing-inferoa
 title: "Inferoa: Inference-native Tokenmaxxing Agent Harness"
-description: "Inferoa is an Inference-native Tokenmaxxing Agent Harness for long-horizon coding work across prefix-cache discipline, context optimization, routing, and self-hosted model serving."
+description: "Inferoa is an Inference-native Tokenmaxxing Agent Harness for long-horizon coding work across prefix-cache discipline, context optimization, routing, and high-throughput model serving."
 image: /img/inferoa-line-hero.png
 authors: []
-tags: [inferoa, agents, inference, vllm]
+tags: [inferoa, tokenmaxxing, agents, inference, vllm]
 ---
 
 ![Inferoa Agent Harness](/img/inferoa-line-hero.png)
@@ -20,12 +20,19 @@ between model paths, and still need to prove the work at the end.
 > Prefix cache stability is ignored. Routing is bolted on later. Context is
 > pasted until it fits. Users pay for that gap.
 
-Inferoa is an **Inference-native Tokenmaxxing Agent Harness** for long-horizon
-coding work. It starts from the inference stack and designs the agent loop
-around tokenmaxxing: Prefix-cache discipline, Context Optimization with
-CodeGraph and RTK, Intelligent routing, Self-Hosted Model Serving through vLLM
-Engine and vLLM Omni, autoresearch, and verification all belong to the same
-durable session.
+Inferoa = Infer(Inference-native)o(Tokenmaxxing)a(Agent Harness).
+
+Inferoa is an **Inference-native Tokenmaxxing Agent Harness** for
+**long-horizon coding work**. It starts from the inference stack and designs the
+agent loop around **tokenmaxxing**: **prefix-cache discipline**,
+**context optimization** with
+[CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph) and
+[RTK](https://github.com/rtk-ai/rtk), **intelligent routing** with
+[vLLM Semantic Router](https://github.com/vllm-project/semantic-router),
+**high-throughput model serving** with
+[vLLM Engine](https://github.com/vllm-project/vllm) and
+[vLLM Omni](https://github.com/vllm-project/vllm-omni), plus
+**autoresearch** and **verification** inside the same durable session.
 
 <!-- truncate -->
 
@@ -47,30 +54,37 @@ The failure modes are familiar:
 - multimodal work becomes a disconnected side call;
 - serving and cache signals arrive too late to shape the next action.
 
-inferoa treats those as harness design problems, not analytics problems.
+Inferoa treats those as harness design problems, not analytics problems.
 
 ## What Changes
 
-inferoa makes inference behavior visible to the agent loop. The point is not to
+Inferoa makes inference behavior visible to the agent loop. The point is not to
 add another dashboard. The point is to let the runtime choose better prompts,
 better context, better routes, and better recovery behavior while the task is
 still running.
 
-| Surface | What inferoa Makes Native | Why It Matters |
-| --- | --- | --- |
-| Agent Harness | Goals, plans, sessions, tools, recovery, verification | Long work stays coherent and resumable |
-| Prefix-cache discipline | Stable prompt epochs, deterministic tool schemas, cache reports | Serving can reuse the shape of the session |
-| Context Optimization | CodeGraph, RTK, summaries, resources, bounded tool results | The model sees evidence, not raw sprawl |
-| Intelligent Routing | Model paths respond to cost, privacy, capability, and pressure | Not every turn needs the same expensive path |
-| Self-Hosted Model Serving | vLLM Engine usage/cache signals and vLLM Omni multimodal paths | Cache, cost, latency, and data-control surfaces stay native |
+| Surface | Substrate | What Inferoa Makes Native | Why It Matters |
+| --- | --- | --- | --- |
+| Agent Harness | [Inferoa](https://github.com/agentic-in/inferoa) | Goals, plans, autoresearch, sessions, tools, recovery, verification, and prefix-cache discipline | Long work stays coherent while preserving reusable prompt prefixes |
+| Context Optimization | [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph), [RTK](https://github.com/rtk-ai/rtk) | Compression, graph-shaped repo context, bounded tool output, and evidence selection | The model sees evidence, not raw sprawl |
+| Intelligent Routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Model paths respond to cost, safety, privacy, capability, and session pressure | Turns can route between self-hosted vLLM models and external frontier models |
+| Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | High-throughput, memory-efficient serving and multimodal endpoints stay visible to the harness | Cache, cost, latency, and data-control surfaces stay native |
 
 This is the core design: the agent is not merely calling an inference system.
 It is shaped by it.
 
 ## What You Can Do Today
 
-inferoa is a terminal-first harness, but the product surface is not just a
+Inferoa is a terminal-first harness, but the product surface is not just a
 shell. It makes long-horizon state visible while the agent works.
+
+Start with **`/tokenmaxxing`**. It is the savings ledger for prefix-cache reuse,
+context optimization, [RTK](https://github.com/rtk-ai/rtk) tool-output savings,
+recent turn usage, and model-selection pressure. This is the place to see
+whether the harness is actually tokenmaxxing the session, not just reporting
+token usage after the fact.
+
+![Inferoa tokenmaxxing report](/img/screenshots/tokenmaxxing.png)
 
 Goal mode keeps the objective durable. The agent can decompose work, update
 steps, attach evidence, and avoid mistaking an empty checklist for a finished
@@ -88,8 +102,6 @@ Prefix-cache reporting separates warmup from steady state. The harness tracks
 prompt epochs, schema hashes, cache salt, and cached-token evidence so the user
 can see whether the session shape is staying reusable.
 
-![Inferoa tokenmaxxing report](/img/screenshots/tokenmaxxing.png)
-
 Autoresearch mode makes the evaluation loop native: define the experiment, run
 the harness, record failures, patch the implementation, and keep the metric
 trail inside the same session.
@@ -98,85 +110,54 @@ trail inside the same session.
 
 The core command surface stays small: `/goal` for durable objectives, `/plan`
 for inspectable scope, `/autoresearch` for metric-driven iteration, and
-`/tokenmaxxing` for the savings ledger across prefix cache, CodeGraph/RTK
-context savings, recent turn usage, and model-selection cost pressure.
-
-## Why Coding First
-
-Coding puts real pressure on the whole system.
-
-A coding agent has to inspect repositories, choose relevant context, make edits,
-run commands, recover from failures, maintain a goal, and prove the work through
-tests. It is a long-horizon task with brutal context pressure and a clear
-verification loop. That makes it a strong first domain for co-designing agent
-behavior with inference behavior.
-
-If the harness can preserve cache stability, optimize context, route
-intelligently, use self-hosted model serving, and keep verification durable in
-coding workflows, those patterns become useful far beyond coding.
+`/tokenmaxxing` for the savings ledger across prefix cache,
+[CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph) and
+[RTK](https://github.com/rtk-ai/rtk) context savings, recent turn usage, and
+model-selection cost pressure.
 
 ## Proof Of Value
 
-We ran a long-horizon stress suite on June 9, 2026 across the surfaces that
-matter most for a tokenmaxxing harness: prefix-cache stability, compression
-continuity, context optimization, RTK command savings, and model selection. The
-goal was not to produce one benchmark score. It was to test whether the session
-stays measurable and stable as the horizon grows.
+The value story is not one benchmark score. It is whether the tokenmaxxing path
+stays stable, measurable, and cheaper as the work gets longer.
 
-The longest simulated run completed **64 tool loops** with **one prompt epoch,
-one tool schema hash, and one cache salt**. The average steady-state simulated
-cache hit rate was **54.6%**, and the final request reached **66.9%** as more
-prior history became reusable prefix. A multi-turn profile kept the same prompt
-epoch, schema hash, and cache salt across **8 turns**, with **44.7%**
-steady-state cache reuse. DeepSeek v4 Pro also exposed the serving-layer cache
-signal directly: after warmup, repeated stable-prefix requests reported
-**99.2%** cached prompt tokens.
+Key results from the long-horizon stress suite:
 
-![Inferoa prefix cache stability](/img/experiments/inferoa-prefix-cache-stability.svg)
-
-Compression is where long-horizon agents usually lose continuity. inferoa ran a
-**256-turn** stress test with compression every 8 turns: **32 compression
-cycles**, **32 archived context resources**, and **256 post-compression
-interactive turns**. Every turn preserved the continuity marker and archive
-pointer, while cache salt and tool schema stayed stable. The post-compression
-interactive path averaged **31.8%** steady cache reuse.
-
-![Inferoa compression continuity](/img/experiments/inferoa-compression-continuity.svg)
-
-The savings do not come from prefix cache alone. At 64 loops, the raw-transcript
-baseline was **3.48M prompt tokens**. inferoa's bounded prompt path used
-**987.6K prompt tokens**. With cache-adjusted prefill work, that fell to
-**507.1K input-token-equivalent tokens**, an **85.4%** reduction versus the raw
-baseline.
-
-The context and routing layers add independent leverage: CodeGraph-style
-symbol/range context reduced inspected cache/runtime context by **80.8%**; RTK
-command records reduced command-token footprint by **61.4%**; routing
-projections lifted the DeepSeek-priced reference budget from **39.6%**
-single-model accuracy to **91.0%** oracle-routed accuracy.
+- **Stable prefixes**: the longest simulated run completed **64 tool loops**
+  with **one prompt epoch, one tool schema hash, and one cache salt**.
+- **Provider cache evidence**: repeated stable-prefix requests reported
+  **99.2% cached prompt tokens** after warmup.
+- **Bounded prompt path**: a **3.48M prompt-token** raw transcript baseline fell
+  to **987.6K prompt tokens**, then **507.1K input-token-equivalent tokens**
+  after cache-adjusted prefill work.
+- **Independent context savings**:
+  [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph)-style
+  symbol/range context saved **80.8%** and
+  [RTK](https://github.com/rtk-ai/rtk) command records saved **61.4%** of
+  command-token footprint.
 
 ![Inferoa optimization surfaces](/img/experiments/inferoa-optimization-surfaces.svg)
 
-Projected to a 10,000-loop reference run, the same measured shape is **98.6%**
-lower input-token-equivalent work than a raw-transcript baseline. The exact
-number will move with workload and pricing. The important part is the direction:
-long-horizon agents need a harness that protects stability and uses every
-inference surface available.
+The exact numbers will move with workload and pricing. The direction is the
+important part: long-horizon agents need a harness that protects stability and
+uses every inference surface available.
 
 ## Built With The vLLM Ecosystem
 
-inferoa starts with the vLLM ecosystem because vLLM exposes the right surfaces:
+Inferoa starts with the vLLM ecosystem because vLLM exposes the right surfaces:
 serving behavior, routing, multimodal paths, endpoint signals, and prefix-cache
 economics.
 
-- **vLLM Engine** provides high-performance OpenAI-compatible inference and the
-  prefix-cache behavior inferoa protects across long sessions.
-- **vLLM Semantic Router** brings model routing into the agent loop so routes can
-  respond to cost, safety, privacy, capability, and session pressure.
-- **vLLM Omni** brings image, video, and audio understanding or generation into
-  the same durable agent contract.
+- [**vLLM Engine**](https://github.com/vllm-project/vllm) provides
+  high-performance OpenAI-compatible inference and the prefix-cache behavior
+  Inferoa protects across long sessions.
+- [**vLLM Semantic Router**](https://github.com/vllm-project/semantic-router)
+  brings model routing into the agent loop so routes can respond to cost,
+  safety, privacy, capability, and session pressure.
+- [**vLLM Omni**](https://github.com/vllm-project/vllm-omni) brings image,
+  video, and audio understanding or generation into the same durable agent
+  contract.
 
-inferoa is the harness layer above that stack: the place where long-horizon
+Inferoa is the harness layer above that stack: the place where long-horizon
 agent behavior and inference behavior meet.
 
 ## Try It
@@ -187,9 +168,5 @@ inferoa setup
 inferoa
 ```
 
-inferoa stores local state under `~/.inferoa/`. Model endpoint credentials are
-stored through the local vault; config files keep references rather than raw
-secrets.
-
 The larger goal is simple: agents should not waste the inference stack they are
-already paying for. inferoa makes those signals native to the loop.
+already paying for. Inferoa makes those signals native to the loop.

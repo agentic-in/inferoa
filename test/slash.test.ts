@@ -84,6 +84,11 @@ test("slash parser leaves dragged absolute paths as chat input", () => {
   assert.equal(single.error, undefined);
   assert.equal(single.args, "/Users/demo/Desktop/screenshot.png");
 
+  const nested = parseSlashCommand("/Users/demo/local-workbench/work/vllm/vllm-agent/website/static/img/screenshots/inferoa-welcome.png");
+  assert.equal(nested.command, undefined);
+  assert.equal(nested.error, undefined);
+  assert.equal(nested.args, "/Users/demo/local-workbench/work/vllm/vllm-agent/website/static/img/screenshots/inferoa-welcome.png");
+
   const multiple = parseSlashCommand("/Users/demo/a.png /Users/demo/b.jpg");
   assert.equal(multiple.command, undefined);
   assert.equal(multiple.error, undefined);
