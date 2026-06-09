@@ -3,13 +3,12 @@ id: quickstart
 title: Quickstart
 ---
 
-This quickstart gets Inferoa running against an OpenAI-compatible endpoint. For
-local development in this repository, build and link the CLI:
+This quickstart gets Inferoa running against an OpenAI-compatible endpoint.
+
+Install the CLI globally:
 
 ```bash
-npm install
-npm run build
-npm link
+npm install -g inferoa
 ```
 
 Then start the setup wizard and launch the TUI:
@@ -47,10 +46,24 @@ sequenceDiagram
 - Use `/setup` when you need to change provider, model, endpoint, web search,
   or Omni configuration.
 - Use `/system` to inspect model, web search, Omni, and runtime status.
-- Use `/goal set` for a durable objective that should survive multiple turns.
-- Use `/plan set` for ambiguous work that needs an inspectable plan before
-  execution.
+- Use [`/goal set`](./workflows/goal-mode.md) for a durable objective that
+  should survive multiple turns.
+- Use [`/plan set`](./workflows/plan-mode.md) for ambiguous work that needs an
+  inspectable plan before execution.
+- Use [`/autoresearch`](./workflows/autoresearch-mode.md) for experiment-shaped
+  work that needs repeated measurement.
 - Use `/tokenmaxxing` to see token, cache, RTK, and routing pressure.
+
+## Repository Development
+
+When working from a source checkout, install dependencies, build, and link the
+local CLI:
+
+```bash
+npm install
+npm run build
+npm link
+```
 
 Useful development commands:
 

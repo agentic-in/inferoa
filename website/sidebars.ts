@@ -24,7 +24,7 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "Workflows",
       collapsed: false,
-      items: ["workflows/goal-plan-autoresearch", "workflows/coding-workflow", "workflows/daemon-jobs"],
+      items: ["workflows/goal-mode", "workflows/plan-mode", "workflows/autoresearch-mode", "workflows/coding-workflow", "workflows/daemon-jobs"],
     },
     {
       type: "category",

@@ -23,11 +23,12 @@ Inspect this package, find the test entrypoints, and add a missing docs build ch
 ## Use Modes Deliberately
 
 - Use plain chat for small questions and one-turn inspections.
-- Use `/plan set` when scope is ambiguous and you want a plan before execution.
-- Use `/goal set` when the work should continue until a durable objective is
-  done.
-- Use `/autoresearch` when the task is experiment-shaped and needs repeated
-  measurement.
+- Use [`/plan set`](../workflows/plan-mode.md) when scope is ambiguous and you
+  want a plan before execution.
+- Use [`/goal set`](../workflows/goal-mode.md) when the work should continue
+  until a durable objective is done.
+- Use [`/autoresearch`](../workflows/autoresearch-mode.md) when the task is
+  experiment-shaped and needs repeated measurement.
 
 ## Inspect Evidence
 

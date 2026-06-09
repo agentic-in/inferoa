@@ -12,9 +12,9 @@ Slash commands are entered inside the Inferoa TUI.
 | `/system` | Show model, web search, Omni, and runtime status |
 | `/access` | Change workspace file and tool access |
 | `/skills` | List or manage enabled skills |
-| `/goal` | Start or manage goal mode |
-| `/plan` | Start or manage plan mode |
-| `/autoresearch` | Start or manage autoresearch experiments |
+| [`/goal`](../workflows/goal-mode.md) | Start or manage goal mode |
+| [`/plan`](../workflows/plan-mode.md) | Start or manage plan mode |
+| [`/autoresearch`](../workflows/autoresearch-mode.md) | Start or manage autoresearch experiments |
 | `/tokenmaxxing` | Show token, cache, RTK, and routing savings |
 | `/context` | Show context usage and compression state |
 | `/tools` | Show fixed tool schemas and renderer status |

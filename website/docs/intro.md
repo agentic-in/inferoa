@@ -32,8 +32,8 @@ flowchart LR
   Harness --> Evidence
 ```
 
-- **Long-horizon modes** keep goals, plans, autoresearch state, and completion
-  audits attached to a durable session.
+- **Long-horizon modes** keep goals, plans, autoresearch state, completion
+  reflection, and evidence attached to a durable session.
 - **Prefix-cache discipline** keeps the stable parts of the prompt stable, so
   reusable prefixes are not invalidated by avoidable churn.
 - **Context optimization** selects the evidence needed for the next turn using
@@ -59,8 +59,9 @@ behavior with inference behavior.
 - Read [Architecture](./architecture.md) when you want the system model.
 - Use [Model endpoints](./configuration/model-endpoints.md) when connecting
   direct vLLM, vLLM Semantic Router, or an external compatible provider.
-- Use [Goal, plan, and autoresearch](./workflows/goal-plan-autoresearch.md)
-  when structuring long-running work.
+- Use [Goal mode](./workflows/goal-mode.md), [Plan mode](./workflows/plan-mode.md),
+  and [Autoresearch mode](./workflows/autoresearch-mode.md) when structuring
+  long-running work.
 - Use [CLI reference](./reference/cli.md) and
   [Slash commands](./reference/slash-commands.md) when you need exact command
   names.
