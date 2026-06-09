@@ -3,10 +3,35 @@ id: architecture
 title: Architecture
 ---
 
-inferoa is organized around the tokenmaxxing path:
+Inferoa is organized around the tokenmaxxing path:
 
-```text
-Agent Harness -> Prefix-cache Discipline -> Context Optimization -> Intelligent Routing -> Self-Hosted Model Serving
+```mermaid
+flowchart TB
+  subgraph Harness["Agent harness"]
+    Sessions["Durable sessions"]
+    Goals["Goals and plans"]
+    Tools["Tool schemas"]
+    Evidence["Evidence ledger"]
+  end
+
+  subgraph Context["Context layer"]
+    Epochs["Prompt epochs"]
+    Compression["Compression"]
+    CodeGraph["CodeGraph"]
+    RTK["RTK"]
+  end
+
+  subgraph Inference["Inference layer"]
+    Direct["Direct vLLM endpoint"]
+    Router["vLLM Semantic Router"]
+    Omni["vLLM Omni endpoints"]
+    External["External compatible provider"]
+  end
+
+  Harness --> Context
+  Context --> Inference
+  Inference --> Harness
+  Harness --> Evidence
 ```
 
 ## Agent Harness
@@ -17,7 +42,7 @@ features; they define the state that long-horizon inference has to preserve.
 
 ## Prefix Cache Discipline
 
-Prefix cache is a core design target. inferoa protects it with stable prompt
+Prefix cache is a core design target. Inferoa protects it with stable prompt
 epochs, deterministic tool schema ordering, bounded mutable context, and
 separate warmup versus steady-state cache reporting.
 
@@ -35,7 +60,7 @@ every turn through the same model.
 
 ## Self-Hosted Model Serving
 
-vLLM Engine provides high-performance OpenAI-compatible serving. inferoa treats
+vLLM Engine provides high-performance OpenAI-compatible serving. Inferoa treats
 usage, cache behavior, endpoint capability, and request metadata as signals the
 agent can surface and eventually act on.
 
