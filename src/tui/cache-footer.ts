@@ -85,6 +85,9 @@ export function formatDuration(ms: number): string {
 
 function formatFooterHitRate(hit: number, kind: PrefixCacheTurnKind): string {
   const label = kind === "warmup" ? "prefix cache warmup" : "prefix cache hit";
+  if (kind === "warmup") {
+    return fg256(48, `${ansi.bold}${label}${ansi.reset}`);
+  }
   return `${fg256(hitColor(hit, kind), `${ansi.bold}${label} (${(hit * 100).toFixed(1)}%)${ansi.reset}`)}`;
 }
 

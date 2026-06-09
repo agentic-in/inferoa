@@ -34,13 +34,17 @@ test("cache footer shows cached-token hit rate when exposed", () => {
 });
 
 test("cache footer labels first chat turn as prefix cache warmup", () => {
-  const footer = stripAnsi(renderCacheFooter({
+  const rawFooter = renderCacheFooter({
     usage: { prompt_tokens: 1000, cached_prompt_tokens: 50, completion_tokens: 20 },
     latencyMs: 4_320,
     cacheKind: "warmup",
-  }));
+  });
+  const footer = stripAnsi(rawFooter);
 
-  assert.match(footer, /prefix cache warmup \(5\.0%\)/);
+  assert.match(footer, /prefix cache warmup/);
+  assert.doesNotMatch(footer, /prefix cache warmup \(/);
+  assert.match(rawFooter, /\x1b\[38;5;48m/);
+  assert.doesNotMatch(rawFooter, /\x1b\[38;5;220m/);
   assert.match(footer, /worked for 4\.3s/);
 });
 

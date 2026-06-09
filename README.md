@@ -24,9 +24,9 @@ bolted on later. Context is pasted until it fits. Users pay for that gap.
 
 Inferoa is an **Inference-native Tokenmaxxing Agent Harness** for long-horizon
 tasks. It starts from the inference stack and designs the agent loop around
-tokenmaxxing: Prefix-cache discipline, Context Optimization with CodeGraph and
-RTK, Intelligent routing, Self-Hosted Model Serving through vLLM Engine and
-vLLM Omni, and verification all belong to the same durable session.
+tokenmaxxing: prefix-cache discipline, context optimization, intelligent
+routing, high-throughput and memory-efficient vLLM serving, multimodal
+capability.
 
 ## TUI Preview
 
@@ -59,37 +59,39 @@ vLLM Omni, and verification all belong to the same durable session.
   </table>
 </div>
 
-## Why Tokenmaxxing
+## Why Inferoa
+
+Inferoa = **Infer**(Inference-native)**o**(Tokenmaxxing)**a**(Agent Harness).
 
 Long-horizon agents are not one prompt. They are many turns of planning,
 editing, tool use, retries, compaction, cache warmup, route selection, and
 verification. If the harness treats every turn as generic chat traffic, it
 throws away the optimization surface underneath it.
 
-inferoa makes those tokenmaxxing surfaces first-class:
+Inferoa makes those tokenmaxxing surfaces first-class:
 
 - **Prefix cache is protected**, not merely reported after the turn.
 - **Goals, plans, and autoresearch** are native long-horizon modes.
-- **Context is optimized with CodeGraph and RTK**, not pasted until the window
-  is full.
+- **Context is optimized** through compression, summaries, graph-shaped code
+  context, bounded tool output, and evidence selection instead of pasting until
+  the window is full.
 - **Intelligent routing chooses the model path** by cost, safety, privacy,
   capability, and session pressure.
-- **Self-hosted model serving shapes the next turn**: vLLM Engine latency,
-  usage, cache behavior, endpoint capability, and vLLM Omni multimodal paths
-  are visible to the harness.
+- **High-performance model serving is respected**: Inferoa follows inference
+  engine optimization rules so high-throughput, memory-efficient vLLM serving
+  is not treated like generic chat traffic.
 
 ## Tokenmaxxing Across The Inference Stack
 
-inferoa is built on top of the vLLM ecosystem and extends tokenmaxxing across
+Inferoa is built on top of the vLLM ecosystem and extends tokenmaxxing across
 the inference stack:
 
-| Surface | Substrate | inferoa role | Tokenmaxxing target |
+| Surface | Substrate | Inferoa role | Tokenmaxxing target |
 | --- | --- | --- | --- |
-| Agent Harness | [inferoa](https://github.com/agentic-in/inferoa) | Goals, plans, autoresearch, sessions, tools, recovery, verification | Avoid restart, redo, and lost-state cost |
-| Prefix-cache discipline | vLLM-compatible serving | Stable prompt epochs, deterministic tool schemas, bounded context sections, cache reports | Reuse the expensive prompt prefix |
-| Context Optimization | [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph), [RTK](https://github.com/rtk-ai/rtk) | Select repo evidence, symbols, summaries, resources, and compressed command output | Spend fewer prompt and tool-output tokens |
+| Agent Harness | [Inferoa](https://github.com/agentic-in/inferoa) | Goals, plans, autoresearch, sessions, tools, recovery, verification, and prefix-cache discipline | Keep long-horizon work coherent while preserving reusable prompt prefixes |
+| Context Optimization | [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph), [RTK](https://github.com/rtk-ai/rtk) | Select evidence and shrink mutable context without losing task continuity | Spend fewer prompt and tool-output tokens |
 | Intelligent routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Choose model paths by cost, safety, privacy, capability, and session pressure | Avoid one expensive path for every turn |
-| Self-Hosted Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use direct OpenAI-compatible serving, endpoint signals, and multimodal paths | Keep cache, cost, latency, and data-control surfaces native |
+| Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use high-throughput, memory-efficient serving and multimodal endpoints while respecting inference-engine optimization rules | Improve latency, throughput, and cost without requiring every turn to use a frontier model |
 
 ## Core Design
 
@@ -97,49 +99,62 @@ the inference stack:
   not prompt templates.
 - **Prefix-cache discipline**: stable prompt epochs, deterministic tool schemas,
   bounded context sections, and cache reports protect reusable prefixes.
-- **Context optimization**: [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph),
-  [RTK](https://github.com/rtk-ai/rtk), and built-in coding harnesses reduce
-  token consumption while preserving the evidence the model needs.
+- **Continuous context optimization**: compression, summaries, structured repo
+  context, bounded history, and bounded tool output preserve evidence while
+  reducing token pressure.
 - **Intelligent routing**: model paths can respond to cost, safety, privacy,
-  capability, and session pressure.
-- **Self-hosted model serving**: vLLM Engine and vLLM Omni keep usage, cache,
-  model, endpoint, request, and multimodal signals close enough to influence
-  the next agent action.
-
-## Core Commands
-
-- `/goal` keeps a durable objective, decomposition, evidence, and completion
-  audit across long-running work.
-- `/plan` turns ambiguous scope into an inspectable plan that can be revised
-  before execution.
-- `/autoresearch` runs benchmark-style iteration with metrics and failure
-  evidence in the same session.
-- `/tokenmaxxing` shows token and cost pressure in one place: prefix-cache
-  reuse, CodeGraph/RTK context savings, recent turn usage, and model-selection
-  cost pressure.
+  capability, and session pressure, including routing between self-hosted vLLM
+  models and external frontier models.
+- **Inference-engine alignment**: prompt shape, endpoint choice, throughput,
+  memory efficiency, cache behavior, and model capacity remain visible to the
+  harness so the agent can follow serving optimization rules.
 
 ## Installation
 
 ```bash
 npm install -g inferoa
+```
+
+## Quickstart
+
+```bash
 inferoa setup
 inferoa
 ```
 
-For one-shot print mode:
+Use the core commands as the task
+grows:
 
-```bash
-inferoa --print "Inspect this repository and summarize the test entrypoints."
-```
-
-inferoa stores local state under `~/.inferoa/`. Model endpoint credentials are
-stored through the local vault; config files keep references rather than raw
-secrets.
+- `/goal` keeps a durable objective, decomposition, evidence, and completion
+  audit across long-running work.
+- `/plan` turns ambiguous scope into an inspectable plan before execution.
+- `/autoresearch` runs benchmark-style iteration with metrics and failure
+  evidence in the same session.
+- `/tokenmaxxing` shows token and cost pressure across prefix-cache reuse,
+  context savings, recent turn usage, and model-selection pressure.
 
 ## Acknowledgements
 
-inferoa is built for and with the vLLM ecosystem:
+Inferoa is built for and with the vLLM ecosystem:
 
 - [vLLM Engine](https://github.com/vllm-project/vllm)
 - [vLLM Semantic Router](https://github.com/vllm-project/semantic-router)
 - [vLLM Omni](https://github.com/vllm-project/vllm-omni)
+
+Inferoa also uses and acknowledges the projects that make context
+optimization practical inside the agent loop:
+
+- [RTK](https://github.com/rtk-ai/rtk)
+- [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph)
+
+## Contributors
+
+<p align="center">
+  <img src="assets/agentic-intelligence-lab-lockup.png" alt="Agentic Intelligence Lab" width="320" />
+</p>
+
+<p align="center">
+  <strong>
+    Agentic Intelligence Lab
+  </strong>
+</p>

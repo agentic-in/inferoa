@@ -6,17 +6,16 @@ import styles from "./index.module.css";
 
 const modules = [
   ["01", "Prefix-cache discipline", "Stable prompt epochs and deterministic tool schemas protect reusable session prefixes."],
-  ["02", "Context Optimization", "CodeGraph, RTK, and built-in harnesses reduce token waste while preserving evidence."],
-  ["03", "Intelligent routing", "Model paths respond to cost, safety, privacy, capability, and session pressure."],
-  ["04", "Self-hosted serving", "vLLM Engine and vLLM Omni keep cache, latency, cost, and multimodal signals native."],
+  ["02", "Context Optimization", "Compression, graph-shaped repo context, and bounded tool output reduce token waste while preserving evidence."],
+  ["03", "Intelligent routing", "Route by cost, safety, privacy, capability, and pressure across self-hosted vLLM models and external frontier models."],
+  ["04", "vLLM serving", "High-throughput, memory-efficient inference keeps cache, latency, cost, and multimodal signals native."],
 ];
 
 const stackFlow = [
-  ["Agent Harness", "inferoa"],
-  ["Prefix Cache", "Discipline"],
-  ["Context Optimization", "CodeGraph, RTK..."],
+  ["Agent Harness", "Inferoa + prefix discipline"],
+  ["Context Optimization", "compression, graph, bounded tools"],
   ["Intelligent Routing", "vLLM SR"],
-  ["Self-Hosted Serving", "vLLM Engine + Omni"],
+  ["vLLM Serving", "Engine + Omni"],
 ];
 
 const sessionScreens = [
@@ -37,7 +36,7 @@ const sessionScreens = [
   },
   {
     title: "Tokenmaxxing",
-    body: "Prefix cache, RTK savings, recent turn usage, and model-selection pressure stay visible together.",
+    body: "Prefix cache, tool-output savings, recent turn usage, and model-selection pressure stay visible together.",
     image: "/img/screenshots/tokenmaxxing.png",
   },
   {
@@ -232,14 +231,14 @@ export default function Home(): JSX.Element {
         <meta property="og:title" content="Inferoa | Inference-native Tokenmaxxing Agent Harness" />
         <meta
           property="og:description"
-          content="Tokenmaxx long-horizon coding agents with prefix-cache discipline, CodeGraph/RTK context optimization, intelligent routing, and self-hosted vLLM serving."
+          content="Tokenmaxx long-horizon coding agents with prefix-cache discipline, context optimization, intelligent routing, and high-performance vLLM serving."
         />
         <meta property="og:image" content={shareImage} />
         <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content="Inferoa | Inference-native Tokenmaxxing Agent Harness" />
         <meta
           name="twitter:description"
-          content="Tokenmaxx long-horizon coding agents with prefix-cache discipline, CodeGraph/RTK context optimization, intelligent routing, and self-hosted vLLM serving."
+          content="Tokenmaxx long-horizon coding agents with prefix-cache discipline, context optimization, intelligent routing, and high-performance vLLM serving."
         />
         <meta name="twitter:image" content={shareImage} />
       </Head>
@@ -295,7 +294,7 @@ export default function Home(): JSX.Element {
               <strong>generic chat traffic</strong>, while{" "}
               <strong>prefix cache stability</strong>,{" "}
               <strong>route choice</strong>, <strong>serving behavior</strong>,
-              and <strong>context pressure</strong> stay invisible. inferoa
+              and <strong>context pressure</strong> stay invisible. Inferoa
               brings those <strong>tokenmaxxing surfaces</strong> into the
               agent harness itself.
             </p>
@@ -326,17 +325,13 @@ export default function Home(): JSX.Element {
               <span className={styles.sectionKicker}>Mission</span>
               <h2>Tokenmaxx the agent path.</h2>
               <p>
-                <strong>inferoa starts with coding</strong> because coding
-                exposes <strong>long-horizon pressure</strong> clearly:{" "}
-                <strong>large repos</strong>, <strong>changing goals</strong>,{" "}
-                <strong>tool failures</strong>,{" "}
-                <strong>repeated model calls</strong>,{" "}
-                <strong>context limits</strong>, and{" "}
-                <strong>proof through tests</strong>. The goal is to{" "}
-                <strong>co-design the harness and inference stack</strong> so
-                every turn spends <strong>context</strong>,{" "}
-                <strong>cache</strong>, <strong>route choice</strong>, and{" "}
-                <strong>serving capacity</strong> more deliberately.
+                <strong>Inferoa</strong> starts with coding because coding
+                exposes <strong>long-horizon pressure</strong> clearly: large
+                repos, changing goals, tool failures, repeated model calls,
+                context limits, and proof through tests. The goal is to
+                co-design the harness and inference stack so every turn spends{" "}
+                <strong>context, cache, route choice, and serving capacity</strong>{" "}
+                more deliberately.
               </p>
             </div>
             <div className={styles.loopCards} aria-label="Inference loop design points">
@@ -348,12 +343,12 @@ export default function Home(): JSX.Element {
               <article>
                 <span>02</span>
                 <strong>Context is optimized</strong>
-                <p>CodeGraph, RTK, and harness rules select evidence instead of pasting everything.</p>
+                <p>Compression, graph-shaped context, and bounded tool output select evidence instead of pasting everything.</p>
               </article>
               <article>
                 <span>03</span>
                 <strong>Routing and serving are native</strong>
-                <p>vLLM SR chooses paths while vLLM Engine and vLLM Omni keep serving signals close.</p>
+                <p>vLLM SR chooses paths while vLLM Engine supplies high-throughput, memory-efficient serving.</p>
               </article>
             </div>
           </div>
