@@ -13,11 +13,15 @@ function config(): VllmAgentConfig {
   return structuredClone(DEFAULT_CONFIG);
 }
 
-test("ToolRegistry exposes CodeGraph native tools by default and keeps builtin code intelligence", async () => {
+function gitWorkspace(id: string, root: string, alias: string): WorkspaceIdentity {
+  return { id, root, alias, gitRoot: root };
+}
+
+test("ToolRegistry exposes CodeGraph native tools by default in a git workspace and keeps builtin code intelligence", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-codegraph-tools-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_codegraph_tools", root: dir, alias: "codegraph-tools" };
+    const workspace = gitWorkspace("w_codegraph_tools", dir, "codegraph-tools");
     const registry = new ToolRegistry(config(), workspace, store);
     const names = registry.list().map((tool) => tool.name);
 
@@ -52,12 +56,29 @@ test("CodeGraph tools are removable through context.engine.provider=off", async 
   }
 });
 
+test("CodeGraph auto mode does not start indexing outside a git workspace", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-codegraph-no-git-"));
+  try {
+    const cfg = config();
+    const workspace: WorkspaceIdentity = { id: "w_codegraph_no_git", root: dir, alias: "codegraph-no-git" };
+    const hub = new CodeIntelligenceHub(cfg, workspace);
+
+    assert.equal(hub.shouldStartOnWelcome(), false);
+    assert.equal(hub.requireReadyBeforeChat(), false);
+    assert.equal(hub.status().codegraph.state, "off");
+    assert.equal((await hub.startIndexing("test")).state, "off");
+    hub.dispose();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("CodeGraph projectPath is restricted to the active workspace", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-codegraph-guard-"));
   const outside = await mkdtemp(path.join(os.tmpdir(), "inferoa-codegraph-outside-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_codegraph_guard", root: dir, alias: "codegraph-guard" };
+    const workspace = gitWorkspace("w_codegraph_guard", dir, "codegraph-guard");
     const session = store.createSession(workspace, "guard");
     const registry = new ToolRegistry(config(), workspace, store);
     const result = await registry.call(
@@ -86,7 +107,7 @@ test("CodeIntelligenceHub builds a small CodeGraph index and serves native tool 
     );
     const cfg = config();
     cfg.context.engine!.watch = false;
-    const workspace: WorkspaceIdentity = { id: "w_codegraph_index", root: dir, alias: "codegraph-index" };
+    const workspace = gitWorkspace("w_codegraph_index", dir, "codegraph-index");
     const hub = new CodeIntelligenceHub(cfg, workspace);
     const status = await hub.startIndexing("test");
 
@@ -126,7 +147,7 @@ test("CodeIntelligenceHub reopens an existing context index without degrading", 
     );
     const cfg = config();
     cfg.context.engine!.watch = false;
-    const workspace: WorkspaceIdentity = { id: "w_context_reopen", root: dir, alias: "context-reopen" };
+    const workspace = gitWorkspace("w_context_reopen", dir, "context-reopen");
 
     const initialHub = new CodeIntelligenceHub(cfg, workspace);
     const initial = await initialHub.startIndexing("initial");

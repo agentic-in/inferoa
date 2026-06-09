@@ -129,6 +129,7 @@ export interface WorkspaceIdentity {
   root: string;
   id: string;
   alias: string;
+  gitRoot?: string;
 }
 
 export interface SessionRecord {

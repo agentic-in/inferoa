@@ -158,7 +158,7 @@ export class CodeGraphContextEngine {
   ) {
     this.statusSnapshot = this.enabled()
       ? { provider: "codegraph", state: "idle", watcher: "inactive" }
-      : { provider: this.config.provider === "builtin" ? "builtin" : "off", state: "off", watcher: "disabled" };
+      : this.disabledStatus();
   }
 
   dispose(): void {
@@ -168,7 +168,10 @@ export class CodeGraphContextEngine {
   }
 
   enabled(): boolean {
-    return this.config.provider === "auto" || this.config.provider === "codegraph";
+    if (this.config.provider === "codegraph") {
+      return true;
+    }
+    return this.config.provider === "auto" && Boolean(this.workspace.gitRoot);
   }
 
   handlesTool(name: string): boolean {
@@ -201,7 +204,7 @@ export class CodeGraphContextEngine {
 
   startIndexing(reason: string, options: { force?: boolean; signal?: AbortSignal } = {}): Promise<ContextEngineStatus> {
     if (!this.enabled()) {
-      this.update({ provider: this.config.provider === "builtin" ? "builtin" : "off", state: "off", watcher: "disabled", reason });
+      this.update({ ...this.disabledStatus(), reason });
       return Promise.resolve(this.status());
     }
     if (this.active && !options.force) {
@@ -313,6 +316,15 @@ export class CodeGraphContextEngine {
       error: undefined,
       reason,
     });
+  }
+
+  private disabledStatus(): ContextEngineStatus {
+    return {
+      provider: this.config.provider === "builtin" ? "builtin" : "off",
+      state: "off",
+      watcher: "disabled",
+      reason: this.config.provider === "auto" && !this.workspace.gitRoot ? "not_git_workspace" : undefined,
+    };
   }
 
   private guardProjectPath(args: JsonObject): { ok: true; args: JsonObject } | { ok: false; result: ToolResult } {
