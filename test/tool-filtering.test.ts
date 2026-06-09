@@ -48,3 +48,34 @@ test("ToolRegistry list follows configured tool availability", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("configured Omni tool schemas do not expose model arguments", () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.omni.enabled = true;
+  config.omni.endpoints.vision = { base_url: "http://localhost:8000/v1", model: "vision-model" };
+  config.omni.endpoints.image_generation = { base_url: "http://localhost:8001/v1", model: "image-model" };
+  config.omni.endpoints.image_edit = { base_url: "http://localhost:8002/v1", model: "image-edit-model" };
+  config.omni.endpoints.video_generation = { base_url: "http://localhost:8003/v1", model: "video-model" };
+  config.omni.endpoints.video_understanding = { base_url: "http://localhost:8004/v1", model: "video-understanding-model" };
+  config.omni.endpoints.audio_generation = { base_url: "http://localhost:8005/v1", model: "audio-model" };
+  config.omni.endpoints.audio_understanding = { base_url: "http://localhost:8006/v1", model: "audio-understanding-model" };
+  config.omni.endpoints.speech = { base_url: "http://localhost:8007/v1", model: "speech-model" };
+
+  const omniToolNames = new Set([
+    "audio_generation",
+    "audio_understanding",
+    "image_edit",
+    "image_generation",
+    "speech_generation",
+    "speech_voices",
+    "video_generation",
+    "video_understanding",
+    "vision_understanding",
+  ]);
+  const omniTools = configuredToolDefinitions(config).filter((tool) => omniToolNames.has(tool.name));
+
+  assert.equal(omniTools.length, omniToolNames.size);
+  for (const tool of omniTools) {
+    assert.equal(((tool.parameters.properties as Record<string, unknown> | undefined) ?? {}).model, undefined, tool.name);
+  }
+});

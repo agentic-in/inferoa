@@ -80,7 +80,6 @@ const DEFINITIONS = [
       {
         input: string("Text prompt describing the audio to generate, or a text resource:// URI."),
         prompt: string("Legacy alias for input."),
-        model: string("Optional model override."),
         response_format: string("Optional response format: wav, pcm, flac, mp3, aac, or opus."),
         speed: number("Optional speed multiplier."),
         duration: number("Optional audio length in seconds; aliases audio_length."),
@@ -102,7 +101,6 @@ const DEFINITIONS = [
       {
         inputs: { type: "array", items: string("Audio URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
-        model: string("Optional model override."),
       },
       ["inputs", "prompt"],
     ),
@@ -239,7 +237,6 @@ const DEFINITIONS = [
         prompt: string("Image edit instruction."),
         images: { type: "array", items: string("Image URL, file path, data URI, or resource:// URI.") },
         image: string("Single image URL, file path, data URI, or resource:// URI."),
-        model: string("Optional model override."),
         mask_image: string("Optional mask image URL, file path, data URI, or resource:// URI."),
         reference_image: string("Optional reference image URL, file path, data URI, or resource:// URI."),
         n: number("Optional image count."),
@@ -265,7 +262,6 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         prompt: string("Image generation prompt."),
-        model: string("Optional model override."),
         size: string("Optional size such as 1024x1024."),
         n: number("Optional image count."),
         response_format: string("Optional response format such as b64_json or url."),
@@ -528,7 +524,6 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         input: string("Text to synthesize."),
-        model: string("Optional model override."),
         voice: string("Optional voice name."),
         instructions: string("Optional voice style or emotion instructions."),
         response_format: string("Optional response format: wav, pcm, flac, mp3, aac, or opus."),
@@ -566,7 +561,6 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         prompt: string("Video generation prompt."),
-        model: string("Optional model override."),
         mode: string("Optional mode: async (default) or sync for /videos/sync."),
         sync: boolean("Use the synchronous /videos/sync endpoint."),
         seconds: string("Optional duration in seconds as an integer string."),
@@ -607,7 +601,6 @@ const DEFINITIONS = [
       {
         inputs: { type: "array", items: string("Video URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
-        model: string("Optional model override."),
         detail: string("Optional detail level."),
       },
       ["inputs", "prompt"],
@@ -621,7 +614,6 @@ const DEFINITIONS = [
       {
         inputs: { type: "array", items: string("Image URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
-        model: string("Optional model override."),
         detail: string("Optional detail level."),
       },
       ["inputs", "prompt"],

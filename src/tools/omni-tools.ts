@@ -31,7 +31,7 @@ export async function imageEdit(args: JsonObject, context: ToolExecutionContext)
     return endpoint.result;
   }
   const form = new FormData();
-  form.set("model", String(args.model ?? endpoint.config.model));
+  form.set("model", String(endpoint.config.model));
   form.set("prompt", String(args.prompt));
   appendOptionalFormFields(form, args, [
     "n",
@@ -151,7 +151,7 @@ async function understanding(
     content.push({ type: inputType, [inputType]: { url: await normalizeInput(input, context) } });
   }
   const response = await postJson(endpoint.config, "/chat/completions", {
-    model: String(args.model ?? endpoint.config.model),
+    model: String(endpoint.config.model),
     messages: [
       {
         role: "user",
@@ -187,7 +187,7 @@ async function understanding(
 
 function generationJsonBody(args: JsonObject, model: string | undefined, promptKeys: string[]): JsonObject {
   const body: JsonObject = {
-    model: String(args.model ?? model),
+    model: String(model),
   };
   for (const key of promptKeys) {
     if (args[key] !== undefined) {
@@ -338,7 +338,7 @@ async function videoGenerationSync(args: JsonObject, context: ToolExecutionConte
 
 async function videoForm(args: JsonObject, model: string | undefined, context: ToolExecutionContext): Promise<FormData> {
   const form = new FormData();
-  form.set("model", String(args.model ?? model));
+  form.set("model", String(model));
   form.set("prompt", String(args.prompt));
   if (args.duration !== undefined && args.seconds === undefined) {
     form.set("seconds", String(args.duration));
