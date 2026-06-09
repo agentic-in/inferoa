@@ -128,11 +128,9 @@ Key results:
 
 - **Prefix stability across turns**: measured loop profiles kept **one prompt
   epoch, one tool schema hash, and one cache salt** while cache reuse improved
-  as the session warmed. In the local Runtime simulator, the `8 turns x 4 loops`
-  profile made 40 model requests; after dropping the first warmup request, the
-  weighted cache-reuse ratio was `sum(cached_prompt_tokens) /
-  sum(prompt_tokens) = 217,887 / 487,004 = 44.7%`. A separate stable-prefix
-  provider probe reported **99.2%** cached prompt tokens after warmup.
+  as the session warmed. The local Runtime simulator uses warmup-excluded,
+  weighted cached-token reuse, and a separate stable-prefix provider probe
+  reported high cached prompt-token reuse after warmup.
 - **Compression continuity**: a **256-turn regression** forced compression every
   8 turns, for **32 compression cycles**. The check found no missing continuity
   marker or archive pointer in the post-compression prompts. That is a regression
