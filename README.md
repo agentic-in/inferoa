@@ -75,6 +75,8 @@ the inference stack:
 | Intelligent routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Choose model paths by cost, safety, privacy, capability, and session pressure | Avoid one expensive path for every turn |
 | Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use high-throughput, memory-efficient serving and multimodal endpoints while respecting inference-engine optimization rules | Control cost, safety, privacy, and data sovereignty when an external frontier model is unnecessary |
 
+![tokenmaxxing](website/static/img/screenshots/tokenmaxxing.png)
+
 ## Core Design
 
 - **Long-horizon modes**: goal, plan, and autoresearch are native workflows,
