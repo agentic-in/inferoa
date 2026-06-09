@@ -1581,7 +1581,7 @@ export class TuiApp {
     const options = webSearchProviderSetupOptions();
     const defaultIndex = Math.max(0, options.findIndex((option) => option.value === current));
     return await this.selectOption("Web Search", options, defaultIndex, [
-      fg256(244, "Direct URLs are fetched by web_fetch even when keyword search uses fallback."),
+      fg256(244, "Direct URLs are opened by web_open even when keyword search uses fallback."),
     ]);
   }
 

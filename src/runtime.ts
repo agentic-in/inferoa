@@ -629,7 +629,7 @@ export class Runtime {
     for (const url of urls) {
       throwIfAborted(signal);
       const result = await this.executeToolCall(
-        { id: randomId("prefetch"), name: "web_fetch", arguments: { url, max_bytes: 1_000_000 } },
+        { id: randomId("prefetch"), name: "web_open", arguments: { url, max_bytes: 1_000_000 } },
         sessionId,
         runId,
         requestClass,

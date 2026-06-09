@@ -10,6 +10,7 @@ function objectSchema(properties: Record<string, JsonObject>, required: string[]
 }
 
 const string = (description: string): JsonObject => ({ type: "string", description });
+const stringEnum = (description: string, values: string[]): JsonObject => ({ type: "string", description, enum: values });
 const number = (description: string): JsonObject => ({ type: "number", description });
 const boolean = (description: string): JsonObject => ({ type: "boolean", description });
 const jsonObject = (description: string): JsonObject => ({ type: "object", description, additionalProperties: true });
@@ -18,7 +19,7 @@ const goalStep = objectSchema(
   {
     id: string("Optional stable step id. If omitted, one is derived from the title."),
     title: string("Concrete goal step title."),
-    status: string("Optional status: pending, in_progress, completed, blocked, or skipped."),
+    status: stringEnum("Optional step status.", ["pending", "in_progress", "completed", "blocked", "skipped"]),
     notes: string("Optional short notes for the step."),
     evidence: jsonObject("Optional structured evidence for this step."),
   },
@@ -47,9 +48,9 @@ const DEFINITIONS = [
     permission: "write",
     parameters: objectSchema(
       {
-        language: string("Language id: typescript, javascript, tsx, jsx, or python."),
+        language: stringEnum("Language id.", ["typescript", "javascript", "tsx", "jsx", "python"]),
         path: string("Workspace-relative file path."),
-        operation: string("replace_node, insert_before, insert_after, or delete_node."),
+        operation: stringEnum("AST edit operation.", ["replace_node", "insert_before", "insert_after", "delete_node"]),
         selector: string("Selector such as function:name, class:name, import, or text:literal."),
         content: string("Replacement or inserted content. JSON escaped newlines such as \\n are accepted."),
         position: string("Optional language-specific position hint."),
@@ -63,7 +64,7 @@ const DEFINITIONS = [
     permission: "read",
     parameters: objectSchema(
       {
-        language: string("Language id."),
+        language: stringEnum("Language id.", ["typescript", "javascript", "tsx", "jsx", "python"]),
         path: string("Workspace-relative file path."),
         selector: string("Selector such as function:name, class:name, import, or text:literal."),
         limit: number("Maximum matches."),
@@ -79,10 +80,8 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         input: string("Text prompt describing the audio to generate, or a text resource:// URI."),
-        prompt: string("Legacy alias for input."),
-        response_format: string("Optional response format: wav, pcm, flac, mp3, aac, or opus."),
+        response_format: stringEnum("Optional response format.", ["wav", "pcm", "flac", "mp3", "aac", "opus"]),
         speed: number("Optional speed multiplier."),
-        duration: number("Optional audio length in seconds; aliases audio_length."),
         audio_length: number("Optional audio length in seconds."),
         audio_start: number("Optional audio start time in seconds."),
         negative_prompt: string("Optional negative prompt."),
@@ -205,21 +204,21 @@ const DEFINITIONS = [
   },
   {
     name: "goal",
-    description: "Manage the active goal-mode objective and its internal planning state for this session. Use create only when no goal exists; decompose/update_plan to keep a native frontier current; update_step as work, evidence, and blockers change; audit can only be recorded by an internal audit run and records a tool-enabled frontier audit decision; get to inspect budget/status; resume for paused goals; complete only after the objective is genuinely achieved and the latest audit decision is done with verification evidence unless force is true; drop only when the goal should be discarded.",
+    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, audit, resume, complete, or drop the active goal.",
     permission: "read",
     parameters: objectSchema(
       {
-        op: string("Operation: create, get, decompose, update_plan, update_step, audit, resume, complete, or drop."),
+        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "audit", "resume", "complete", "drop"]),
         objective: string("Goal objective. Required for op=create."),
         token_budget: number("Optional positive token budget for op=create."),
         steps: { type: "array", description: "Concrete internal goal steps for op=create, decompose, or update_plan.", items: goalStep },
         active_step_id: string("Optional active step id for op=create, decompose, update_plan, or update_step."),
         step_id: string("Step id to update for op=update_step."),
         title: string("Optional replacement title or title for a newly inserted step when op=update_step."),
-        status: string("Step status for op=update_step: pending, in_progress, completed, blocked, or skipped."),
+        status: stringEnum("Step status for op=update_step.", ["pending", "in_progress", "completed", "blocked", "skipped"]),
         notes: string("Optional notes for op=update_step. Empty string clears notes."),
         evidence: jsonObject("Optional structured step evidence for op=update_step."),
-        decision: string("Audit decision for op=audit in an internal audit run only: expand, done, blocked, or retry."),
+        decision: stringEnum("Audit decision for op=audit in an internal audit run only.", ["expand", "done", "blocked", "retry"]),
         verification_evidence: jsonObject("Structured verification evidence for op=audit with decision=done in an internal audit run."),
         blocker: string("Optional blocker details for op=audit with decision=blocked or retry in an internal audit run."),
         summary: string("Completion summary for op=complete, or reason for op=drop."),
@@ -236,13 +235,12 @@ const DEFINITIONS = [
       {
         prompt: string("Image edit instruction."),
         images: { type: "array", items: string("Image URL, file path, data URI, or resource:// URI.") },
-        image: string("Single image URL, file path, data URI, or resource:// URI."),
         mask_image: string("Optional mask image URL, file path, data URI, or resource:// URI."),
         reference_image: string("Optional reference image URL, file path, data URI, or resource:// URI."),
         n: number("Optional image count."),
         size: string("Optional size such as 1024x1024 or auto."),
-        response_format: string("Optional response format such as b64_json or url."),
-        output_format: string("Optional output format such as png, jpeg, or webp."),
+        response_format: stringEnum("Optional response format.", ["b64_json", "url"]),
+        output_format: stringEnum("Optional output format.", ["png", "jpeg", "webp"]),
         background: string("Optional background mode."),
         output_compression: number("Optional output compression 0-100."),
         negative_prompt: string("Optional negative prompt."),
@@ -252,7 +250,7 @@ const DEFINITIONS = [
         true_cfg_scale: number("Optional true CFG scale."),
         seed: number("Optional seed."),
       },
-      ["prompt"],
+      ["prompt", "images"],
     ),
   },
   {
@@ -264,8 +262,8 @@ const DEFINITIONS = [
         prompt: string("Image generation prompt."),
         size: string("Optional size such as 1024x1024."),
         n: number("Optional image count."),
-        response_format: string("Optional response format such as b64_json or url."),
-        output_format: string("Optional output format such as png, jpeg, or webp."),
+        response_format: stringEnum("Optional response format.", ["b64_json", "url"]),
+        output_format: stringEnum("Optional output format.", ["png", "jpeg", "webp"]),
         negative_prompt: string("Optional negative prompt."),
         num_inference_steps: number("Optional diffusion step count."),
         guidance_scale: number("Optional guidance scale."),
@@ -285,7 +283,7 @@ const DEFINITIONS = [
         goal: string("Optional experiment goal."),
         primary_metric: string("Primary metric name printed by the harness as METRIC name=value."),
         metric_unit: string("Metric unit such as ms, tokens, or percent."),
-        direction: string("Better direction: lower or higher."),
+        direction: stringEnum("Better direction.", ["lower", "higher"]),
         scope_paths: { type: "array", items: string("Expected-to-modify path or glob.") },
         off_limits: { type: "array", items: string("Path or glob that should not be modified.") },
         constraints: { type: "array", items: string("Free-form experiment constraint.") },
@@ -310,11 +308,11 @@ const DEFINITIONS = [
   },
   {
     name: "plan",
-    description: "Manage plan mode for this session. Use create only to start planning; when a plan is already active, use get/update instead. Use update to persist questions, decisions, markdown plan body, and summary. Use approve only when the plan is ready for the user to confirm execution.",
+    description: "Manage plan mode for this session: create, inspect, update, approve, pause, resume, or drop a plan.",
     permission: "read",
     parameters: objectSchema(
       {
-        op: string("Operation: create, get, update, approve, pause, resume, or drop."),
+        op: stringEnum("Plan operation.", ["create", "get", "update", "approve", "pause", "resume", "drop"]),
         objective: string("Plan objective. Required for op=create when no active plan exists; optional replacement for op=update."),
         body: string("Self-contained markdown plan body for op=create, update, or approve."),
         summary: string("Concise plan summary or approval summary."),
@@ -328,7 +326,7 @@ const DEFINITIONS = [
     permission: "read",
     parameters: objectSchema(
       {
-        status: string("Run outcome: keep, discard, crash, or checks_failed."),
+        status: stringEnum("Run outcome.", ["keep", "discard", "crash", "checks_failed"]),
         metric: number("Primary metric value to record. Optional when the pending run parsed the primary metric."),
         description: string("Short description of what changed or what the run measured."),
         metrics: jsonObject("Optional secondary metric values."),
@@ -339,21 +337,34 @@ const DEFINITIONS = [
   },
   {
     name: "lsp",
-    description: "Run lightweight code-intelligence actions such as status, diagnostics, symbols, hover, references, and rename.",
+    description: "Run read-only code-intelligence actions such as status, diagnostics, symbols, hover, and references.",
     permission: "read",
     parameters: objectSchema(
       {
-        action: string("status, diagnostics, definition, references, hover, symbols, rename, rename_file, or code_actions."),
+        action: stringEnum("Read-only LSP action.", ["status", "diagnostics", "definition", "references", "hover", "symbols", "code_actions"]),
         path: string("Workspace-relative path."),
         line: number("1-based line."),
         character: number("1-based character."),
         symbol: string("Symbol name."),
         query: string("Search query."),
-        new_name: string("Rename target."),
-        apply: boolean("Apply mutation for rename actions."),
         timeout_ms: number("Timeout in milliseconds."),
       },
       ["action"],
+    ),
+  },
+  {
+    name: "lsp_rename",
+    description: "Rename a symbol in one workspace file using the lightweight code-intelligence fallback.",
+    permission: "write",
+    parameters: objectSchema(
+      {
+        path: string("Workspace-relative path."),
+        symbol: string("Symbol to rename."),
+        new_name: string("Rename target."),
+        line: number("Optional 1-based line hint."),
+        character: number("Optional 1-based character hint."),
+      },
+      ["path", "symbol", "new_name"],
     ),
   },
   {
@@ -429,7 +440,6 @@ const DEFINITIONS = [
     permission: "shell",
     parameters: objectSchema({
       timeout_ms: number("Timeout in milliseconds. Defaults to 600000."),
-      timeout_seconds: number("Timeout in seconds. Used when timeout_ms is not supplied."),
     }),
   },
   {
@@ -526,9 +536,9 @@ const DEFINITIONS = [
         input: string("Text to synthesize."),
         voice: string("Optional voice name."),
         instructions: string("Optional voice style or emotion instructions."),
-        response_format: string("Optional response format: wav, pcm, flac, mp3, aac, or opus."),
+        response_format: stringEnum("Optional response format.", ["wav", "pcm", "flac", "mp3", "aac", "opus"]),
         speed: number("Optional speed multiplier."),
-        task_type: string("Optional Qwen3-TTS task type: CustomVoice, VoiceDesign, or Base."),
+        task_type: stringEnum("Optional Qwen3-TTS task type.", ["CustomVoice", "VoiceDesign", "Base"]),
         language: string("Optional language name or Auto."),
         ref_audio: string("Optional reference audio URL, file path, data URI, or resource:// URI."),
         ref_text: string("Optional reference transcript."),
@@ -561,10 +571,8 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         prompt: string("Video generation prompt."),
-        mode: string("Optional mode: async (default) or sync for /videos/sync."),
-        sync: boolean("Use the synchronous /videos/sync endpoint."),
-        seconds: string("Optional duration in seconds as an integer string."),
-        duration: number("Duration in seconds."),
+        mode: stringEnum("Optional mode.", ["async", "sync"]),
+        duration: number("Optional duration in seconds."),
         image_reference: string("Optional image reference URL, file path, data URI, or resource:// URI. Sent as vLLM-Omni image_reference JSON payload."),
         input_reference: string("Optional multipart input reference file path, data URI, or resource:// URI."),
         video_reference: string("Optional video reference URL, file path, data URI, or resource:// URI. Sent as vLLM-Omni video_reference JSON payload."),
@@ -620,22 +628,8 @@ const DEFINITIONS = [
     ),
   },
   {
-    name: "web_fetch",
-    description: "Fetch a direct HTTP/HTTPS URL and extract readable text. This does not require a web_search provider. Use this for any user-provided URL or search result inspection.",
-    permission: "network",
-    parameters: objectSchema(
-      {
-        url: string("HTTP or HTTPS URL to fetch."),
-        max_bytes: number("Maximum response bytes to read. Defaults to 1000000."),
-        timeout_ms: number("Request timeout in milliseconds. Defaults to 20000."),
-        format: string("text for extracted readable text, or html for raw HTML."),
-      },
-      ["url"],
-    ),
-  },
-  {
     name: "web_open",
-    description: "Open/surface an HTTP/HTTPS URL and return a lightweight readable preview. This does not require a web_search provider. Use web_fetch when the task needs full extraction controls.",
+    description: "Open an HTTP/HTTPS URL and return readable page text or raw HTML. This does not require a web_search provider.",
     permission: "network",
     parameters: objectSchema(
       {
@@ -643,14 +637,14 @@ const DEFINITIONS = [
         note: string("Optional reason or instruction for the opened URL."),
         max_bytes: number("Maximum response bytes to read for the preview. Defaults to 500000."),
         timeout_ms: number("Request timeout in milliseconds. Defaults to 20000."),
-        format: string("text for extracted readable text, or html for raw HTML."),
+        format: stringEnum("Response extraction format.", ["text", "html"]),
       },
       ["url"],
     ),
   },
   {
     name: "web_search",
-    description: "Search the web for keyword queries through the configured provider or the default zero-key HTTP fallback chain. If the query contains a direct HTTP/HTTPS URL, it is fetched directly instead of being searched.",
+    description: "Search the web for keyword queries through the configured provider or the default zero-key HTTP fallback chain. If the query contains a direct HTTP/HTTPS URL, it is opened directly instead of being searched.",
     permission: "network",
     parameters: objectSchema(
       {

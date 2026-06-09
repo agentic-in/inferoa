@@ -64,7 +64,7 @@ test("runtime prefetches direct URLs before the model turn without orphan tool m
     assert.equal(result.content, "prefetched");
 
     const events = store.listEvents(result.session.session_id);
-    assert.ok(events.some((event) => event.type === "tool.call" && event.data.tool_name === "web_fetch"));
+    assert.ok(events.some((event) => event.type === "tool.call" && event.data.tool_name === "web_open"));
     assert.ok(!events.some((event) => event.type === "tool.call" && event.data.tool_name === "web_search"));
     assert.ok(events.some((event) => event.type === "web.prefetch"));
     const prefetchIndex = events.findIndex((event) => event.type === "web.prefetch");
@@ -76,6 +76,7 @@ test("runtime prefetches direct URLs before the model turn without orphan tool m
     assert.equal(messages.filter((message) => message.role === "tool").length, 0);
     assert.equal(messages.filter((message) => message.role === "user").length, 2);
     assert.match(String(messages[0]?.content ?? ""), /Direct http:\/\/ and https:\/\/ URLs are not search queries/);
+    assert.match(String(messages[0]?.content ?? ""), /web_open/);
     assert.doesNotMatch(String(messages[0]?.content ?? ""), /Serving engines and router docs/);
     const prefetchMessage = messages.find((message) => message.role === "user" && message.content.includes("<web.prefetch.context>"));
     assert.ok(prefetchMessage);

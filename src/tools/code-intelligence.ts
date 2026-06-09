@@ -85,13 +85,22 @@ export async function lspTool(args: JsonObject, context: ToolExecutionContext): 
     return await textNavigation(action, file, rel, args);
   }
   if (action === "rename" && args.apply) {
-    return await renameSymbol(file, rel, String(args.symbol ?? args.query ?? ""), String(args.new_name ?? ""), context);
+    return fail("lsp_rename_required", "lsp is read-only; use lsp_rename to apply symbol renames");
   }
   return ok(`LSP action ${action} degraded to registry-only status`, {
     action,
     path: rel,
     reason: "No persistent language-server process is required for day-0 fallback.",
   });
+}
+
+export async function lspRenameTool(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  const rel = typeof args.path === "string" ? args.path : undefined;
+  if (!rel) {
+    return fail("path_required", "lsp_rename requires path");
+  }
+  const file = resolveInside(context.workspace.root, rel);
+  return await renameSymbol(file, rel, String(args.symbol ?? args.query ?? ""), String(args.new_name ?? ""), context);
 }
 
 export async function astGrep(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {

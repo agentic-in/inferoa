@@ -84,6 +84,32 @@ test("AST tools find and edit TypeScript functions", async () => {
     );
     assert.equal(tsStatus?.available, true);
     assert.match(String(tsStatus?.fallback_adapter ?? ""), /TypeScript compiler API/);
+
+    await writeFile(path.join(dir, "src", "rename.ts"), "export function greet() {\n  return greet.name;\n}\n", "utf8");
+    const legacyRename = await registry.call(
+      {
+        id: "tc6",
+        name: "lsp",
+        arguments: { action: "rename", path: "src/rename.ts", symbol: "greet", new_name: "hello", apply: true },
+      },
+      { session_id: session.session_id },
+    );
+    assert.equal(legacyRename.ok, false);
+    assert.equal(legacyRename.error?.code, "lsp_rename_required");
+    assert.match(await readFile(path.join(dir, "src", "rename.ts"), "utf8"), /greet/);
+
+    const rename = await registry.call(
+      {
+        id: "tc7",
+        name: "lsp_rename",
+        arguments: { path: "src/rename.ts", symbol: "greet", new_name: "hello" },
+      },
+      { session_id: session.session_id },
+    );
+    assert.equal(rename.ok, true, JSON.stringify(rename));
+    const renamed = await readFile(path.join(dir, "src", "rename.ts"), "utf8");
+    assert.match(renamed, /function hello/);
+    assert.doesNotMatch(renamed, /\bgreet\b/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

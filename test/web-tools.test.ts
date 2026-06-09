@@ -15,7 +15,7 @@ function config(): VllmAgentConfig {
   return structuredClone(DEFAULT_CONFIG);
 }
 
-test("web_fetch reads a direct URL and extracts readable HTML text", async () => {
+test("web_open reads a direct URL and extracts readable HTML text", async () => {
   const server = createServer((req, res) => {
     if (req.url === "/doc") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -36,7 +36,7 @@ test("web_fetch reads a direct URL and extracts readable HTML text", async () =>
     const workspace: WorkspaceIdentity = { id: "w_web", root: dir, alias: "web" };
     const session = store.createSession(workspace, "web");
     const registry = new ToolRegistry(config(), workspace, store);
-    const result = await registry.call({ id: "web1", name: "web_fetch", arguments: { url } }, { session_id: session.session_id, run_id: "run" });
+    const result = await registry.call({ id: "web1", name: "web_open", arguments: { url } }, { session_id: session.session_id, run_id: "run" });
     assert.equal(result.ok, true);
     assert.equal(result.data?.title, "Docs & Notes");
     assert.match(String(result.data?.text ?? ""), /Guide/);
@@ -48,7 +48,7 @@ test("web_fetch reads a direct URL and extracts readable HTML text", async () =>
   }
 });
 
-test("web_fetch works for direct URLs even when web search is disabled", async () => {
+test("web_open works for direct URLs even when web search is disabled", async () => {
   const server = createServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><title>Direct URL</title><main>Direct fetch does not need search credentials.</main>");
@@ -58,15 +58,15 @@ test("web_fetch works for direct URLs even when web search is disabled", async (
   const address = server.address() as AddressInfo;
   const url = `http://127.0.0.1:${address!.port}/`;
 
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-web-fetch-provider-off-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-web-open-provider-off-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_web_fetch_off", root: dir, alias: "web-fetch-off" };
-    const session = store.createSession(workspace, "web-fetch-off");
+    const workspace: WorkspaceIdentity = { id: "w_web_open_off", root: dir, alias: "web-open-off" };
+    const session = store.createSession(workspace, "web-open-off");
     const next = config();
     next.web_search.provider = "off";
     const registry = new ToolRegistry(next, workspace, store);
-    const result = await registry.call({ id: "web3", name: "web_fetch", arguments: { url } }, { session_id: session.session_id, run_id: "run" });
+    const result = await registry.call({ id: "web3", name: "web_open", arguments: { url } }, { session_id: session.session_id, run_id: "run" });
     assert.equal(result.ok, true);
     assert.equal(result.data?.title, "Direct URL");
     assert.match(String(result.data?.text ?? ""), /does not need search credentials/);
@@ -77,7 +77,27 @@ test("web_fetch works for direct URLs even when web search is disabled", async (
   }
 });
 
-test("web_search delegates direct URLs to fetch when search provider is disabled", async () => {
+test("web_fetch is not exposed as a registry tool", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-web-fetch-removed-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_web_fetch_removed", root: dir, alias: "web-fetch-removed" };
+    const session = store.createSession(workspace, "web-fetch-removed");
+    const registry = new ToolRegistry(config(), workspace, store);
+    assert.equal(registry.list().some((tool) => tool.name === "web_fetch"), false);
+    const result = await registry.call(
+      { id: "web_removed", name: "web_fetch", arguments: { url: "https://example.com" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "unknown_tool");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("web_search delegates direct URLs to open when search provider is disabled", async () => {
   const server = createServer((_req, res) => {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end("<!doctype html><title>URL Through Search</title><main>Direct URL query was fetched.</main>");
@@ -101,6 +121,7 @@ test("web_search delegates direct URLs to fetch when search provider is disabled
     );
     assert.equal(result.ok, true);
     assert.equal(result.data?.title, "URL Through Search");
+    assert.equal(result.data?.opened, true);
     assert.match(String(result.data?.text ?? ""), /Direct URL query was fetched/);
   } finally {
     store.close();

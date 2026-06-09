@@ -31,7 +31,7 @@ export async function webSearch(args: JsonObject, context: ToolExecutionContext)
   }
   const directUrl = firstHttpUrl(query);
   if (directUrl) {
-    const fetched = await webFetch(
+    const opened = await webOpen(
       {
         url: directUrl.toString(),
         max_bytes: args.max_bytes,
@@ -40,10 +40,10 @@ export async function webSearch(args: JsonObject, context: ToolExecutionContext)
       context,
     );
     return {
-      ...fetched,
-      summary: fetched.ok ? `Fetched direct URL from search query: ${directUrl.host}` : fetched.summary,
+      ...opened,
+      summary: opened.ok ? `Opened direct URL from search query: ${directUrl.host}` : opened.summary,
       data: {
-        ...objectField(fetched.data),
+        ...objectField(opened.data),
         query,
         direct_url: directUrl.toString(),
         via_search: true,

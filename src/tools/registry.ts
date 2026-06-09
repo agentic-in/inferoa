@@ -23,8 +23,8 @@ import {
   writeFile,
 } from "./workspace-tools.js";
 import { readProcess, runCommand, stopProcess, writeProcess } from "./process-tools.js";
-import { astEdit, astGrep, lspTool } from "./code-intelligence.js";
-import { webFetch, webOpen, webSearch } from "./web-search.js";
+import { astEdit, astGrep, lspRenameTool, lspTool } from "./code-intelligence.js";
+import { webOpen, webSearch } from "./web-search.js";
 import { skillDisable, skillEnable, skillList, skillRead } from "./skill-tools.js";
 import { goalTool } from "./goal-tools.js";
 import { planTool } from "./plan-tools.js";
@@ -64,6 +64,7 @@ const HANDLERS: Record<string, ToolHandler> = {
   list_dir: listDir,
   log_experiment: logExperiment,
   lsp: lspTool,
+  lsp_rename: lspRenameTool,
   plan: planTool,
   read_file: readFile,
   read_process: readProcess,
@@ -83,7 +84,6 @@ const HANDLERS: Record<string, ToolHandler> = {
   video_generation: videoGeneration,
   video_understanding: videoUnderstanding,
   vision_understanding: visionUnderstanding,
-  web_fetch: webFetch,
   web_open: webOpen,
   web_search: webSearch,
   write_file: writeFile,
