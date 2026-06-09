@@ -47,6 +47,8 @@ test("goal audit prompt treats completed plans as a hypothesis, not a boundary",
   assert.match(prompt, /current plan as a hypothesis/i);
   assert.match(prompt, /not as the boundary/i);
   assert.match(prompt, /Actively look for missing work/i);
+  assert.doesNotMatch(prompt, /read-only/i);
+  assert.doesNotMatch(prompt, /Do not edit files/i);
   assert.match(prompt, /Do not call goal op=complete/i);
 });
 

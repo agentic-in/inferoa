@@ -115,11 +115,6 @@ export class ToolRegistry {
       return result;
     }
     this.recordCall(context, call);
-    if (context.request_class === "audit" && !auditToolAllowed(call)) {
-      const blocked = fail("audit_tool_denied", `Tool ${call.name} is not allowed during internal goal audit runs`);
-      this.recordResult(context, call, blocked);
-      return blocked;
-    }
     const decision = this.policy.decide(definition, call.arguments);
     if (decision.status !== "allow") {
       this.store.appendEvent({
@@ -239,33 +234,4 @@ export class ToolRegistry {
       },
     });
   }
-}
-
-function auditToolAllowed(call: ToolCall): boolean {
-  const allowed = new Set([
-    "ast_grep",
-    "file_search",
-    "git_diff",
-    "git_show",
-    "git_status",
-    "glob",
-    "goal",
-    "list_dir",
-    "lsp",
-    "read_file",
-    "read_resource",
-    "session_note",
-  ]);
-  if (allowed.has(call.name)) {
-    return true;
-  }
-  if (call.name === "run_command") {
-    return auditReadOnlyCommandAllowed(String(call.arguments.command ?? ""));
-  }
-  return false;
-}
-
-function auditReadOnlyCommandAllowed(command: string): boolean {
-  const normalized = command.trim().replace(/\s+/g, " ");
-  return /^(pwd|ls\b|find\b|rg\b|grep\b|sed -n\b|cat\b|head\b|tail\b|wc\b|git (status|diff|log|show)\b|npm (test|run test|run check)\b|node --test\b|pytest\b|cargo test\b|go test\b|make test\b|pnpm test\b|yarn test\b)/.test(normalized);
 }
