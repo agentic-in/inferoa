@@ -128,7 +128,7 @@ export class Runtime {
     const clientId = options.client_id ?? randomId("c");
     const runId = options.run_id ?? randomId("run");
     const requestClass = options.request_class ?? "interactive";
-    const visibility = options.visibility ?? (requestClass === "audit" ? "internal" : "normal");
+    const visibility = options.visibility ?? (requestClass === "reflection" ? "internal" : "normal");
     const startedAt = Date.now();
     let goalTokenUsage = 0;
     let toolRounds = 0;
@@ -799,16 +799,16 @@ function goalYieldEventAfterToolCall(
   visibility: "normal" | "internal",
 ): { session_id: string; run_id: string; type: string; data: JsonObject } | undefined {
   const state = readGoalState(store, sessionId);
-  if (requestClass === "audit") {
-    if (state?.goal.last_audit_run_id === runId && state.goal.audit_status === "completed" && state.goal.last_audit_decision) {
+  if (requestClass === "reflection") {
+    if (state?.goal.last_reflection_run_id === runId && state.goal.reflection_status === "completed" && state.goal.last_reflection_decision) {
       return {
         session_id: sessionId,
         run_id: runId,
-        type: "goal.audit.decision_recorded",
+        type: "goal.reflection.decision_recorded",
         data: {
           goal_id: state.goal.id,
           frontier_generation: state.goal.frontier_generation,
-          decision: state.goal.last_audit_decision,
+          decision: state.goal.last_reflection_decision,
           request_class: requestClass,
           visibility,
         },
@@ -1062,7 +1062,7 @@ function directHttpUrls(text: string): string[] {
 }
 
 function toolsForRequestClass(tools: ToolDefinition[], requestClass: ModelRequest["request_class"]): ToolDefinition[] {
-  if (requestClass !== "audit") {
+  if (requestClass !== "reflection") {
     return tools;
   }
   const allowed = new Set([

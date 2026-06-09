@@ -342,7 +342,7 @@ function summarizeEventForCompaction(event: { type: string; data: JsonObject; cr
       created_at: event.created_at,
     };
   }
-  if (event.type === "goal.audit.completed") {
+  if (event.type === "goal.reflection.completed") {
     return {
       type: event.type,
       decision: event.data.decision,
@@ -463,7 +463,7 @@ function summarizeEventForCompaction(event: { type: string; data: JsonObject; cr
 }
 
 function isInternalRawEvent(event: { type: string; data: JsonObject }): boolean {
-  if (event.data.visibility !== "internal" && event.data.request_class !== "audit") {
+  if (event.data.visibility !== "internal" && event.data.request_class !== "reflection") {
     return false;
   }
   return event.type === "user.prompt" || event.type === "model.response.settled" || event.type === "tool.call" || event.type === "tool.result" || event.type === "web.prefetch";

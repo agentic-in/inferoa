@@ -204,11 +204,11 @@ const DEFINITIONS = [
   },
   {
     name: "goal",
-    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, audit, resume, complete, or drop the active goal.",
+    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, reflect, resume, complete, or drop the active goal.",
     permission: "read",
     parameters: objectSchema(
       {
-        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "audit", "resume", "complete", "drop"]),
+        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "reflect", "resume", "complete", "drop"]),
         objective: string("Goal objective. Required for op=create."),
         token_budget: number("Optional positive token budget for op=create."),
         steps: { type: "array", description: "Concrete internal goal steps for op=create, decompose, or update_plan.", items: goalStep },
@@ -218,9 +218,9 @@ const DEFINITIONS = [
         status: stringEnum("Step status for op=update_step.", ["pending", "in_progress", "completed", "blocked", "skipped"]),
         notes: string("Optional notes for op=update_step. Empty string clears notes."),
         evidence: jsonObject("Optional structured step evidence for op=update_step."),
-        decision: stringEnum("Audit decision for op=audit in an internal audit run only.", ["expand", "done", "blocked", "retry"]),
-        verification_evidence: jsonObject("Structured verification evidence for op=audit with decision=done in an internal audit run."),
-        blocker: string("Optional blocker details for op=audit with decision=blocked or retry in an internal audit run."),
+        decision: stringEnum("Reflection decision for op=reflect in an internal reflection run only.", ["expand", "done", "blocked"]),
+        verification_evidence: jsonObject("Structured verification evidence for op=reflect with decision=done in an internal reflection run."),
+        blocker: string("Optional blocker details for op=reflect with decision=blocked in an internal reflection run."),
         summary: string("Completion summary for op=complete, or reason for op=drop."),
         force: boolean("Allow op=complete even if internal goal plan has unfinished steps."),
       },

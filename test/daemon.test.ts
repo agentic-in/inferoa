@@ -9,7 +9,7 @@ import os from "node:os";
 import YAML from "yaml";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonGoal, queueDaemonRun, serveDaemon } from "../src/daemon/supervisor.js";
-import { completeGoalAudit, createGoalState, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { completeGoalReflection, createGoalState, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
 import { SessionStore } from "../src/session/store.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 
@@ -54,8 +54,8 @@ test("daemon cancel preserves terminal job states", async () => {
   }
 });
 
-test("daemon goal supervisor expands frontier through internal audit and completes after done audit", async () => {
-  let auditCalls = 0;
+test("daemon goal supervisor expands frontier through internal reflection and completes after done reflection", async () => {
+  let reflectionCalls = 0;
   let backgroundCalls = 0;
   const server = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
@@ -65,31 +65,31 @@ test("daemon goal supervisor expands frontier through internal audit and complet
     req.on("end", () => {
       const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-      if (requestClass === "audit") {
-        auditCalls += 1;
+      if (requestClass === "reflection") {
+        reflectionCalls += 1;
         const toolCall =
-          auditCalls === 1
+          reflectionCalls === 1
             ? {
-                id: "call_audit_expand",
+                id: "call_reflection_expand",
                 type: "function",
                 function: {
                   name: "goal",
                   arguments: JSON.stringify({
-                    op: "audit",
+                    op: "reflect",
                     decision: "expand",
                     summary: "Hidden frontier discovered.",
                     steps: [{ id: "hidden-frontier", title: "Handle hidden frontier", status: "pending" }],
                   }),
                 },
               }
-            : auditCalls === 2
+            : reflectionCalls === 2
               ? {
-                  id: "call_audit_done",
+                  id: "call_reflection_done",
                   type: "function",
                   function: {
                     name: "goal",
                     arguments: JSON.stringify({
-                      op: "audit",
+                      op: "reflect",
                       decision: "done",
                       summary: "No additional frontier remains.",
                       verification_evidence: { git_status: "checked", hidden_frontier: "complete" },
@@ -98,10 +98,10 @@ test("daemon goal supervisor expands frontier through internal audit and complet
                 }
               : undefined;
         if (toolCall) {
-          writeSse(res, { id: `resp_audit_${auditCalls}`, model: "daemon-goal-test", choices: [{ delta: { tool_calls: [toolCall] } }] });
+          writeSse(res, { id: `resp_reflection_${reflectionCalls}`, model: "daemon-goal-test", choices: [{ delta: { tool_calls: [toolCall] } }] });
           writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 20, completion_tokens: 3 } });
         } else {
-          writeSse(res, { id: `resp_audit_final_${auditCalls}`, model: "daemon-goal-test", choices: [{ delta: { content: "audit settled" } }] });
+          writeSse(res, { id: `resp_reflection_final_${reflectionCalls}`, model: "daemon-goal-test", choices: [{ delta: { content: "reflection settled" } }] });
           writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 21, completion_tokens: 4 } });
         }
       } else {
@@ -161,14 +161,14 @@ test("daemon goal supervisor expands frontier through internal audit and complet
 
     const finished = readGoalState(store, session.session_id)?.goal;
     assert.equal(finished?.status, "complete");
-    assert.equal(finished?.last_audit_decision, "done");
+    assert.equal(finished?.last_reflection_decision, "done");
     assert.equal(finished?.frontier_generation, 2);
     assert.equal(store.getSupervisorJob(job.job_id)?.status, "complete");
     const events = store.listEvents(session.session_id);
-    assert.ok(events.some((event) => event.type === "goal.audit.started"));
+    assert.ok(events.some((event) => event.type === "goal.reflection.started"));
     assert.ok(events.some((event) => event.type === "goal.frontier.expanded"));
     assert.ok(events.some((event) => event.type === "goal.completion_report"));
-    assert.ok(events.some((event) => event.type === "user.prompt" && event.data.visibility === "internal" && event.data.request_class === "audit"));
+    assert.ok(events.some((event) => event.type === "user.prompt" && event.data.visibility === "internal" && event.data.request_class === "reflection"));
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -176,8 +176,8 @@ test("daemon goal supervisor expands frontier through internal audit and complet
   }
 });
 
-test("daemon goal supervisor pauses when audit omits a decision instead of reusing stale audit state", async () => {
-  let auditCalls = 0;
+test("daemon goal supervisor pauses when reflection omits a decision instead of reusing stale reflection state", async () => {
+  let reflectionCalls = 0;
   const server = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
       return;
@@ -185,14 +185,14 @@ test("daemon goal supervisor pauses when audit omits a decision instead of reusi
     req.resume();
     req.on("end", () => {
       const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
-      if (requestClass === "audit") {
-        auditCalls += 1;
+      if (requestClass === "reflection") {
+        reflectionCalls += 1;
       }
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       writeSse(res, {
-        id: `resp_${requestClass}_${auditCalls}`,
+        id: `resp_${requestClass}_${reflectionCalls}`,
         model: "daemon-goal-test",
-        choices: [{ delta: { content: requestClass === "audit" ? "audit without decision" : "work settled" } }],
+        choices: [{ delta: { content: requestClass === "reflection" ? "reflection without decision" : "work settled" } }],
       });
       writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 4 } });
       res.end("data: [DONE]\n\n");
@@ -201,7 +201,7 @@ test("daemon goal supervisor pauses when audit omits a decision instead of reusi
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-goal-stale-audit-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-goal-stale-reflection-"));
   const workspaceRoot = path.join(dir, "workspace");
   const state = path.join(dir, "state");
   const store = await SessionStore.open(state);
@@ -209,28 +209,28 @@ test("daemon goal supervisor pauses when audit omits a decision instead of reusi
     await mkdir(path.join(workspaceRoot, ".inferoa"), { recursive: true });
     const configPath = path.join(workspaceRoot, ".inferoa", "config.yaml");
     await writeFile(configPath, YAML.stringify(testConfig(`http://127.0.0.1:${address.port}/v1`)), "utf8");
-    const workspace: WorkspaceIdentity = { id: "w_daemon_stale_audit", root: workspaceRoot, alias: "daemon-stale-audit" };
-    const session = store.createSession(workspace, "daemon stale audit");
-    let goal = createGoalState({ objective: "Do not reuse stale audit decisions" });
+    const workspace: WorkspaceIdentity = { id: "w_daemon_stale_reflection", root: workspaceRoot, alias: "daemon-stale-reflection" };
+    const session = store.createSession(workspace, "daemon stale reflection");
+    let goal = createGoalState({ objective: "Do not reuse stale reflection decisions" });
     goal = replaceGoalPlanning(goal, { steps: [{ id: "done", title: "Already done frontier", status: "completed" }] });
-    goal = completeGoalAudit(goal, {
+    goal = completeGoalReflection(goal, {
       decision: "done",
-      summary: "Old audit should not count.",
+      summary: "Old reflection should not count.",
       verification_evidence: { old: true },
-    }, "run_old_audit");
+    }, "run_old_reflection");
     writeGoalState(store, session.session_id, goal);
 
     const job = await queueDaemonGoal({ stateDir: state, workspaceRoot, sessionId: session.session_id, maxIterations: 2, configPath });
     await serveDaemon({ stateDir: state, once: true });
 
-    assert.equal(auditCalls, 1);
+    assert.equal(reflectionCalls, 1);
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "paused");
-    assert.equal(current?.last_audit_run_id === "run_old_audit", false);
-    assert.notEqual(current?.last_audit_decision, "done");
+    assert.equal(current?.last_reflection_run_id === "run_old_reflection", false);
+    assert.notEqual(current?.last_reflection_decision, "done");
     const finishedJob = store.getSupervisorJob(job.job_id);
     assert.equal(finishedJob?.status, "paused");
-    assert.equal(finishedJob?.metadata.pause_reason, "audit_missing_decision");
+    assert.equal(finishedJob?.metadata.pause_reason, "reflection_missing_decision");
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -239,7 +239,7 @@ test("daemon goal supervisor pauses when audit omits a decision instead of reusi
 });
 
 test("daemon run with an active goal triggers hidden goal supervision after the visible turn", async () => {
-  let auditCalls = 0;
+  let reflectionCalls = 0;
   let backgroundCalls = 0;
   const server = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
@@ -249,26 +249,26 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
     req.on("end", () => {
       const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-      if (requestClass === "audit") {
-        auditCalls += 1;
-        if (auditCalls === 1) {
+      if (requestClass === "reflection") {
+        reflectionCalls += 1;
+        if (reflectionCalls === 1) {
           writeSse(res, {
-            id: "resp_hidden_audit_done",
+            id: "resp_hidden_reflection_done",
             model: "daemon-goal-test",
             choices: [
               {
                 delta: {
                   tool_calls: [
                     {
-                      id: "call_hidden_audit_done",
+                      id: "call_hidden_reflection_done",
                       type: "function",
                       function: {
                         name: "goal",
                         arguments: JSON.stringify({
-                          op: "audit",
+                          op: "reflect",
                           decision: "done",
                           summary: "The post-turn supervisor found no remaining frontier.",
-                          verification_evidence: { post_turn_audit: true },
+                          verification_evidence: { post_turn_reflection: true },
                         }),
                       },
                     },
@@ -279,7 +279,7 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
           });
           writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 22, completion_tokens: 3 } });
         } else {
-          writeSse(res, { id: "resp_hidden_audit_final", model: "daemon-goal-test", choices: [{ delta: { content: "audit settled" } }] });
+          writeSse(res, { id: "resp_hidden_reflection_final", model: "daemon-goal-test", choices: [{ delta: { content: "reflection settled" } }] });
           writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 21, completion_tokens: 4 } });
         }
       } else {
@@ -311,14 +311,14 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
     await serveDaemon({ stateDir: state, once: true });
 
     assert.equal(backgroundCalls, 1);
-    assert.equal(auditCalls, 1);
+    assert.equal(reflectionCalls, 1);
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "complete");
-    assert.equal(current?.last_audit_decision, "done");
+    assert.equal(current?.last_reflection_decision, "done");
     assert.equal(store.getSupervisorJob(job.job_id)?.status, "complete");
     const prompts = store.listEvents(session.session_id).filter((event) => event.type === "user.prompt");
     assert.ok(prompts.some((event) => event.data.prompt === "visible daemon work" && event.data.visibility === "normal"));
-    assert.ok(prompts.some((event) => event.data.request_class === "audit" && event.data.visibility === "internal"));
+    assert.ok(prompts.some((event) => event.data.request_class === "reflection" && event.data.visibility === "internal"));
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

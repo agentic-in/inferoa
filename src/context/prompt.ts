@@ -315,7 +315,7 @@ function sameRunScope(eventRunId: string | undefined, responseRunId: string | un
 }
 
 function isInternalPromptReplayEvent(event: SessionEvent): boolean {
-  if (event.data.visibility !== "internal" && event.data.request_class !== "audit") {
+  if (event.data.visibility !== "internal" && event.data.request_class !== "reflection") {
     return false;
   }
   return event.type === "user.prompt" || event.type === "model.response.settled" || event.type === "tool.result" || event.type === "web.prefetch";

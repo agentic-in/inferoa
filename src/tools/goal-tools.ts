@@ -3,14 +3,14 @@ import { fail, ok } from "../util/limit.js";
 import type { ToolExecutionContext } from "./context.js";
 import {
   cloneGoalState,
-  completeGoalAudit,
+  completeGoalReflection,
   completionBudgetReport,
   createGoalState,
   formatGoalDuration,
-  goalCompletionAuditBlockMessage,
+  goalCompletionReflectionBlockMessage,
   incompleteGoalPlanningMessage,
   goalPlanningProgressSummary,
-  parseGoalAuditDecision,
+  parseGoalReflectionDecision,
   parseGoalStepStatus,
   readGoalState,
   replaceGoalPlanning,
@@ -35,8 +35,8 @@ export async function goalTool(args: JsonObject, context: ToolExecutionContext):
         return updateGoalPlan(args, context, op);
       case "update_step":
         return updateGoalStep(args, context);
-      case "audit":
-        return recordGoalAudit(args, context);
+      case "reflect":
+        return recordGoalReflection(args, context);
       case "resume":
         return resumeGoal(context);
       case "complete":
@@ -154,23 +154,23 @@ function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolRe
   }
 }
 
-function recordGoalAudit(args: JsonObject, context: ToolExecutionContext): ToolResult {
-  if (context.request_class !== "audit" || context.visibility !== "internal") {
-    return fail("goal_audit_context_required", "goal audit decisions can only be recorded by an internal audit run");
+function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  if (context.request_class !== "reflection" || context.visibility !== "internal") {
+    return fail("goal_reflection_context_required", "goal reflection decisions can only be recorded by an internal reflection run");
   }
   const state = readGoalState(context.store, context.session_id);
   if (!state) {
-    return fail("goal_missing", "No goal to audit.");
+    return fail("goal_missing", "No goal to reflect on.");
   }
   if (state.goal.status === "complete" || state.goal.status === "dropped") {
-    return fail("goal_closed", `Cannot audit a ${state.goal.status} goal.`);
+    return fail("goal_closed", `Cannot reflect on a ${state.goal.status} goal.`);
   }
-  const decision = parseGoalAuditDecision(stringArg(args.decision));
+  const decision = parseGoalReflectionDecision(stringArg(args.decision));
   if (!decision) {
-    return fail("goal_audit_decision_required", "decision is required for op=audit and must be expand, done, blocked, or retry");
+    return fail("goal_reflection_decision_required", "decision is required for op=reflect and must be expand, done, or blocked");
   }
   try {
-    const next = completeGoalAudit(
+    const next = completeGoalReflection(
       state,
       {
         decision,
@@ -186,12 +186,12 @@ function recordGoalAudit(args: JsonObject, context: ToolExecutionContext): ToolR
     context.store.appendEvent({
       session_id: context.session_id,
       run_id: context.run_id,
-      type: "goal.audit.completed",
+      type: "goal.reflection.completed",
       data: {
         goal_id: saved.goal.id,
         frontier_generation: saved.goal.frontier_generation,
         decision,
-        summary: saved.goal.last_audit_summary,
+        summary: saved.goal.last_reflection_summary,
         verification_evidence: saved.goal.verification_evidence,
         blocker: saved.goal.blocker,
       },
@@ -209,9 +209,9 @@ function recordGoalAudit(args: JsonObject, context: ToolExecutionContext): ToolR
         },
       });
     }
-    return describeGoal(saved, decision === "expand" ? "Goal frontier expanded" : "Goal audit recorded");
+    return describeGoal(saved, decision === "expand" ? "Goal frontier expanded" : "Goal reflection recorded");
   } catch (error) {
-    return fail("goal_audit_failed", error instanceof Error ? error.message : String(error));
+    return fail("goal_reflection_failed", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -248,11 +248,11 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   if (status === "complete" && !summary) {
     return failGoalWithState(state, "goal_summary_required", "summary is required when completing a goal");
   }
-  if (status === "complete" && isInternalAuditContext(context)) {
-    return recordGoalAudit(
+  if (status === "complete" && isInternalReflectionContext(context)) {
+    return recordGoalReflection(
       {
         ...args,
-        op: "audit",
+        op: "reflect",
         decision: "done",
         summary,
         verification_evidence: objectArg(args.verification_evidence) ?? objectArg(args.evidence) ?? { summary },
@@ -267,9 +267,9 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
         return failGoalWithState(state, "goal_incomplete_plan", incompleteMessage);
       }
     }
-    const auditMessage = goalCompletionAuditBlockMessage(state.goal);
-    if (auditMessage) {
-      return failGoalWithState(state, "goal_audit_required", auditMessage);
+    const reflectionMessage = goalCompletionReflectionBlockMessage(state.goal);
+    if (reflectionMessage) {
+      return failGoalWithState(state, "goal_reflection_required", reflectionMessage);
     }
   }
   const next = cloneGoalState(state);
@@ -282,8 +282,8 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), status === "complete" ? "Goal complete" : "Goal dropped");
 }
 
-function isInternalAuditContext(context: ToolExecutionContext): boolean {
-  return context.request_class === "audit" && context.visibility === "internal";
+function isInternalReflectionContext(context: ToolExecutionContext): boolean {
+  return context.request_class === "reflection" && context.visibility === "internal";
 }
 
 function failGoalWithState(state: GoalState, code: string, message: string, extra: JsonObject = {}): ToolResult {
@@ -335,8 +335,8 @@ function goalSummary(prefix: string, goal: GoalRecord): string {
       lines.push(`Active step: ${active.id} ${active.title}`);
     }
   }
-  if (goal.last_audit_decision) {
-    lines.push(`Last audit: ${goal.last_audit_decision}${goal.last_audit_summary ? ` - ${goal.last_audit_summary}` : ""}`);
+  if (goal.last_reflection_decision) {
+    lines.push(`Last reflection: ${goal.last_reflection_decision}${goal.last_reflection_summary ? ` - ${goal.last_reflection_summary}` : ""}`);
   }
   if (goal.status === "complete" && goal.summary) {
     lines.push(`Completion summary: ${goal.summary}`);

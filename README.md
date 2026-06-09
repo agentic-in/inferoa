@@ -108,7 +108,7 @@ Use the core commands as the task
 grows:
 
 - `/goal` keeps a durable objective, decomposition, evidence, and completion
-  audit across long-running work.
+  reflection across long-running work.
 - `/plan` turns ambiguous scope into an inspectable plan before execution.
 - `/autoresearch` runs benchmark-style iteration with metrics and failure
   evidence in the same session.

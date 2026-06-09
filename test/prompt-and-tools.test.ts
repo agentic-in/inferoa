@@ -882,12 +882,12 @@ test("ToolRegistry runs workspace, search, command, git, and evidence tools", as
   }
 });
 
-test("ToolRegistry audit runs use normal workspace tool permissions", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-audit-tools-"));
+test("ToolRegistry reflection runs use normal workspace tool permissions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-reflection-tools-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_audit_tools", root: dir, alias: "audit-tools" };
-    const session = store.createSession(workspace, "audit-tools");
+    const workspace: WorkspaceIdentity = { id: "w_reflection_tools", root: dir, alias: "reflection-tools" };
+    const session = store.createSession(workspace, "reflection-tools");
     const registry = new ToolRegistry(config(), workspace, store);
     await mkdir(path.join(dir, "website"), { recursive: true });
     await writeFile(
@@ -897,20 +897,20 @@ test("ToolRegistry audit runs use normal workspace tool permissions", async () =
     );
 
     const build = await registry.call(
-      { id: "audit_build", name: "run_command", arguments: { command: "cd website && npm run build 2>&1 | tail -50", timeout_ms: 30_000 } },
-      { session_id: session.session_id, run_id: "run_audit_tools", request_class: "audit", visibility: "internal" },
+      { id: "reflection_build", name: "run_command", arguments: { command: "cd website && npm run build 2>&1 | tail -50", timeout_ms: 30_000 } },
+      { session_id: session.session_id, run_id: "run_reflection_tools", request_class: "reflection", visibility: "internal" },
     );
-    assert.notEqual(build.error?.code, "audit_tool_denied");
+    assert.notEqual(build.error?.code, "reflection_tool_denied");
     assert.equal(build.ok, true, JSON.stringify(build));
     assert.match(String(build.data?.output ?? ""), /built/);
 
     const write = await registry.call(
-      { id: "audit_write", name: "write_file", arguments: { path: "audit-output.txt", content: "audit can write\n", overwrite: true } },
-      { session_id: session.session_id, run_id: "run_audit_tools", request_class: "audit", visibility: "internal" },
+      { id: "reflection_write", name: "write_file", arguments: { path: "reflection-output.txt", content: "reflection can write\n", overwrite: true } },
+      { session_id: session.session_id, run_id: "run_reflection_tools", request_class: "reflection", visibility: "internal" },
     );
-    assert.notEqual(write.error?.code, "audit_tool_denied");
+    assert.notEqual(write.error?.code, "reflection_tool_denied");
     assert.equal(write.ok, true, JSON.stringify(write));
-    assert.equal(await readFile(path.join(dir, "audit-output.txt"), "utf8"), "audit can write\n");
+    assert.equal(await readFile(path.join(dir, "reflection-output.txt"), "utf8"), "reflection can write\n");
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

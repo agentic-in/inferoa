@@ -99,9 +99,9 @@ test("model-facing tool schemas use enums and omit legacy aliases", () => {
   assert.equal(byName.has("web_open"), true);
   assert.deepEqual(prop("web_open", "format")?.enum, ["text", "html"]);
 
-  assert.deepEqual(prop("goal", "op")?.enum, ["create", "get", "decompose", "update_plan", "update_step", "audit", "resume", "complete", "drop"]);
+  assert.deepEqual(prop("goal", "op")?.enum, ["create", "get", "decompose", "update_plan", "update_step", "reflect", "resume", "complete", "drop"]);
   assert.deepEqual(prop("goal", "status")?.enum, ["pending", "in_progress", "completed", "blocked", "skipped"]);
-  assert.deepEqual(prop("goal", "decision")?.enum, ["expand", "done", "blocked", "retry"]);
+  assert.deepEqual(prop("goal", "decision")?.enum, ["expand", "done", "blocked"]);
   assert.ok((byName.get("goal")?.description.length ?? 999) < 240);
 
   assert.deepEqual(prop("plan", "op")?.enum, ["create", "get", "update", "approve", "pause", "resume", "drop"]);

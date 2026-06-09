@@ -5,8 +5,8 @@ import { truncateText } from "../util/limit.js";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 export type GoalStepStatus = "pending" | "in_progress" | "completed" | "blocked" | "skipped";
-export type GoalAuditDecision = "expand" | "done" | "blocked" | "retry";
-export type GoalAuditStatus = "running" | "completed";
+export type GoalReflectionDecision = "expand" | "done" | "blocked";
+export type GoalReflectionStatus = "running" | "completed";
 
 const PLAN_PROMPT_BODY_LIMIT = 6000;
 
@@ -21,10 +21,10 @@ export interface GoalRecord {
   tool_rounds_used: number;
   tool_calls_used: number;
   frontier_generation: number;
-  audit_status?: GoalAuditStatus;
-  last_audit_run_id?: string;
-  last_audit_decision?: GoalAuditDecision;
-  last_audit_summary?: string;
+  reflection_status?: GoalReflectionStatus;
+  last_reflection_run_id?: string;
+  last_reflection_decision?: GoalReflectionDecision;
+  last_reflection_summary?: string;
   verification_evidence?: JsonObject;
   blocker?: string;
   planning?: GoalPlanningState;
@@ -73,8 +73,8 @@ export interface GoalStepUpdateInput {
   active_step_id?: string;
 }
 
-export interface GoalAuditInput {
-  decision: GoalAuditDecision;
+export interface GoalReflectionInput {
+  decision: GoalReflectionDecision;
   summary?: string;
   verification_evidence?: JsonObject;
   blocker?: string;
@@ -150,30 +150,30 @@ export function replaceGoalPlanning(state: GoalState, input: GoalPlanningInput, 
   return next;
 }
 
-export function markGoalAuditStarted(state: GoalState, runId: string, now = new Date()): GoalState {
+export function markGoalReflectionStarted(state: GoalState, runId: string, now = new Date()): GoalState {
   const next = cloneGoalState(state);
-  next.goal.audit_status = "running";
-  next.goal.last_audit_run_id = runId;
-  next.goal.last_audit_decision = undefined;
-  next.goal.last_audit_summary = undefined;
+  next.goal.reflection_status = "running";
+  next.goal.last_reflection_run_id = runId;
+  next.goal.last_reflection_decision = undefined;
+  next.goal.last_reflection_summary = undefined;
   next.goal.verification_evidence = undefined;
   next.goal.blocker = undefined;
   next.goal.updated_at = now.toISOString();
   return next;
 }
 
-export function completeGoalAudit(state: GoalState, input: GoalAuditInput, runId: string, now = new Date()): GoalState {
+export function completeGoalReflection(state: GoalState, input: GoalReflectionInput, runId: string, now = new Date()): GoalState {
   const timestamp = now.toISOString();
   let next = cloneGoalState(state);
-  next.goal.audit_status = "completed";
-  next.goal.last_audit_run_id = runId;
-  next.goal.last_audit_decision = input.decision;
-  next.goal.last_audit_summary = cleanOptionalString(input.summary);
+  next.goal.reflection_status = "completed";
+  next.goal.last_reflection_run_id = runId;
+  next.goal.last_reflection_decision = input.decision;
+  next.goal.last_reflection_summary = cleanOptionalString(input.summary);
   next.goal.verification_evidence = input.verification_evidence ? cloneJsonObject(input.verification_evidence) : undefined;
   next.goal.blocker = cleanOptionalString(input.blocker);
   if (input.decision === "expand") {
     if (!input.steps?.length) {
-      throw new Error("audit decision expand requires new steps");
+      throw new Error("reflection decision expand requires concrete new steps with substantive impact on the original goal");
     }
     next.goal.frontier_generation = Math.max(0, next.goal.frontier_generation) + 1;
     next.goal.planning = createGoalPlanning(
@@ -186,19 +186,19 @@ export function completeGoalAudit(state: GoalState, input: GoalAuditInput, runId
     );
   }
   if (input.decision === "done" && !input.verification_evidence) {
-    throw new Error("audit decision done requires verification_evidence");
+    throw new Error("reflection decision done requires verification_evidence");
   }
   next.goal.updated_at = timestamp;
   return next;
 }
 
-export function completeGoalAfterAudit(state: GoalState, summary: string | undefined, now = new Date()): GoalState {
-  const auditMessage = goalCompletionAuditBlockMessage(state.goal);
-  if (auditMessage) {
-    throw new Error(auditMessage);
+export function completeGoalAfterReflection(state: GoalState, summary: string | undefined, now = new Date()): GoalState {
+  const reflectionMessage = goalCompletionReflectionBlockMessage(state.goal);
+  if (reflectionMessage) {
+    throw new Error(reflectionMessage);
   }
   const next = cloneGoalState(state);
-  const trimmed = summary?.trim() || next.goal.last_audit_summary;
+  const trimmed = summary?.trim() || next.goal.last_reflection_summary;
   if (trimmed) {
     next.goal.summary = trimmed;
   }
@@ -483,13 +483,13 @@ export function renderGoalModeSection(state: GoalState | undefined): string | un
     `time used ms: ${goalDurationMs(goal)}`,
     goal.frontier_generation > 0 ? `frontier generation: ${goal.frontier_generation}` : undefined,
     goal.planning ? renderGoalPlanning(goal.planning) : "Internal goal plan: not decomposed yet.",
-    renderLatestAudit(goal),
+    renderLatestReflection(goal),
     goal.plan ? renderApprovedPlan(goal.plan, Boolean(goal.planning)) : undefined,
     goal.planning
       ? "Keep the internal goal plan current with goal op=update_step as findings, edits, and verification change."
       : "For broad or multi-step work, call goal op=decompose with concrete steps before risky edits.",
     "Work on the objective until it is genuinely handled. Use the goal tool to inspect, resume, complete, or drop goal state when appropriate.",
-    "When the current frontier appears exhausted, a tool-enabled internal audit run must verify whether more frontier exists before completion.",
+    "When the current frontier appears exhausted, a tool-enabled internal reflection run must decide whether more frontier, verification, decomposition, or polish work with substantive impact on the original objective remains before completion.",
     "When completing the goal, include a completion summary in the goal tool call.",
     "Do not mark the goal complete merely because the current checklist is empty, the turn is ending, or the budget is low.",
   ]
@@ -551,12 +551,12 @@ export function isGoalFrontierExhausted(goal: GoalRecord): boolean {
   return Boolean(goal.planning && incompleteGoalPlanningSteps(goal).length === 0);
 }
 
-export function goalCompletionAuditBlockMessage(goal: GoalRecord): string | undefined {
-  if (goal.last_audit_decision !== "done") {
-    return "Cannot complete goal until a tool-enabled audit run records decision=done.";
+export function goalCompletionReflectionBlockMessage(goal: GoalRecord): string | undefined {
+  if (goal.last_reflection_decision !== "done") {
+    return "Cannot complete goal until a tool-enabled reflection run records decision=done.";
   }
   if (!goal.verification_evidence || Object.keys(goal.verification_evidence).length === 0) {
-    return "Cannot complete goal until the latest done audit records verification_evidence.";
+    return "Cannot complete goal until the latest done reflection records verification_evidence.";
   }
   return undefined;
 }
@@ -631,11 +631,11 @@ function goalCompletionForRun(store: SessionStore, sessionId: string, runId: str
   return report ? { objective: state.goal.objective, report } : undefined;
 }
 
-export function parseGoalAuditDecision(value: unknown): GoalAuditDecision | undefined {
-  return value === "expand" || value === "done" || value === "blocked" || value === "retry" ? value : undefined;
+export function parseGoalReflectionDecision(value: unknown): GoalReflectionDecision | undefined {
+  return value === "expand" || value === "done" || value === "blocked" ? value : undefined;
 }
 
-function parseGoalAuditStatus(value: unknown): GoalAuditStatus | undefined {
+function parseGoalReflectionStatus(value: unknown): GoalReflectionStatus | undefined {
   return value === "running" || value === "completed" ? value : undefined;
 }
 
@@ -675,10 +675,10 @@ function parseGoalState(data: JsonObject): GoalState | undefined {
       tool_rounds_used: numeric(candidate.tool_rounds_used),
       tool_calls_used: numeric(candidate.tool_calls_used),
       frontier_generation: frontierGeneration,
-      audit_status: parseGoalAuditStatus(candidate.audit_status),
-      last_audit_run_id: optionalString(candidate.last_audit_run_id),
-      last_audit_decision: parseGoalAuditDecision(candidate.last_audit_decision),
-      last_audit_summary: optionalString(candidate.last_audit_summary),
+      reflection_status: parseGoalReflectionStatus(candidate.reflection_status),
+      last_reflection_run_id: optionalString(candidate.last_reflection_run_id),
+      last_reflection_decision: parseGoalReflectionDecision(candidate.last_reflection_decision),
+      last_reflection_summary: optionalString(candidate.last_reflection_summary),
       verification_evidence: parseJsonObject(candidate.verification_evidence),
       blocker: optionalString(candidate.blocker),
       planning,
@@ -715,15 +715,15 @@ function renderGoalPlanning(planning: GoalPlanningState): string {
     .join("\n");
 }
 
-function renderLatestAudit(goal: GoalRecord): string | undefined {
-  if (!goal.audit_status && !goal.last_audit_decision && !goal.last_audit_summary && !goal.verification_evidence && !goal.blocker) {
+function renderLatestReflection(goal: GoalRecord): string | undefined {
+  if (!goal.reflection_status && !goal.last_reflection_decision && !goal.last_reflection_summary && !goal.verification_evidence && !goal.blocker) {
     return undefined;
   }
   return [
-    "Latest internal audit:",
-    goal.audit_status ? `status: ${goal.audit_status}` : undefined,
-    goal.last_audit_decision ? `decision: ${goal.last_audit_decision}` : undefined,
-    goal.last_audit_summary ? `summary: ${escapeXmlText(truncateEvidenceText(goal.last_audit_summary, 1000))}` : undefined,
+    "Latest internal reflection:",
+    goal.reflection_status ? `status: ${goal.reflection_status}` : undefined,
+    goal.last_reflection_decision ? `decision: ${goal.last_reflection_decision}` : undefined,
+    goal.last_reflection_summary ? `summary: ${escapeXmlText(truncateEvidenceText(goal.last_reflection_summary, 1000))}` : undefined,
     goal.blocker ? `blocker: ${escapeXmlText(truncateEvidenceText(goal.blocker, 1000))}` : undefined,
     goal.verification_evidence ? `verification evidence: ${escapeXmlText(compactEvidenceSummary(goal.verification_evidence))}` : undefined,
   ]

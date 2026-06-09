@@ -4,6 +4,7 @@ import { formatDuration } from "./cache-footer.js";
 const ACTIVITY_FRAMES = {
   thinking: ["·", "•", "·"],
   goal: ["•", "·"],
+  reflection: ["◐", "◒", "◑", "◓"],
   research: ["›", "›"],
   tool: ["•", "·"],
   retry: ["↻", "↺"],
@@ -24,7 +25,7 @@ export function renderActivityLine(label: string, elapsedMs: number, frameIndex:
   const phase = activityPhase(label);
   const frames = ACTIVITY_FRAMES[phase];
   const glyph = frames[frameIndex % frames.length] ?? frames[0]!;
-  const glyphColor = phase === "retry" ? 252 : 244;
+  const glyphColor = phase === "retry" ? 252 : phase === "reflection" ? 111 : 244;
   const elapsed = formatDuration(elapsedMs);
   const suffix = ` ${elapsed}`;
   const normalized = label.replace(/\s+/g, " ").trim() || "Working";
@@ -82,6 +83,9 @@ function activityPhase(label: string): keyof typeof ACTIVITY_FRAMES {
   }
   if (normalized.startsWith("prefill") || normalized.startsWith("prefilling") || normalized.startsWith("loading")) {
     return "context";
+  }
+  if (normalized.startsWith("reflect") || normalized.includes("reflection")) {
+    return "reflection";
   }
   if (normalized.includes("goal")) {
     return "goal";

@@ -3,16 +3,16 @@ import type { SessionStore } from "../session/store.js";
 import { randomId } from "../util/hash.js";
 import {
   cloneGoalState,
-  completeGoalAfterAudit,
+  completeGoalAfterReflection,
   incompleteGoalPlanningSteps,
   isGoalFrontierExhausted,
-  markGoalAuditStarted,
+  markGoalReflectionStarted,
   readGoalState,
   recordGoalCompletionReport,
   writeGoalState,
   type GoalState,
 } from "./state.js";
-import { buildGoalAuditPrompt, buildGoalWorkPrompt } from "./supervisor-prompts.js";
+import { buildGoalReflectionPrompt, buildGoalWorkPrompt } from "./supervisor-prompts.js";
 
 export const DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS = 1000;
 
@@ -48,7 +48,7 @@ export interface GoalSupervisorOptions {
   shouldContinue?: () => boolean;
   runTurn: (request: GoalSupervisorTurnRequest) => Promise<GoalSupervisorTurnResult | undefined>;
   onIteration?: (iteration: number) => void;
-  onAuditExpanded?: (state: GoalState) => void;
+  onReflectionExpanded?: (state: GoalState) => void;
   onCompleted?: (state: GoalState, runId: string) => void;
   onPaused?: (state: GoalState, runId: string | undefined, reason: string) => void;
   onWaiting?: (reason: string) => void;
@@ -67,7 +67,7 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
     }
     options.onIteration?.(iteration + 1);
     if (isGoalFrontierExhausted(state.goal)) {
-      const result = await runGoalAudit(options, state, iteration + 1);
+      const result = await runGoalReflection(options, state, iteration + 1);
       if (result.status === "waiting") {
         continue;
       }
@@ -96,59 +96,61 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
   return { status: "idle", iteration, goal_id: goalId(state) };
 }
 
-async function runGoalAudit(options: GoalSupervisorOptions, state: GoalState, iteration: number): Promise<GoalSupervisorResult> {
-  const auditRunId = randomId("run");
-  writeGoalState(options.store, options.sessionId, markGoalAuditStarted(state, auditRunId), auditRunId);
+async function runGoalReflection(options: GoalSupervisorOptions, state: GoalState, iteration: number): Promise<GoalSupervisorResult> {
+  const reflectionRunId = randomId("run");
+  writeGoalState(options.store, options.sessionId, markGoalReflectionStarted(state, reflectionRunId), reflectionRunId);
   options.store.appendEvent({
     session_id: options.sessionId,
-    run_id: auditRunId,
-    type: "goal.audit.started",
+    run_id: reflectionRunId,
+    type: "goal.reflection.started",
     data: {
       goal_id: state.goal.id,
       frontier_generation: state.goal.frontier_generation,
       supervisor: options.supervisor,
     },
   });
-  const auditRun = await options.runTurn({
-    prompt: buildGoalAuditPrompt(state.goal.objective),
-    requestClass: "audit",
+  const reflectionRun = await options.runTurn({
+    prompt: buildGoalReflectionPrompt(state.goal.objective),
+    requestClass: "reflection",
     visibility: "internal",
-    runId: auditRunId,
-    activityLabel: "Auditing goal frontier",
+    runId: reflectionRunId,
+    activityLabel: "Reflecting goal frontier",
     suppressTranscript: true,
   });
-  const audited = readGoalState(options.store, options.sessionId);
-  if (!audited || audited.goal.status === "complete" || audited.goal.status === "dropped") {
-    return { status: "idle", iteration, run_id: auditRun?.run_id ?? auditRunId, goal_id: audited?.goal.id };
+  const reflected = readGoalState(options.store, options.sessionId);
+  if (!reflected || reflected.goal.status === "complete" || reflected.goal.status === "dropped") {
+    return { status: "idle", iteration, run_id: reflectionRun?.run_id ?? reflectionRunId, goal_id: reflected?.goal.id };
   }
-  if (!isCompletedAuditForRun(audited, auditRunId)) {
-    const paused = pauseGoal(options, audited, auditRunId, "audit_missing_decision");
-    return { status: "paused", iteration, reason: "audit_missing_decision", run_id: auditRunId, goal_id: paused.goal.id };
+  if (!isCompletedReflectionForRun(reflected, reflectionRunId)) {
+    const paused = pauseGoal(options, reflected, reflectionRunId, "reflection_missing_decision");
+    return { status: "paused", iteration, reason: "reflection_missing_decision", run_id: reflectionRunId, goal_id: paused.goal.id };
   }
-  if (audited.goal.last_audit_decision === "expand") {
-    options.onAuditExpanded?.(audited);
-    return { status: "waiting", iteration, reason: "expanded", run_id: auditRunId, goal_id: audited.goal.id };
+  if (reflected.goal.last_reflection_decision === "expand") {
+    options.onReflectionExpanded?.(reflected);
+    return { status: "waiting", iteration, reason: "expanded", run_id: reflectionRunId, goal_id: reflected.goal.id };
   }
-  if (audited.goal.last_audit_decision === "done") {
+  // Reflection deliberately has no ambiguous continue state: new work must be
+  // concrete and substantively tied to the original objective, otherwise done.
+  if (reflected.goal.last_reflection_decision === "done") {
     try {
-      const completed = completeGoalAfterAudit(audited, audited.goal.last_audit_summary);
-      const saved = writeGoalState(options.store, options.sessionId, completed, auditRunId);
-      recordGoalCompletionReport(options.store, options.sessionId, auditRunId);
-      options.onCompleted?.(saved, auditRunId);
-      return { status: "complete", iteration, run_id: auditRunId, goal_id: saved.goal.id };
+      const completed = completeGoalAfterReflection(reflected, reflected.goal.last_reflection_summary);
+      const saved = writeGoalState(options.store, options.sessionId, completed, reflectionRunId);
+      recordGoalCompletionReport(options.store, options.sessionId, reflectionRunId);
+      options.onCompleted?.(saved, reflectionRunId);
+      return { status: "complete", iteration, run_id: reflectionRunId, goal_id: saved.goal.id };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      const paused = pauseGoal(options, audited, auditRunId, reason);
-      return { status: "paused", iteration, reason, run_id: auditRunId, goal_id: paused.goal.id };
+      const paused = pauseGoal(options, reflected, reflectionRunId, reason);
+      return { status: "paused", iteration, reason, run_id: reflectionRunId, goal_id: paused.goal.id };
     }
   }
-  const reason = audited.goal.blocker ?? audited.goal.last_audit_decision ?? "audit_decision";
-  const paused = pauseGoal(options, audited, auditRunId, reason);
+  const reason = reflected.goal.blocker ?? reflected.goal.last_reflection_decision ?? "reflection_decision";
+  const paused = pauseGoal(options, reflected, reflectionRunId, reason);
   return {
-    status: audited.goal.last_audit_decision === "blocked" ? "blocked" : "paused",
+    status: reflected.goal.last_reflection_decision === "blocked" ? "blocked" : "paused",
     iteration,
     reason,
-    run_id: auditRunId,
+    run_id: reflectionRunId,
     goal_id: paused.goal.id,
   };
 }
@@ -161,8 +163,8 @@ function goalId(state: GoalState | undefined): string | undefined {
   return state?.goal.id;
 }
 
-function isCompletedAuditForRun(state: GoalState, auditRunId: string): boolean {
-  return state.goal.last_audit_run_id === auditRunId && state.goal.audit_status === "completed";
+function isCompletedReflectionForRun(state: GoalState, reflectionRunId: string): boolean {
+  return state.goal.last_reflection_run_id === reflectionRunId && state.goal.reflection_status === "completed";
 }
 
 function goalUpdatedDuringRun(store: SessionStore, sessionId: string, runId: string): boolean {

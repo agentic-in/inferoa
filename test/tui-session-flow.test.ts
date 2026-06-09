@@ -251,19 +251,19 @@ test("decode activity stays active without per-chunk resume redraws", async () =
   }
 });
 
-test("suppressed internal audit renders tool trace without assistant text", async () => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-audit-tool-trace-"));
+test("suppressed internal reflection renders tool trace without assistant text", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-reflection-tool-trace-"));
   try {
     const session = {
-      session_id: "s_audit_trace",
-      workspace_id: "w_audit_trace",
-      title: "audit trace",
+      session_id: "s_reflection_trace",
+      workspace_id: "w_reflection_trace",
+      title: "reflection trace",
       status: "idle",
       created_at: new Date(0).toISOString(),
       updated_at: new Date(0).toISOString(),
     };
-    const runId = "run_audit_trace";
-    const toolCallId = "call_audit_done";
+    const runId = "run_reflection_trace";
+    const toolCallId = "call_reflection_done";
     const events = [
       {
         session_id: session.session_id,
@@ -273,7 +273,7 @@ test("suppressed internal audit renders tool trace without assistant text", asyn
         data: {
           tool_call_id: toolCallId,
           tool_name: "goal",
-          arguments: { op: "audit", decision: "done" },
+          arguments: { op: "reflect", decision: "done" },
         },
       },
       {
@@ -286,16 +286,16 @@ test("suppressed internal audit renders tool trace without assistant text", asyn
           tool_name: "goal",
           result: {
             ok: true,
-            summary: "Goal audit recorded: improve docs wording",
+            summary: "Goal reflection recorded: improve docs wording",
             data: {
               enabled: true,
               goal: {
-                id: "goal_audit_trace",
+                id: "goal_reflection_trace",
                 objective: "improve docs wording",
                 status: "active",
                 frontier_generation: 1,
-                audit_status: "completed",
-                last_audit_decision: "done",
+                reflection_status: "completed",
+                last_reflection_decision: "done",
               },
             },
           },
@@ -307,15 +307,15 @@ test("suppressed internal audit renders tool trace without assistant text", asyn
       {
         config: structuredClone(DEFAULT_CONFIG),
         configFiles: [],
-        workspace: { id: "w_audit_trace", root: stateDir, alias: "audit-trace" },
+        workspace: { id: "w_reflection_trace", root: stateDir, alias: "reflection-trace" },
         store: { listEvents: () => events },
         runtime: {
           run: async (options: {
             onDelta?: (text: string) => void;
             onStatus?: (event: { type: string; [key: string]: unknown }) => void;
           }) => {
-            options.onStatus?.({ type: "model_start", model: "audit-trace-test" });
-            options.onDelta?.("hidden audit assistant text\n");
+            options.onStatus?.({ type: "model_start", model: "reflection-trace-test" });
+            options.onDelta?.("hidden reflection assistant text\n");
             options.onStatus?.({
               type: "tool_start",
               session_id: session.session_id,
@@ -331,13 +331,13 @@ test("suppressed internal audit renders tool trace without assistant text", asyn
               tool_name: "goal",
               tool_call_id: toolCallId,
               ok: true,
-              summary: "Goal audit recorded: improve docs wording",
+              summary: "Goal reflection recorded: improve docs wording",
               duration_ms: 12,
             });
             return {
               session,
               run_id: runId,
-              content: "hidden audit assistant text",
+              content: "hidden reflection assistant text",
               tool_rounds: 1,
               tool_calls: 1,
               duration_ms: 1,
@@ -384,12 +384,12 @@ test("suppressed internal audit renders tool trace without assistant text", asyn
       transcript.push(text);
     };
 
-    await view.submitPrompt("audit", { renderPrompt: false, suppressTranscript: true, requestClass: "audit", visibility: "internal" });
+    await view.submitPrompt("reflection", { renderPrompt: false, suppressTranscript: true, requestClass: "reflection", visibility: "internal" });
 
     const plain = stripAnsi(transcript.join(""));
     assert.match(plain, /Updated goal/);
     assert.match(plain, /improve docs wording/);
-    assert.doesNotMatch(plain, /hidden audit assistant text/);
+    assert.doesNotMatch(plain, /hidden reflection assistant text/);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }

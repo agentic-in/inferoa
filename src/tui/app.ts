@@ -29,7 +29,7 @@ import {
   completionBudgetReport,
   createGoalState,
   incompleteGoalPlanningMessage,
-  goalCompletionAuditBlockMessage,
+  goalCompletionReflectionBlockMessage,
   goalPlanningProgressSummary,
   readGoalState,
   recordGoalCompletionReport,
@@ -403,8 +403,8 @@ export class TuiApp {
             activityLabel: request.activityLabel,
             suppressTranscript: request.suppressTranscript,
           }),
-        onAuditExpanded: (state) => {
-          this.renderGoalSupervisorRecord("Goal audit", auditDetail("expanded frontier", state.goal.last_audit_summary, state.goal.frontier_generation), 75);
+        onReflectionExpanded: (state) => {
+          this.renderGoalSupervisorRecord("Goal reflection", reflectionDetail("expanded frontier", state.goal.last_reflection_summary, state.goal.frontier_generation), 75);
         },
         onCompleted: (state) => {
           this.renderGoalSupervisorRecord("Goal complete", goalCompletionRecordDetails(state.goal), 48);
@@ -2884,9 +2884,9 @@ export class TuiApp {
         return;
       }
       if (parsed.action === "complete") {
-        const auditMessage = goalCompletionAuditBlockMessage(current.goal);
-        if (auditMessage) {
-          this.renderNotice(auditMessage);
+        const reflectionMessage = goalCompletionReflectionBlockMessage(current.goal);
+        if (reflectionMessage) {
+          this.renderNotice(reflectionMessage);
           this.renderGoalPanel(current);
           return;
         }
@@ -2956,8 +2956,8 @@ export class TuiApp {
     if (goal.frontier_generation > 0) {
       lines.push(`${fg256(39, "frontier")} generation ${goal.frontier_generation}`);
     }
-    if (goal.last_audit_decision) {
-      lines.push(`${fg256(39, "audit")} ${goal.last_audit_decision}${goal.last_audit_summary ? ` · ${goal.last_audit_summary}` : ""}`);
+    if (goal.last_reflection_decision) {
+      lines.push(`${fg256(39, "reflection")} ${goal.last_reflection_decision}${goal.last_reflection_summary ? ` · ${goal.last_reflection_summary}` : ""}`);
     }
     if (goal.blocker) {
       lines.push(`${fg256(203, "blocker")} ${goal.blocker}`);
@@ -3904,7 +3904,7 @@ export class TuiApp {
     const liveToolCallIds = new Set<string>();
     const prefillActivity = options.activityLabel ?? inferoaActivityLabel("Prefill");
     const decodeActivity = inferoaActivityLabel("Decode");
-    const renderSuppressedToolTrace = options.suppressTranscript && options.requestClass === "audit" && options.visibility === "internal";
+    const renderSuppressedToolTrace = options.suppressTranscript && options.requestClass === "reflection" && options.visibility === "internal";
     const activity = this.startActivityIndicator(prefillActivity);
     let sawModelDelta = false;
     const abort = new AbortController();
@@ -4382,7 +4382,7 @@ function goalPanelUsage(goal: GoalRecord): string | undefined {
 }
 
 function goalCompletionRecordDetails(goal: GoalRecord): GoalSupervisorRecordDetail[] {
-  const summary = goal.last_audit_summary || goal.summary || "audit found no remaining frontier";
+  const summary = goal.last_reflection_summary || goal.summary || "reflection found no remaining frontier";
   return [
     { label: "summary", text: summary, color: 250 },
     { label: "stats", text: completionBudgetReport(goal) ?? goalPanelUsage(goal) ?? "no usage recorded", color: 244 },
@@ -4972,8 +4972,8 @@ function isActivityEvent(event: SessionEvent): boolean {
     event.type.includes("evidence") ||
     event.type === "resource.created" ||
     event.type === "goal.completion_report" ||
-    event.type === "goal.audit.started" ||
-    event.type === "goal.audit.completed" ||
+    event.type === "goal.reflection.started" ||
+    event.type === "goal.reflection.completed" ||
     event.type === "goal.frontier.expanded" ||
     event.type.startsWith("goal.supervisor.") ||
     event.type === "run.completed" ||
@@ -5094,7 +5094,7 @@ function terminalLine(text: string): string {
   return text.replace(/[\r\n]+/g, " ");
 }
 
-function auditDetail(action: string, summary: string | undefined, frontierGeneration: number): string {
+function reflectionDetail(action: string, summary: string | undefined, frontierGeneration: number): string {
   const parts = [`${action} generation ${frontierGeneration}`];
   if (summary) {
     parts.push(summary);

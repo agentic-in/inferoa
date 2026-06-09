@@ -20,6 +20,7 @@ test("activity line uses only neutral white/gray text animation", () => {
 test("activity line uses distinct minimal motion for model, goal, tool, retry, and compression phases", () => {
   const thinking = stripAnsi(renderActivityLine("Decode with Inferoa", 1200, 1, 80));
   const goal = stripAnsi(renderActivityLine("Completing goal", 1200, 1, 80));
+  const reflection = stripAnsi(renderActivityLine("Reflecting goal frontier", 1200, 1, 80));
   const tool = stripAnsi(renderActivityLine("Reading src/runtime.ts", 1200, 1, 80));
   const retry = stripAnsi(renderActivityLine("Retrying model in 1s", 1200, 1, 80));
   const compact = stripAnsi(renderActivityLine("Compressing context 200/100 tokens", 1200, 1, 80));
@@ -27,10 +28,20 @@ test("activity line uses distinct minimal motion for model, goal, tool, retry, a
 
   assert.match(thinking, /^• Decode with Inferoa 1\.2s$/);
   assert.match(goal, /^· Completing goal 1\.2s$/);
+  assert.match(reflection, /^◒ Reflecting goal frontier 1\.2s$/);
   assert.match(tool, /^· Reading src\/runtime\.ts 1\.2s$/);
   assert.match(retry, /^↺ Retrying model in 1s 1\.2s$/);
   assert.match(compact, /^▰ Compressing context 200\/100 tokens 1\.2s$/);
   assert.match(research, /^› Running autoresearch benchmark 1\.2s$/);
+});
+
+test("reflection activity uses a distinct focused accent", () => {
+  const first = renderActivityLine("Reflecting goal frontier", 1200, 0, 80);
+  const later = renderActivityLine("Reflecting goal frontier", 1200, 2, 80);
+
+  assert.match(stripAnsi(first), /^◐ Reflecting goal frontier 1\.2s$/);
+  assert.match(stripAnsi(later), /^◑ Reflecting goal frontier 1\.2s$/);
+  assert.match(`${first}${later}`, /\x1b\[38;5;111m[^\x1b]+\x1b\[0m/);
 });
 
 test("Inferoa activity labels use the banner wordmark styling", () => {
