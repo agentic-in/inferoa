@@ -251,6 +251,196 @@ test("decode activity stays active without per-chunk resume redraws", async () =
   }
 });
 
+test("suppressed internal audit renders tool trace without assistant text", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-audit-tool-trace-"));
+  try {
+    const session = {
+      session_id: "s_audit_trace",
+      workspace_id: "w_audit_trace",
+      title: "audit trace",
+      status: "idle",
+      created_at: new Date(0).toISOString(),
+      updated_at: new Date(0).toISOString(),
+    };
+    const runId = "run_audit_trace";
+    const toolCallId = "call_audit_done";
+    const events = [
+      {
+        session_id: session.session_id,
+        run_id: runId,
+        type: "tool.call",
+        created_at: new Date(0).toISOString(),
+        data: {
+          tool_call_id: toolCallId,
+          tool_name: "goal",
+          arguments: { op: "audit", decision: "done" },
+        },
+      },
+      {
+        session_id: session.session_id,
+        run_id: runId,
+        type: "tool.result",
+        created_at: new Date(0).toISOString(),
+        data: {
+          tool_call_id: toolCallId,
+          tool_name: "goal",
+          result: {
+            ok: true,
+            summary: "Goal audit recorded: improve docs wording",
+            data: {
+              enabled: true,
+              goal: {
+                id: "goal_audit_trace",
+                objective: "improve docs wording",
+                status: "active",
+                frontier_generation: 1,
+                audit_status: "completed",
+                last_audit_decision: "done",
+              },
+            },
+          },
+        },
+      },
+    ];
+    const transcript: string[] = [];
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace: { id: "w_audit_trace", root: stateDir, alias: "audit-trace" },
+        store: { listEvents: () => events },
+        runtime: {
+          run: async (options: {
+            onDelta?: (text: string) => void;
+            onStatus?: (event: { type: string; [key: string]: unknown }) => void;
+          }) => {
+            options.onStatus?.({ type: "model_start", model: "audit-trace-test" });
+            options.onDelta?.("hidden audit assistant text\n");
+            options.onStatus?.({
+              type: "tool_start",
+              session_id: session.session_id,
+              run_id: runId,
+              tool_name: "goal",
+              tool_call_id: toolCallId,
+              summary: "Updated goal",
+            });
+            options.onStatus?.({
+              type: "tool_end",
+              session_id: session.session_id,
+              run_id: runId,
+              tool_name: "goal",
+              tool_call_id: toolCallId,
+              ok: true,
+              summary: "Goal audit recorded: improve docs wording",
+              duration_ms: 12,
+            });
+            return {
+              session,
+              run_id: runId,
+              content: "hidden audit assistant text",
+              tool_rounds: 1,
+              tool_calls: 1,
+              duration_ms: 1,
+              tokens_used: 1,
+              rtk: {
+                tool_calls: 1,
+                rtk_tool_calls: 0,
+                rtk_commands: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                saved_tokens: 0,
+                savings_pct: 0,
+                estimated_without_rtk_tokens: 1,
+                status: "ok",
+              },
+            };
+          },
+        },
+      } as never,
+    );
+    const view = tui as unknown as {
+      submitPrompt: (
+        prompt: string,
+        options?: { renderPrompt?: boolean; suppressTranscript?: boolean; requestClass?: string; visibility?: "normal" | "internal" },
+      ) => Promise<unknown>;
+      waitForCodeIntelligenceBeforeChat: () => Promise<boolean>;
+      startActivityIndicator: (label: string) => {
+        status: () => void;
+        record: () => void;
+        pauseForOutput: () => void;
+        stop: () => void;
+      };
+      writeTranscript: (text: string) => void;
+    };
+
+    view.waitForCodeIntelligenceBeforeChat = async () => true;
+    view.startActivityIndicator = () => ({
+      status: () => {},
+      record: () => {},
+      pauseForOutput: () => {},
+      stop: () => {},
+    });
+    view.writeTranscript = (text) => {
+      transcript.push(text);
+    };
+
+    await view.submitPrompt("audit", { renderPrompt: false, suppressTranscript: true, requestClass: "audit", visibility: "internal" });
+
+    const plain = stripAnsi(transcript.join(""));
+    assert.match(plain, /Updated goal/);
+    assert.match(plain, /improve docs wording/);
+    assert.doesNotMatch(plain, /hidden audit assistant text/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal supervisor completion record wraps summary and includes stats", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-complete-record-"));
+  try {
+    const transcript: string[] = [];
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace: { id: "w_goal_complete_record", root: stateDir, alias: "goal-complete-record" },
+        store: { listEvents: () => [] },
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      renderGoalSupervisorRecord: (action: string, detail: Array<{ label: string; text: string; color?: number }>, color: number) => void;
+      writeTranscript: (text: string) => void;
+    };
+    view.writeTranscript = (text) => {
+      transcript.push(text);
+    };
+
+    view.renderGoalSupervisorRecord(
+      "Goal complete",
+      [
+        {
+          label: "summary",
+          text: "Improved docs wording across the blog repository with a long completion summary that must wrap instead of disappearing at the terminal edge.",
+        },
+        {
+          label: "stats",
+          text: "Goal achieved. 46 loops · 128 tool calls · 8m 59s · 4767746 tokens used.",
+        },
+      ],
+      48,
+    );
+
+    const plain = stripAnsi(transcript.join(""));
+    assert.match(plain, /Goal complete/);
+    assert.match(plain, /summary Improved docs wording/);
+    assert.match(plain, /terminal edge/);
+    assert.match(plain, /stats Goal achieved\. 46 loops .*128 tool calls .*8m 59s .*4767746 tokens used/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("inline panels sanitize embedded newlines before writing background rows", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-inline-panel-"));
   const originalStdoutWrite = process.stdout.write;

@@ -26,6 +26,7 @@ import { runFinalAcceptance } from "../validation/acceptance.js";
 import {
   attachGoalPlanSnapshot,
   cloneGoalState,
+  completionBudgetReport,
   createGoalState,
   incompleteGoalPlanningMessage,
   goalCompletionAuditBlockMessage,
@@ -143,6 +144,12 @@ interface ChatTurnEvidence {
   responseId?: string;
   model?: string;
   mode?: string;
+}
+
+interface GoalSupervisorRecordDetail {
+  label: string;
+  text: string;
+  color?: number;
 }
 
 interface ApiKeySelection {
@@ -400,7 +407,7 @@ export class TuiApp {
           this.renderGoalSupervisorRecord("Goal audit", auditDetail("expanded frontier", state.goal.last_audit_summary, state.goal.frontier_generation), 75);
         },
         onCompleted: (state) => {
-          this.renderGoalSupervisorRecord("Goal complete", state.goal.last_audit_summary ?? "audit found no remaining frontier", 48);
+          this.renderGoalSupervisorRecord("Goal complete", goalCompletionRecordDetails(state.goal), 48);
         },
         onPaused: (_state, _runId, reason) => {
           this.renderGoalSupervisorRecord("Goal paused", reason, 220);
@@ -3897,6 +3904,7 @@ export class TuiApp {
     const liveToolCallIds = new Set<string>();
     const prefillActivity = options.activityLabel ?? inferoaActivityLabel("Prefill");
     const decodeActivity = inferoaActivityLabel("Decode");
+    const renderSuppressedToolTrace = options.suppressTranscript && options.requestClass === "audit" && options.visibility === "internal";
     const activity = this.startActivityIndicator(prefillActivity);
     let sawModelDelta = false;
     const abort = new AbortController();
@@ -3950,12 +3958,12 @@ export class TuiApp {
             activity.status(event.summary ?? toolActivityAction(event.tool_name));
           }
           if (event.type === "tool_end") {
-            if (options.suppressTranscript) {
+            if (options.suppressTranscript && !renderSuppressedToolTrace) {
               activity.status(formatToolActivityLine(event.tool_name, event.ok, event.summary, event.duration_ms));
               return;
             }
             let output = "";
-            const flushed = markdown.flush();
+            const flushed = options.suppressTranscript ? "" : markdown.flush();
             if (flushed) {
               if (renderState.lastSegment === "tool") {
                 output += "\n";
@@ -4173,16 +4181,23 @@ export class TuiApp {
     return `${leadingGap ? "\n" : ""}${lines.join("\n")}\n`;
   }
 
-  private renderGoalSupervisorRecord(action: string, detail?: string, color = 75): void {
-    this.writeTranscript(withConversationGap(renderActivityRecordLine({
+  private renderGoalSupervisorRecord(action: string, detail?: string | GoalSupervisorRecordDetail[], color = 75): void {
+    const width = safeTerminalWidth();
+    const lines = [renderActivityRecordLine({
       marker: "•",
       markerColor: color,
       action,
       actionColor: color,
-      detail: detail ? oneLine(detail) : undefined,
+      detail: typeof detail === "string" && detail ? oneLine(detail) : undefined,
       detailColor: 250,
-      width: safeTerminalWidth(),
-    })));
+      width,
+    })];
+    if (Array.isArray(detail)) {
+      for (const item of detail) {
+        lines.push(...renderGoalSupervisorDetail(item, width));
+      }
+    }
+    this.writeTranscript(withConversationGap(lines.join("\n")));
   }
 
   private latestTurnEvidence(sessionId: string, runId: string): ChatTurnEvidence {
@@ -4358,6 +4373,25 @@ function goalPanelUsage(goal: GoalRecord): string | undefined {
     parts.push(formatDuration(goal.time_used_ms));
   }
   return parts.length ? parts.join(" · ") : undefined;
+}
+
+function goalCompletionRecordDetails(goal: GoalRecord): GoalSupervisorRecordDetail[] {
+  const summary = goal.last_audit_summary || goal.summary || "audit found no remaining frontier";
+  return [
+    { label: "summary", text: summary, color: 250 },
+    { label: "stats", text: completionBudgetReport(goal) ?? goalPanelUsage(goal) ?? "no usage recorded", color: 244 },
+  ];
+}
+
+function renderGoalSupervisorDetail(detail: GoalSupervisorRecordDetail, width: number): string[] {
+  const label = detail.label.trim() || "detail";
+  const color = detail.color ?? 250;
+  const prefixPlain = `  ${label} `;
+  const prefix = `  ${fg256(39, label)} `;
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(detail.text), room);
+  const continuation = " ".repeat(visibleWidth(prefixPlain));
+  return chunks.map((chunk, index) => (index === 0 ? `${prefix}${fg256(color, chunk)}` : `${continuation}${fg256(color, chunk)}`));
 }
 
 function goalStepStatusMarker(status: string): string {
