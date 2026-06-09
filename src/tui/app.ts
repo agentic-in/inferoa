@@ -110,6 +110,12 @@ import {
   type PromptQueueState,
 } from "./prompt-queue.js";
 import { applyClarifyInputToken, createClarifyInputState, renderClarifyComposerPanel } from "./clarify.js";
+import {
+  createComposerInputHistory,
+  navigateComposerInputHistory,
+  recordComposerInputHistoryEntry,
+  type ComposerInputHistoryNavigation,
+} from "./input-history.js";
 import type { ContextEngineStatus } from "../code-intelligence/codegraph-engine.js";
 
 type LoadedApp = Awaited<ReturnType<typeof loadApp>>;
@@ -235,6 +241,7 @@ export class TuiApp {
   #promptWorkerScheduled = false;
   #goalSupervisorActive = false;
   #activeAbort: AbortController | undefined;
+  #inputHistory = createComposerInputHistory();
   #welcomeCodeIntelligenceStarted = false;
   #welcomeCodeIntelligenceStop: (() => void) | undefined;
   #shutdownStarted = false;
@@ -300,6 +307,7 @@ export class TuiApp {
         continue;
       }
       if (isPathListInput(text)) {
+        this.recordInputHistory(text);
         this.enqueuePrompt(text);
         continue;
       }
@@ -316,8 +324,13 @@ export class TuiApp {
         }
         continue;
       }
+      this.recordInputHistory(text);
       this.enqueuePrompt(text);
     }
+  }
+
+  private recordInputHistory(text: string): void {
+    this.#inputHistory = recordComposerInputHistoryEntry(this.#inputHistory, text);
   }
 
   private enqueuePrompt(prompt: string, options: { renderPrompt?: boolean } = {}): void {
@@ -506,6 +519,7 @@ export class TuiApp {
     let compactRanges: ComposerCompactRange[] = [];
     let selected = 0;
     let selectionTouched = false;
+    let historyNavigation: ComposerInputHistoryNavigation | undefined;
     let renderedLines = 0;
     let renderedCursorLine = 0;
     let renderedCursorColumn = 0;
@@ -714,6 +728,7 @@ export class TuiApp {
         compactRanges = [];
         selected = 0;
         selectionTouched = false;
+        historyNavigation = undefined;
         render();
         return true;
       };
@@ -725,6 +740,7 @@ export class TuiApp {
         compactRanges = adjustComposerCompactRanges(compactRanges, safeCursor, safeCursor, text.length);
         selected = 0;
         selectionTouched = false;
+        historyNavigation = undefined;
         render();
       };
       const insertPaste = (text: string) => {
@@ -738,6 +754,7 @@ export class TuiApp {
         }
         selected = 0;
         selectionTouched = false;
+        historyNavigation = undefined;
         render();
       };
       const deleteRange = (start: number, end: number) => {
@@ -746,7 +763,25 @@ export class TuiApp {
         compactRanges = adjustComposerCompactRanges(compactRanges, start, end, 0);
         selected = 0;
         selectionTouched = false;
+        historyNavigation = undefined;
         render();
+      };
+      const navigateHistory = (direction: "previous" | "next") => {
+        if (options.suggestions === false) {
+          return false;
+        }
+        const next = navigateComposerInputHistory(this.#inputHistory, historyNavigation, direction, buffer);
+        historyNavigation = next.navigation;
+        if (!next.changed) {
+          return false;
+        }
+        buffer = next.buffer;
+        cursor = next.cursor;
+        compactRanges = [];
+        selected = 0;
+        selectionTouched = false;
+        render();
+        return true;
       };
       const submit = () => {
         const items = composerItems();
@@ -792,6 +827,7 @@ export class TuiApp {
               compactRanges = [];
               selected = 0;
               selectionTouched = false;
+              historyNavigation = undefined;
               render();
             } else if (this.interruptActiveLoop()) {
               render();
@@ -805,6 +841,8 @@ export class TuiApp {
               selected = (selected - 1 + count) % count;
               selectionTouched = true;
               render();
+            } else {
+              navigateHistory("previous");
             }
           } else if (key === "\u001b[B") {
             const count = composerItems().length;
@@ -812,6 +850,8 @@ export class TuiApp {
               selected = (selected + 1) % count;
               selectionTouched = true;
               render();
+            } else {
+              navigateHistory("next");
             }
           } else if (key === "\u001b[C") {
             cursor = moveComposerCursorRight(buffer, cursor);
@@ -833,6 +873,7 @@ export class TuiApp {
               compactRanges = [];
               selected = 0;
               selectionTouched = false;
+              historyNavigation = undefined;
               render();
             } else {
               completeSelection();
@@ -857,6 +898,7 @@ export class TuiApp {
               compactRanges = adjustComposerCompactRanges(compactRanges, cursor, oldCursor, 0);
               selected = 0;
               selectionTouched = false;
+              historyNavigation = undefined;
               render();
             }
           } else if (isPrintableInput(key)) {
