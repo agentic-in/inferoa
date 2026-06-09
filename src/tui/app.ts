@@ -82,6 +82,7 @@ import { renderToolCards } from "./tool-renderer.js";
 import { withConversationGap } from "./transcript-spacing.js";
 import { MarkdownStreamRenderer } from "./markdown.js";
 import { renderHomeFrame } from "./home.js";
+import { applyTextInputToken, createTextInputState, renderTextInputDisplay } from "./text-input.js";
 import {
   backspaceComposer,
   adjustComposerCompactRanges,
@@ -1879,18 +1880,17 @@ export class TuiApp {
     if (!stdin.isTTY) {
       return defaultValue ?? "";
     }
-    let value = "";
+    let input = createTextInputState();
     this.#rl?.pause();
     stdout.write(ansi.hideCursor);
     return await new Promise((resolve, reject) => {
       const render = () => {
         const panelInputWidth = Math.min(76, Math.max(48, terminalWidth() - 14));
-        const display = options.secret ? "•".repeat(value.length) : value;
-        const shown = truncateToWidth(display, panelInputWidth - 5);
+        const display = renderTextInputDisplay(input, panelInputWidth - 5, { secret: options.secret });
         const cursor = fg256(75, "▌");
         const defaultHint = defaultValue && !options.secret ? `enter accept · default ${defaultValue}` : "enter accept";
         this.renderCenteredPanel(label, [
-          `${fg256(75, "›")} ${shown}${cursor}${shown ? "" : ` ${fg256(238, "type to override")}`}`,
+          `${fg256(75, "›")} ${display.beforeCursor}${cursor}${display.afterCursor}${input.value ? "" : ` ${fg256(238, "type to override")}`}`,
           "",
           setupHint(`${defaultHint} · esc cancel`),
         ], true);
@@ -1906,7 +1906,7 @@ export class TuiApp {
       };
       const finish = () => {
         cleanup();
-        resolve(value.trim() || defaultValue || "");
+        resolve(input.value.trim() || defaultValue || "");
       };
       const cancel = () => {
         cleanup();
@@ -1921,15 +1921,9 @@ export class TuiApp {
           } else if (key === "\r" || key === "\n") {
             finish();
             done = true;
-          } else if (key === "\u007f") {
-            value = value.slice(0, -1);
-            render();
           } else {
-            const printable = printableText(key);
-            if (printable) {
-              value += printable;
-              render();
-            }
+            input = applyTextInputToken(input, key);
+            render();
           }
           if (done) {
             return;
@@ -4768,6 +4762,7 @@ function terminalInputTokens(value: string, pasteState?: TerminalPasteState): st
     "\u001b[H",
     "\u001b[F",
     "\u001b[1~",
+    "\u001b[3~",
     "\u001b[4~",
   ];
   for (let index = 0; index < value.length;) {
