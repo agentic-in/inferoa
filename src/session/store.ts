@@ -386,6 +386,7 @@ export class SessionStore {
 
   private eventStatus(type: string): string | undefined {
     if (type === "session.locked" || type === "session.unlocked" || type === "session.renamed" || type === "resource.created") return undefined;
+    if (type.startsWith("goal.")) return undefined;
     if (type.includes("permission.requested")) return "waiting_permission";
     if (type === "tool.call" || type === "tool.execution.started" || type === "tool.progress") return "running_tool";
     if (type === "tool.result" || type === "tool.success" || type === "tool.failure" || type === "tool.abort") return "idle";

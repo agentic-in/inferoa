@@ -15,6 +15,7 @@ export function buildGoalAuditPrompt(objective: string): string {
     "Actively look for missing work implied by the top-level objective, even if all listed steps are complete.",
     "Do not edit files or execute new business work in this audit.",
     "Finish by calling goal op=audit exactly once.",
+    "Do not call goal op=complete from an audit run; completion happens after the audit decision is recorded.",
     "Use decision=expand with concrete new steps if more frontier exists.",
     "Use decision=done only if no new frontier exists and include verification_evidence.",
     "Use decision=blocked or retry with blocker details when completion cannot be determined.",

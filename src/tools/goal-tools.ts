@@ -248,6 +248,18 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   if (status === "complete" && !summary) {
     return failGoalWithState(state, "goal_summary_required", "summary is required when completing a goal");
   }
+  if (status === "complete" && isInternalAuditContext(context)) {
+    return recordGoalAudit(
+      {
+        ...args,
+        op: "audit",
+        decision: "done",
+        summary,
+        verification_evidence: objectArg(args.verification_evidence) ?? objectArg(args.evidence) ?? { summary },
+      },
+      context,
+    );
+  }
   if (status === "complete") {
     if (!booleanArg(args.force)) {
       const incompleteMessage = incompleteGoalPlanningMessage(state.goal);
@@ -268,6 +280,10 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   next.goal.status = status;
   next.goal.updated_at = new Date().toISOString();
   return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), status === "complete" ? "Goal complete" : "Goal dropped");
+}
+
+function isInternalAuditContext(context: ToolExecutionContext): boolean {
+  return context.request_class === "audit" && context.visibility === "internal";
 }
 
 function failGoalWithState(state: GoalState, code: string, message: string, extra: JsonObject = {}): ToolResult {

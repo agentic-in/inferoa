@@ -211,13 +211,17 @@ export function renderComposerSurface(options: ComposerRenderOptions): ComposerR
   }
 
   if (options.activity || options.queue?.length) {
-    lines.push("");
+    if (lines.length) {
+      lines.push("");
+    }
     if (options.activity) {
       activityLine = lines.length;
       lines.push(renderComposerActivityLine(options.activity, width));
-      lines.push("");
     }
     if (options.queue?.length) {
+      if (options.activity) {
+        lines.push("");
+      }
       lines.push(`  ${fg256(250, "Messages queued after current loop")} ${fg256(244, "(esc interrupts current loop)")}`);
       options.queue.forEach((prompt, index) => {
         const branch = index === options.queue!.length - 1 ? "╰" : "├";

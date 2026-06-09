@@ -73,6 +73,13 @@ test("SessionStore records terminal run status distinctly from active runs", asy
     const stopped = store.createSession(workspace, "stopped");
     store.appendEvent({ session_id: stopped.session_id, run_id: "run_stop", type: "run.stopped", data: { reason: "max_tool_rounds", max_tool_rounds: 1 } });
     assert.equal(store.getSession(stopped.session_id)?.status, "stopped");
+
+    const completedGoal = store.createSession(workspace, "completed goal");
+    store.appendEvent({ session_id: completedGoal.session_id, run_id: "run_goal", type: "model.request.started", data: { model: "test" } });
+    store.appendEvent({ session_id: completedGoal.session_id, run_id: "run_goal", type: "run.completed", data: { tool_rounds: 1 } });
+    store.appendEvent({ session_id: completedGoal.session_id, run_id: "run_goal", type: "goal.updated", data: { enabled: false, goal: { status: "complete" } } });
+    store.appendEvent({ session_id: completedGoal.session_id, run_id: "run_goal", type: "goal.completion_report", data: { report: "done" } });
+    assert.equal(store.getSession(completedGoal.session_id)?.status, "idle");
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

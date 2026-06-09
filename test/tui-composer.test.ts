@@ -198,7 +198,7 @@ test("composer gives activity and queued prompts balanced space above input", ()
   const queueIndex = plain.findIndex((line) => line.includes("Messages queued after current loop"));
   const inputIndex = plain.findIndex((line) => line.startsWith("›  Ask Inferoa"));
 
-  assert.equal(plain[activityIndex - 1]?.trim(), "");
+  assert.equal(activityIndex, 0);
   assert.equal(plain[activityIndex + 1]?.trim(), "");
   assert.equal(rendered.activityLine, activityIndex);
   assert.equal(stripAnsi(renderComposerActivityLine("● Working 1m 09s", 80)), plain[activityIndex]?.replace("08s", "09s"));

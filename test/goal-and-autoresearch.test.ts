@@ -47,6 +47,7 @@ test("goal audit prompt treats completed plans as a hypothesis, not a boundary",
   assert.match(prompt, /current plan as a hypothesis/i);
   assert.match(prompt, /not as the boundary/i);
   assert.match(prompt, /Actively look for missing work/i);
+  assert.match(prompt, /Do not call goal op=complete/i);
 });
 
 test("goal tool persists state and PromptBuilder injects active goal context", async () => {
@@ -825,6 +826,37 @@ test("goal audit decisions require an internal audit run context", async () => {
     );
     assert.equal(internalAudit.ok, true, JSON.stringify(internalAudit));
     assert.equal(readGoalState(store, session.session_id)?.goal.last_audit_decision, "done");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("internal audit complete call records a done audit decision", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-audit-complete-compat-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_audit_complete_compat", root: dir, alias: "goal-audit-complete-compat" };
+    const session = store.createSession(workspace, "goal-audit-complete-compat");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Finish after audit compat" }), {
+      steps: [{ id: "done", title: "Completed frontier", status: "completed" }],
+    });
+    writeGoalState(store, session.session_id, state);
+
+    const auditComplete = await registry.call(
+      { id: "audit_complete_compat", name: "goal", arguments: { op: "complete", summary: "Audit found no remaining frontier." } },
+      { session_id: session.session_id, run_id: "run_audit_complete_compat", request_class: "audit", visibility: "internal" },
+    );
+
+    assert.equal(auditComplete.ok, true, JSON.stringify(auditComplete));
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.audit_status, "completed");
+    assert.equal(current?.last_audit_run_id, "run_audit_complete_compat");
+    assert.equal(current?.last_audit_decision, "done");
+    assert.deepEqual(current?.verification_evidence, { summary: "Audit found no remaining frontier." });
+    assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.audit.completed" && event.run_id === "run_audit_complete_compat"));
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
