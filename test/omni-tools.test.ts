@@ -185,6 +185,150 @@ test("video_generation follows the vLLM-Omni async video job lifecycle", async (
   }
 });
 
+test("resource URIs feed Omni tool inputs with API-aligned payloads", async () => {
+  const seen: Array<{ method?: string; url?: string; body?: string; contentType?: string }> = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      seen.push({ method: req.method, url: req.url, body, contentType: req.headers["content-type"] });
+      if (req.method === "POST" && req.url === "/v1/images/generations") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: Buffer.from("fake-image").toString("base64") }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/images/edits") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ b64_json: Buffer.from("edited-image").toString("base64") }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: "saw chained image" } }], usage: {} }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/audio/speech") {
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from("fake-speech"));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/audio/generate") {
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from("fake-audio-output"));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/videos/sync") {
+        res.writeHead(200, { "content-type": "video/mp4" });
+        res.end(Buffer.from("fake-video-output"));
+        return;
+      }
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-omni-resource-chain-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_omni_resource_chain", root: dir, alias: "omni-resource-chain" };
+    const session = store.createSession(workspace, "omni-resource-chain");
+    const registry = new ToolRegistry(config(baseUrl), workspace, store);
+
+    const generated = await registry.call(
+      { id: "image", name: "image_generation", arguments: { prompt: "tiny fixture", size: "256x256" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(generated.ok, true);
+
+    const edited = await registry.call(
+      { id: "edit", name: "image_edit", arguments: { prompt: "make brighter", images: [generated.resource_uri!] } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(edited.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/images/edits")?.body ?? "", /fake-image/);
+
+    const vision = await registry.call(
+      { id: "vision", name: "vision_understanding", arguments: { inputs: [generated.resource_uri!], prompt: "describe" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(vision.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/chat/completions")?.body ?? "", /data:image\/png;base64,ZmFrZS1pbWFnZQ==/);
+
+    const audioResource = store.putResource(session.session_id, "omni.test.audio.media", Buffer.from("fake-audio").toString("base64"), {
+      content_type: "audio/wav",
+      encoding: "base64",
+      bytes: Buffer.byteLength("fake-audio"),
+    });
+    const speech = await registry.call(
+      { id: "speech", name: "speech_generation", arguments: { input: "hello", voice: "vivian", ref_audio: audioResource.uri } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(speech.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/audio/speech")?.body ?? "", /data:audio\/wav;base64,ZmFrZS1hdWRpbw==/);
+
+    const textResource = store.putResource(session.session_id, "unit.prompt", "rain on glass", { content_type: "text/plain" });
+    const audio = await registry.call(
+      { id: "audio", name: "audio_generation", arguments: { input: textResource.uri, response_format: "wav" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(audio.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/audio/generate")?.body ?? "", /"input":"rain on glass"/);
+
+    const mediaPrompt = await registry.call(
+      { id: "bad-audio", name: "audio_generation", arguments: { input: audioResource.uri, response_format: "wav" } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(mediaPrompt.ok, false);
+    assert.equal(mediaPrompt.error?.code, "invalid_resource_for_text_prompt");
+
+    const videoResource = store.putResource(session.session_id, "omni.test.video.media", Buffer.from("fake-video").toString("base64"), {
+      content_type: "video/mp4",
+      encoding: "base64",
+      bytes: Buffer.byteLength("fake-video"),
+    });
+    const imageReference = await registry.call(
+      { id: "video-image-ref", name: "video_generation", arguments: { prompt: "short clip", mode: "sync", image_reference: generated.resource_uri! } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(imageReference.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /"image_url":"data:image\/png;base64,ZmFrZS1pbWFnZQ=="/);
+
+    const videoReference = await registry.call(
+      { id: "video-video-ref", name: "video_generation", arguments: { prompt: "short clip", mode: "sync", video_reference: videoResource.uri } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(videoReference.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /"video_url":"data:video\/mp4;base64,ZmFrZS12aWRlbw=="/);
+
+    const inputReference = await registry.call(
+      { id: "video-input-ref", name: "video_generation", arguments: { prompt: "short clip", mode: "sync", input_reference: videoResource.uri } },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(inputReference.ok, true);
+    assert.match(seen.findLast((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /fake-video/);
+
+    const conflict = await registry.call(
+      {
+        id: "video-conflict",
+        name: "video_generation",
+        arguments: { prompt: "short clip", mode: "sync", input_reference: videoResource.uri, video_reference: videoResource.uri },
+      },
+      { session_id: session.session_id, run_id: "run" },
+    );
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.error?.code, "video_generation_reference_conflict");
+  } finally {
+    store.close();
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("generation tools store audio, speech, image edit, and sync video results as managed resources", async () => {
   const seen: Array<{ method?: string; url?: string; body?: string; contentType?: string }> = [];
   const server = createServer((req, res) => {

@@ -78,7 +78,7 @@ const DEFINITIONS = [
     permission: "network",
     parameters: objectSchema(
       {
-        input: string("Text prompt describing the audio to generate."),
+        input: string("Text prompt describing the audio to generate, or a text resource:// URI."),
         prompt: string("Legacy alias for input."),
         model: string("Optional model override."),
         response_format: string("Optional response format: wav, pcm, flac, mp3, aac, or opus."),
@@ -100,7 +100,7 @@ const DEFINITIONS = [
     permission: "network",
     parameters: objectSchema(
       {
-        inputs: { type: "array", items: string("Audio URL, file path, or data URI.") },
+        inputs: { type: "array", items: string("Audio URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
         model: string("Optional model override."),
       },
@@ -237,11 +237,11 @@ const DEFINITIONS = [
     parameters: objectSchema(
       {
         prompt: string("Image edit instruction."),
-        images: { type: "array", items: string("Image URL, file path, or data URI.") },
-        image: string("Single image URL, file path, or data URI."),
+        images: { type: "array", items: string("Image URL, file path, data URI, or resource:// URI.") },
+        image: string("Single image URL, file path, data URI, or resource:// URI."),
         model: string("Optional model override."),
-        mask_image: string("Optional mask image URL, file path, or data URI."),
-        reference_image: string("Optional reference image URL, file path, or data URI."),
+        mask_image: string("Optional mask image URL, file path, data URI, or resource:// URI."),
+        reference_image: string("Optional reference image URL, file path, data URI, or resource:// URI."),
         n: number("Optional image count."),
         size: string("Optional size such as 1024x1024 or auto."),
         response_format: string("Optional response format such as b64_json or url."),
@@ -522,7 +522,7 @@ const DEFINITIONS = [
         speed: number("Optional speed multiplier."),
         task_type: string("Optional Qwen3-TTS task type: CustomVoice, VoiceDesign, or Base."),
         language: string("Optional language name or Auto."),
-        ref_audio: string("Optional reference audio URL, file path, or data URI."),
+        ref_audio: string("Optional reference audio URL, file path, data URI, or resource:// URI."),
         ref_text: string("Optional reference transcript."),
         seed: number("Optional seed."),
         max_new_tokens: number("Optional maximum tokens to generate."),
@@ -558,8 +558,9 @@ const DEFINITIONS = [
         sync: boolean("Use the synchronous /videos/sync endpoint."),
         seconds: string("Optional duration in seconds as an integer string."),
         duration: number("Duration in seconds."),
-        image_reference: string("Optional image reference URL or data URI."),
-        input_reference: string("Optional multipart input reference path or data URI."),
+        image_reference: string("Optional image reference URL, file path, data URI, or resource:// URI. Sent as vLLM-Omni image_reference JSON payload."),
+        input_reference: string("Optional multipart input reference file path, data URI, or resource:// URI."),
+        video_reference: string("Optional video reference URL, file path, data URI, or resource:// URI. Sent as vLLM-Omni video_reference JSON payload."),
         size: string("Optional size."),
         width: number("Optional video width."),
         height: number("Optional video height."),
@@ -591,7 +592,7 @@ const DEFINITIONS = [
     permission: "network",
     parameters: objectSchema(
       {
-        inputs: { type: "array", items: string("Video URL, file path, or data URI.") },
+        inputs: { type: "array", items: string("Video URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
         model: string("Optional model override."),
         detail: string("Optional detail level."),
@@ -605,7 +606,7 @@ const DEFINITIONS = [
     permission: "network",
     parameters: objectSchema(
       {
-        inputs: { type: "array", items: string("Image URL, file path, or data URI.") },
+        inputs: { type: "array", items: string("Image URL, file path, data URI, or resource:// URI.") },
         prompt: string("Question or instruction."),
         model: string("Optional model override."),
         detail: string("Optional detail level."),
