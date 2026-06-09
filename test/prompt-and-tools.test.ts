@@ -796,7 +796,42 @@ test("ToolRegistry runs workspace, search, command, git, and evidence tools", as
     );
     assert.equal(resourceMissing.ok, false);
     assert.ok(Array.isArray(resourceMissing.data?.available_resources));
-    const rootList = await registry.call({ id: "tc3g", name: "list_dir", arguments: { path: "/" } }, { session_id: session.session_id });
+    const mediaResource = store.putResource(session.session_id, "omni.image_generation.media", Buffer.from("fake-png").toString("base64"), {
+      content_type: "image/png",
+      encoding: "base64",
+      bytes: Buffer.byteLength("fake-png"),
+    });
+    const evidenceResource = store.putResource(session.session_id, "omni.image_generation", JSON.stringify({ media_resource: mediaResource.uri }), {
+      content_type: "application/json",
+      media_resource: mediaResource.uri,
+    });
+    const mediaExport = await registry.call(
+      { id: "tc3g", name: "export_resource", arguments: { uri: evidenceResource.uri } },
+      { session_id: session.session_id },
+    );
+    assert.equal(mediaExport.ok, true);
+    assert.equal(mediaExport.data?.mime, "image/png");
+    assert.equal(mediaExport.data?.size, Buffer.byteLength("fake-png"));
+    assert.match(String(mediaExport.data?.path ?? ""), /^\.inferoa\/exports\/r_[A-Za-z0-9]+\.png$/);
+    assert.deepEqual(await readFile(path.join(dir, String(mediaExport.data?.path))), Buffer.from("fake-png"));
+    const jsonResource = store.putResource(session.session_id, "unit.fixture.json", JSON.stringify({ ok: true }, null, 2), { content_type: "application/json" });
+    const jsonExport = await registry.call(
+      { id: "tc3h", name: "export_resource", arguments: { uri: jsonResource.uri, path: "exports/unit.json" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(jsonExport.ok, true);
+    assert.equal(jsonExport.data?.mime, "application/json");
+    assert.equal(await readFile(path.join(dir, "exports/unit.json"), "utf8"), "{\n  \"ok\": true\n}");
+    const urlOnlyResource = store.putResource(session.session_id, "omni.image_generation", JSON.stringify({ data: [{ url: "https://example.test/image.png" }] }), {
+      content_type: "application/json",
+    });
+    const urlOnlyExport = await registry.call(
+      { id: "tc3i", name: "export_resource", arguments: { uri: urlOnlyResource.uri } },
+      { session_id: session.session_id },
+    );
+    assert.equal(urlOnlyExport.ok, false);
+    assert.equal(urlOnlyExport.error?.code, "resource_export_url_only");
+    const rootList = await registry.call({ id: "tc3j", name: "list_dir", arguments: { path: "/" } }, { session_id: session.session_id });
     assert.equal(rootList.ok, true);
     assert.ok((rootList.data?.entries as Array<{ name?: string }>).some((entry) => entry.name === "README.md"));
     const command = await registry.call(

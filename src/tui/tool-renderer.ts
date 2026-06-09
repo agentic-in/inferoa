@@ -25,6 +25,7 @@ const COMPACT_SUCCESS_TOOLS = new Set([
   "list_dir",
   "glob",
   "file_search",
+  "export_resource",
   "read_file",
   "read_resource",
   "web_fetch",
@@ -134,6 +135,13 @@ function renderToolBody(group: ToolEventGroup, store: SessionStore): string[] {
       }
       if (stringField(data.diff)) {
         lines.push(...renderDiff(stringField(data.diff)));
+      }
+      break;
+    case "export_resource":
+      lines.push(`${fg256(39, "path")} ${stringField(data.path) ?? "unknown"}`);
+      lines.push(`${fg256(39, "mime")} ${stringField(data.mime) ?? "unknown"}`);
+      if (numberField(data.size) !== undefined) {
+        lines.push(`${fg256(39, "bytes")} ${numberField(data.size)}`);
       }
       break;
     case "read_file":
@@ -997,6 +1005,8 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
       return stringField(group.args.pattern) ?? compactSummary(summary);
     case "file_search":
       return stringField(group.args.query) ?? compactSummary(summary);
+    case "export_resource":
+      return stringField(data.path) ?? stringField(group.args.uri) ?? compactSummary(summary);
     case "read_file":
     case "read_resource":
       return stringField(group.args.path) ?? stringField(group.args.uri) ?? compactSummary(summary);

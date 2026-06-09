@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import type { ResourceRecord } from "../session/store.js";
 import type { JsonObject, ToolResult } from "../types.js";
 import { resolveInside, resolveReadablePath, resolveWritablePath, runSmallCommand, toPosixPath } from "../util/fs.js";
 import { clampLimit, DEFAULT_LIST_LIMIT, fail, ok, truncateText } from "../util/limit.js";
@@ -8,7 +9,7 @@ import type { ToolExecutionContext } from "./context.js";
 import { decodeEscapedTextArgument, textArgumentCandidates } from "./text-args.js";
 import { workspaceExternalPathsAllowed } from "./permissions.js";
 import { runRtkAwareShellCommand, type RtkShellCommandResult } from "../rtk/command.js";
-import { listResourceSummaries, resolveResourceReference, resourceRecordSummary } from "./resource-resolver.js";
+import { extensionForContentType, listResourceSummaries, mediaFromResource, resolveResourceReference, resourceRecordSummary } from "./resource-resolver.js";
 
 export async function listDir(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   try {
@@ -98,6 +99,54 @@ export async function readResource(args: JsonObject, context: ToolExecutionConte
     },
     next_page: start - 1 + count < lines.length ? String(start + count) : undefined,
   };
+}
+
+export async function exportResource(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
+  try {
+    const uri = String(args.uri ?? "").trim();
+    if (!uri || uri === "list" || uri === "*") {
+      return fail("resource_uri_required", "export_resource requires a concrete managed resource URI.", {
+        available_resources: listResourceSummaries(context) as never,
+      });
+    }
+    const resolved = resolveResourceReference(uri, context);
+    if (!resolved.ok && resolved.failure.code === "resource_uri_ambiguous") {
+      return fail("resource_uri_ambiguous", `Resource URI is ambiguous: ${uri}`, {
+        uri,
+        hint: "Use the full resource URI from available_resources.",
+        available_resources: (resolved.failure.ambiguous ?? []).map(resourceRecordSummary) as never,
+      });
+    }
+    if (!resolved.ok) {
+      return fail("resource_not_found", `Resource not found: ${uri}`, {
+        uri,
+        hint: "Use read_resource with uri='list' to discover resources, or pass the full resource:// URI.",
+        available_resources: listResourceSummaries(context) as never,
+      });
+    }
+
+    const exported = exportPayloadForResource(resolved.resource, context, Number(args.media_index ?? 0));
+    if (!exported.ok) {
+      return fail(exported.code, exported.message, { uri, kind: resolved.resource.kind, metadata: resolved.resource.metadata });
+    }
+    const extension = extensionForContentType(exported.contentType);
+    const defaultPath = path.join(".inferoa", "exports", `${resourceId(exported.sourceUri)}.${extension}`);
+    const writable = resolveWritablePath(context.workspace.root, String(args.path ?? defaultPath), workspaceExternalPathsAllowed(context.config, context.workspace));
+    await fs.mkdir(path.dirname(writable.file), { recursive: true });
+    await fs.writeFile(writable.file, exported.bytes);
+    return ok(`Exported ${exported.contentType} resource to ${writable.displayPath}`, {
+      uri: resolved.resource.uri,
+      source_resource_uri: exported.sourceUri,
+      path: writable.displayPath,
+      mime: exported.contentType,
+      size: exported.bytes.length,
+      extension,
+      kind: resolved.resource.kind,
+      external: writable.external,
+    });
+  } catch (error) {
+    return fail("export_resource_failed", errorMessage(error));
+  }
 }
 
 export async function globPaths(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -621,6 +670,67 @@ function createSearchMatcher(query: string, options: SearchOptions): (line: stri
     const index = haystack.indexOf(needle);
     return index < 0 ? 0 : index + 1;
   };
+}
+
+function exportPayloadForResource(
+  resource: ResourceRecord,
+  context: ToolExecutionContext,
+  mediaIndex: number,
+): { ok: true; bytes: Buffer; contentType: string; sourceUri: string } | { ok: false; code: string; message: string } {
+  const media = mediaFromResource(resource, context, Number.isFinite(mediaIndex) ? mediaIndex : 0);
+  if (media.ok) {
+    if (!media.media.bytes) {
+      return {
+        ok: false,
+        code: "resource_export_url_only",
+        message: `Resource contains only a remote media URL and no embedded bytes: ${media.media.remoteUrl ?? resource.uri}`,
+      };
+    }
+    return {
+      ok: true,
+      bytes: media.media.bytes,
+      contentType: media.media.contentType,
+      sourceUri: media.media.sourceResource.uri,
+    };
+  }
+  if (media.failure.code === "resource_has_remote_url_only") {
+    return { ok: false, code: "resource_export_url_only", message: media.failure.message };
+  }
+  const contentType = stringMetadata(resource.metadata.content_type) ?? contentTypeForTextResource(resource);
+  return {
+    ok: true,
+    bytes: Buffer.from(resource.content, "utf8"),
+    contentType,
+    sourceUri: resource.uri,
+  };
+}
+
+function contentTypeForTextResource(resource: ResourceRecord): string {
+  if (resource.kind.endsWith(".json") || looksLikeJson(resource.content)) {
+    return "application/json";
+  }
+  return "text/plain";
+}
+
+function looksLikeJson(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) {
+    return false;
+  }
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resourceId(uri: string): string {
+  return (uri.split("/").pop() ?? "resource").replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+function stringMetadata(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
 }
 
 function errorMessage(error: unknown): string {

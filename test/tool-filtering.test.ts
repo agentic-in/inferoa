@@ -16,6 +16,7 @@ test("configured tool list excludes unconfigured Omni capabilities from chat inj
   assert.doesNotMatch(names.join("\n"), /vision_understanding|image_generation|image_edit|video_generation|audio_generation|speech_generation|speech_voices|audio_understanding|video_understanding/);
   assert.ok(names.includes("clarify"));
   assert.ok(names.includes("read_file"));
+  assert.ok(names.includes("export_resource"));
 
   config.omni.enabled = true;
   config.omni.endpoints.vision = { base_url: "http://localhost:8000/v1", model: "vision-model" };

@@ -400,6 +400,19 @@ const DEFINITIONS = [
     ),
   },
   {
+    name: "export_resource",
+    description: "Export a managed resource URI to a local file for preview or manual validation. Media bytes are exported when available; text and JSON resources are written as UTF-8.",
+    permission: "write",
+    parameters: objectSchema(
+      {
+        uri: string("Managed resource URI or a unique suffix of a current-session resource URI."),
+        path: string("Optional workspace-relative output path. Defaults to .inferoa/exports/<resource-id>.<ext>."),
+        media_index: number("Optional zero-based media index when an evidence resource contains multiple media items."),
+      },
+      ["uri"],
+    ),
+  },
+  {
     name: "run_command",
     description: "Run a bounded shell command, optionally as a background process.",
     permission: "shell",

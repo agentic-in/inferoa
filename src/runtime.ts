@@ -876,6 +876,8 @@ function summarizeToolStart(name: string, args: JsonObject): string {
       return startSummary("Waiting for your answer", stringField(args.question));
     case "file_search":
       return startSummary("Searching", stringField(args.query));
+    case "export_resource":
+      return startSummary("Exporting", stringField(args.uri));
     case "glob":
       return startSummary("Scanning", stringField(args.pattern));
     case "goal":
