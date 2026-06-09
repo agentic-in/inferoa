@@ -364,9 +364,18 @@ function renderWelcomeMark(): string[] {
     " ╚═╝╚═╝  ╚═══╝╚═╝     ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝",
   ];
   return [
-    ...logo.map((line, index) => `${ansi.bold}${fg256(index < 2 ? 244 : 252, line)}${ansi.reset}`),
+    ...logo.map((line, index) => colorWelcomeLogoRow(line, index)),
     center(fg256(244, "Inference-native Tokenmaxxing Agent Harness"), visibleWidth(logo[0] ?? "")),
   ];
+}
+
+function colorWelcomeLogoRow(line: string, index: number): string {
+  const inferColor = index < 2 ? 244 : 252;
+  const oaColor = index < 2 ? 24 : 31;
+  const oaStart = 39;
+  const inferPart = line.slice(0, oaStart);
+  const oaPart = line.slice(oaStart);
+  return `${ansi.bold}\x1b[38;5;${inferColor}m${inferPart}\x1b[38;5;${oaColor}m${oaPart}${ansi.reset}`;
 }
 
 function welcomeMetaLine(options: WelcomeComposerRenderOptions, width: number): string {

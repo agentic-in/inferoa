@@ -238,6 +238,8 @@ test("welcome composer centers Inferoa wordmark and keeps slash and skill afford
   assert.doesNotMatch(plain, /\/Users|~\/|\.\.\.\/vllm|inferoa/);
   assert.doesNotMatch(plain, /DS v4/);
   assert.doesNotMatch(rendered.lines.join("\n"), /\x1b\[38;5;214m/);
+  assert.match(rendered.lines.join("\n"), /\x1b\[38;5;31m/);
+  assert.match(rendered.lines.join("\n"), /\x1b\[38;5;24m/);
   assert.match(rendered.lines.join("\n"), /\x1b\[38;5;252mdeepseek-v4-pro-tokenhub/);
   const metaIndex = rendered.lines.map((line) => stripAnsi(line)).findIndex((line) => line.includes("deepseek-v4-pro-tokenhub"));
   assert.ok(metaIndex > 0);

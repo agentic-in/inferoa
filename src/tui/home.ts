@@ -43,7 +43,7 @@ function renderHomeTips(width: number): string[] {
 }
 
 function renderInferoaWordmark(): string[] {
-  const main = `${fg256(244, ">_")} ${ansi.bold}${fg256(252, "Infer")}${fg256(39, "oa")}${ansi.reset}`;
+  const main = `${fg256(244, ">_")} ${ansi.bold}${fg256(252, "Infer")}${fg256(31, "oa")}${ansi.reset}`;
   const sub = `${fg256(244, "Inference-native Tokenmaxxing Agent Harness")}`;
   return [
     main,
