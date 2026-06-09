@@ -10,7 +10,7 @@ import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { PromptBuilder } from "../src/context/prompt.js";
 import { Runtime, type RuntimeStatusEvent } from "../src/runtime.js";
 import { SessionStore } from "../src/session/store.js";
-import { createGoalState, goalDurationMs, readGoalState, writeGoalState } from "../src/goals/state.js";
+import { completeGoalAudit, createGoalState, goalDurationMs, markGoalAuditStarted, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
 import { CORE_TOOL_DEFINITIONS } from "../src/tools/schemas.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 
@@ -467,6 +467,182 @@ test("runtime accounts active goal usage when a run is stopped by tool-round lim
   }
 });
 
+test("runtime yields after visible work exhausts the active goal frontier", async () => {
+  let chatCalls = 0;
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      chatCalls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (chatCalls === 1) {
+        writeSse(res, {
+          id: "resp_finish_frontier",
+          model: "long-horizon-test",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    id: "call_finish_frontier",
+                    type: "function",
+                    function: {
+                      name: "goal",
+                      arguments: JSON.stringify({ op: "update_step", step_id: "final", status: "completed", notes: "Final visible step completed." }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 11, completion_tokens: 4 } });
+      } else {
+        writeSse(res, {
+          id: "resp_unwanted_visible_continuation",
+          model: "long-horizon-test",
+          choices: [{ delta: { content: "visible continuation should not run" } }],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 13, completion_tokens: 5 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-yield-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_yield", root: dir, alias: "goal-frontier-yield" };
+    const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+    const session = store.createSession(workspace, "frontier-yield");
+    const goal = replaceGoalPlanning(createGoalState({ objective: "Finish visible frontier then audit" }), {
+      steps: [{ id: "final", title: "Final visible frontier", status: "in_progress" }],
+    });
+    writeGoalState(store, session.session_id, goal);
+
+    const result = await runtime.run({ prompt: "finish the visible frontier", session_id: session.session_id });
+
+    assert.equal(chatCalls, 1);
+    assert.equal(result.tool_rounds, 1);
+    assert.equal(result.tool_calls, 1);
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.last_audit_decision, undefined);
+    assert.equal(current?.planning?.steps[0]?.status, "completed");
+    const events = store.listEvents(session.session_id);
+    assert.equal(events.filter((event) => event.type === "model.request.started").length, 1);
+    assert.ok(events.some((event) => event.type === "goal.frontier.exhausted" && event.run_id === result.run_id));
+    assert.ok(events.some((event) => event.type === "run.completed" && event.run_id === result.run_id));
+    assert.equal(events.some((event) => event.type === "run.stopped" && event.run_id === result.run_id), false);
+    assert.equal(store.getSession(session.session_id)?.status, "idle");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
+test("runtime yields immediately after an internal audit decision is recorded", async () => {
+  let chatCalls = 0;
+  const auditRunId = "run_runtime_audit_yield";
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      chatCalls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (chatCalls === 1) {
+        writeSse(res, {
+          id: "resp_audit_done",
+          model: "long-horizon-test",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_audit_done",
+                    type: "function",
+                    function: {
+                      name: "goal",
+                      arguments: JSON.stringify({
+                        op: "audit",
+                        decision: "done",
+                        summary: "No remaining frontier.",
+                        verification_evidence: { checked: true },
+                      }),
+                    },
+                  },
+                  {
+                    index: 1,
+                    id: "call_unwanted_complete",
+                    type: "function",
+                    function: { name: "goal", arguments: JSON.stringify({ op: "complete", summary: "Audit run should not complete directly." }) },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 11, completion_tokens: 4 } });
+      } else {
+        writeSse(res, {
+          id: "resp_unwanted_audit_continuation",
+          model: "long-horizon-test",
+          choices: [{ delta: { content: "audit continuation should not run" } }],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 13, completion_tokens: 5 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-audit-yield-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_audit_yield", root: dir, alias: "goal-audit-yield" };
+    const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+    const session = store.createSession(workspace, "audit-yield");
+    const goal = replaceGoalPlanning(createGoalState({ objective: "Audit then let supervisor complete" }), {
+      steps: [{ id: "final", title: "Final frontier", status: "completed" }],
+    });
+    writeGoalState(store, session.session_id, markGoalAuditStarted(goal, auditRunId), auditRunId);
+
+    const result = await runtime.run({
+      prompt: "audit the completed frontier",
+      session_id: session.session_id,
+      request_class: "audit",
+      visibility: "internal",
+      run_id: auditRunId,
+    });
+
+    assert.equal(chatCalls, 1);
+    assert.equal(result.tool_rounds, 1);
+    assert.equal(result.tool_calls, 1);
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.audit_status, "completed");
+    assert.equal(current?.last_audit_decision, "done");
+    const events = store.listEvents(session.session_id);
+    assert.equal(events.some((event) => event.type === "tool.call" && event.data.tool_call_id === "call_unwanted_complete"), false);
+    assert.ok(events.some((event) => event.type === "goal.audit.decision_recorded" && event.run_id === auditRunId));
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
 test("runtime reports goal completion metrics after a completing tool loop", async () => {
   let chatCalls = 0;
   const streamed: string[] = [];
@@ -515,7 +691,15 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
     const workspace: WorkspaceIdentity = { id: "w_goal_completion_report", root: dir, alias: "goal-completion-report" };
     const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
     const session = store.createSession(workspace, "completion-report");
-    writeGoalState(store, session.session_id, createGoalState({ objective: "Finish with a report" }));
+    writeGoalState(
+      store,
+      session.session_id,
+      completeGoalAudit(
+        createGoalState({ objective: "Finish with a report" }),
+        { decision: "done", summary: "Pre-run audit found no remaining frontier.", verification_evidence: { checked: true } },
+        "run_pre_audit",
+      ),
+    );
 
     const result = await runtime.run({
       prompt: "finish the active goal",
@@ -617,7 +801,15 @@ test("runtime preserves goal completion report when final response fails", async
     const workspace: WorkspaceIdentity = { id: "w_goal_report_failed_run", root: dir, alias: "goal-report-failed-run" };
     const runtime = new Runtime(noRetryConfig(`http://127.0.0.1:${address.port}/v1`), workspace, store);
     const session = store.createSession(workspace, "goal-report-failed-run");
-    writeGoalState(store, session.session_id, createGoalState({ objective: "Complete before provider failure" }));
+    writeGoalState(
+      store,
+      session.session_id,
+      completeGoalAudit(
+        createGoalState({ objective: "Complete before provider failure" }),
+        { decision: "done", summary: "Pre-run audit found no remaining frontier.", verification_evidence: { checked: true } },
+        "run_pre_audit",
+      ),
+    );
 
     await assert.rejects(
       () => runtime.run({ prompt: "complete goal then fail", session_id: session.session_id, onDelta: (text) => streamed.push(text) }),

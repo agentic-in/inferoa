@@ -18,6 +18,7 @@ import {
   cancelDaemonJob,
   daemonStatus,
   detachDaemonJob,
+  queueDaemonGoal,
   queueDaemonRun,
   startDaemon,
 } from "./daemon/supervisor.js";
@@ -154,7 +155,7 @@ Debug commands:
   tools call <name> [json]
   events <session> [limit]
   archive <session>
-  daemon start|status|jobs|run|attach|detach|cancel ...
+  daemon start|status|jobs|run|goal|attach|detach|cancel ...
   acceptance [--daemon]
 `);
 }
@@ -386,6 +387,25 @@ async function debugDaemon(options: ParsedCli, rest: string[]): Promise<void> {
       }
       return;
     }
+    case "goal": {
+      const sessionId = requiredArg(args, 0, "session");
+      const maxIterations = optionalPositiveIntFlag(args, "--max-iterations");
+      const app = await loadApp(options);
+      try {
+        const job = await queueDaemonGoal({
+          stateDir: options.stateDir,
+          workspaceRoot: app.workspace.root,
+          sessionId,
+          maxIterations,
+          configPath: app.configFiles[0],
+        });
+        const status = await startDaemon({ stateDir: options.stateDir });
+        print({ job, daemon: status }, options.json);
+      } finally {
+        closeApp(app);
+      }
+      return;
+    }
     case "attach":
       print(await attachDaemonJob(options.stateDir, requiredArg(args, 0, "job"), { follow: args.includes("--follow") }), options.json);
       return;
@@ -396,7 +416,7 @@ async function debugDaemon(options: ParsedCli, rest: string[]): Promise<void> {
       print(await cancelDaemonJob(options.stateDir, requiredArg(args, 0, "job")), options.json);
       return;
     default:
-      throw new Error("Usage: inferoa debug daemon start|status|jobs|run|attach|detach|cancel ...");
+      throw new Error("Usage: inferoa debug daemon start|status|jobs|run|goal|attach|detach|cancel ...");
   }
 }
 
@@ -417,6 +437,19 @@ function requiredArg(args: string[], index: number, name: string): string {
   const value = args[index];
   if (!value) {
     throw new Error(`Missing ${name}`);
+  }
+  return value;
+}
+
+function optionalPositiveIntFlag(args: string[], flag: string): number | undefined {
+  const index = args.indexOf(flag);
+  if (index < 0) {
+    return undefined;
+  }
+  const raw = args[index + 1];
+  const value = raw ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${flag} requires a positive integer`);
   }
   return value;
 }

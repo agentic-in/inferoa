@@ -154,6 +154,10 @@ export function markGoalAuditStarted(state: GoalState, runId: string, now = new 
   const next = cloneGoalState(state);
   next.goal.audit_status = "running";
   next.goal.last_audit_run_id = runId;
+  next.goal.last_audit_decision = undefined;
+  next.goal.last_audit_summary = undefined;
+  next.goal.verification_evidence = undefined;
+  next.goal.blocker = undefined;
   next.goal.updated_at = now.toISOString();
   return next;
 }

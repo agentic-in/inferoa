@@ -26,7 +26,15 @@ import { SkillRegistry } from "./skills/registry.js";
 import { CodeIntelligenceHub } from "./code-intelligence/hub.js";
 import { fail } from "./util/limit.js";
 import { isAbortError, throwIfAborted } from "./util/abort.js";
-import { applyGoalUsage, goalCompletionReportForRun, modelUsageTokenCost, recordGoalCompletionReport, type GoalCompletionReport } from "./goals/state.js";
+import {
+  applyGoalUsage,
+  goalCompletionReportForRun,
+  isGoalFrontierExhausted,
+  modelUsageTokenCost,
+  readGoalState,
+  recordGoalCompletionReport,
+  type GoalCompletionReport,
+} from "./goals/state.js";
 
 export interface RuntimeRunOptions {
   prompt: string;
@@ -288,11 +296,21 @@ export class Runtime {
           break;
         }
         toolRounds += 1;
+        let shouldYieldAfterToolCalls = false;
         for (const call of response.tool_calls) {
           throwIfAborted(options.signal);
           await this.executeToolCall(call, session.session_id, runId, requestClass, visibility, options.onStatus, options.onClarify);
           toolCalls += 1;
           throwIfAborted(options.signal);
+          const yieldEvent = goalYieldEventAfterToolCall(this.store, session.session_id, runId, requestClass, visibility);
+          if (yieldEvent) {
+            this.store.appendEvent(yieldEvent);
+            shouldYieldAfterToolCalls = true;
+            break;
+          }
+        }
+        if (shouldYieldAfterToolCalls) {
+          break;
         }
         currentPrompt =
           "Continue the task using the tool results. Failed tool results are evidence, not a reason to stop; use corrected arguments or another available tool when useful. Do not repeat the exact same failed call unless the arguments change. If independent reads, searches, edits, tests, or web fetches remain, keep calling tools; otherwise finish with a concise evidence-based summary.";
@@ -770,6 +788,47 @@ function rtkSavingsForRun(
     savings_pct: inputTokens > 0 ? (savedTokens / inputTokens) * 100 : 0,
     estimated_without_rtk_tokens: modelTokens + savedTokens,
     status,
+  };
+}
+
+function goalYieldEventAfterToolCall(
+  store: SessionStore,
+  sessionId: string,
+  runId: string,
+  requestClass: ModelRequest["request_class"],
+  visibility: "normal" | "internal",
+): { session_id: string; run_id: string; type: string; data: JsonObject } | undefined {
+  const state = readGoalState(store, sessionId);
+  if (requestClass === "audit") {
+    if (state?.goal.last_audit_run_id === runId && state.goal.audit_status === "completed" && state.goal.last_audit_decision) {
+      return {
+        session_id: sessionId,
+        run_id: runId,
+        type: "goal.audit.decision_recorded",
+        data: {
+          goal_id: state.goal.id,
+          frontier_generation: state.goal.frontier_generation,
+          decision: state.goal.last_audit_decision,
+          request_class: requestClass,
+          visibility,
+        },
+      };
+    }
+    return undefined;
+  }
+  if (!state?.enabled || state.goal.status !== "active" || !isGoalFrontierExhausted(state.goal)) {
+    return undefined;
+  }
+  return {
+    session_id: sessionId,
+    run_id: runId,
+    type: "goal.frontier.exhausted",
+    data: {
+      goal_id: state.goal.id,
+      frontier_generation: state.goal.frontier_generation,
+      request_class: requestClass,
+      visibility,
+    },
   };
 }
 

@@ -207,7 +207,7 @@ const DEFINITIONS = [
   },
   {
     name: "goal",
-    description: "Manage the active goal-mode objective and its internal planning state for this session. Use create only when no goal exists; decompose/update_plan to keep a native frontier current; update_step as work, evidence, and blockers change; audit records an internal tool-enabled frontier audit decision; get to inspect budget/status; resume for paused goals; complete only after the objective is genuinely achieved and the latest audit decision is done with verification evidence unless force is true; drop only when the goal should be discarded.",
+    description: "Manage the active goal-mode objective and its internal planning state for this session. Use create only when no goal exists; decompose/update_plan to keep a native frontier current; update_step as work, evidence, and blockers change; audit can only be recorded by an internal audit run and records a tool-enabled frontier audit decision; get to inspect budget/status; resume for paused goals; complete only after the objective is genuinely achieved and the latest audit decision is done with verification evidence unless force is true; drop only when the goal should be discarded.",
     permission: "read",
     parameters: objectSchema(
       {
@@ -221,9 +221,9 @@ const DEFINITIONS = [
         status: string("Step status for op=update_step: pending, in_progress, completed, blocked, or skipped."),
         notes: string("Optional notes for op=update_step. Empty string clears notes."),
         evidence: jsonObject("Optional structured step evidence for op=update_step."),
-        decision: string("Audit decision for op=audit: expand, done, blocked, or retry."),
-        verification_evidence: jsonObject("Structured verification evidence for op=audit with decision=done."),
-        blocker: string("Optional blocker details for op=audit with decision=blocked or retry."),
+        decision: string("Audit decision for op=audit in an internal audit run only: expand, done, blocked, or retry."),
+        verification_evidence: jsonObject("Structured verification evidence for op=audit with decision=done in an internal audit run."),
+        blocker: string("Optional blocker details for op=audit with decision=blocked or retry in an internal audit run."),
         summary: string("Completion summary for op=complete, or reason for op=drop."),
         force: boolean("Allow op=complete even if internal goal plan has unfinished steps."),
       },

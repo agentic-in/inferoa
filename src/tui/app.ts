@@ -26,13 +26,10 @@ import { runFinalAcceptance } from "../validation/acceptance.js";
 import {
   attachGoalPlanSnapshot,
   cloneGoalState,
-  completeGoalAfterAudit,
   createGoalState,
   incompleteGoalPlanningMessage,
-  isGoalFrontierExhausted,
   goalCompletionAuditBlockMessage,
   goalPlanningProgressSummary,
-  markGoalAuditStarted,
   readGoalState,
   recordGoalCompletionReport,
   validateTokenBudget,
@@ -40,7 +37,8 @@ import {
   type GoalRecord,
   type GoalState,
 } from "../goals/state.js";
-import { buildGoalAuditPrompt, buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
+import { runGoalSupervisor } from "../goals/supervisor.js";
+import { buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
 import { readAutoresearchState, setAutoresearchMode, summarizeAutoresearchProgress, type AutoresearchState } from "../autoresearch/state.js";
 import { clonePlanState, createPlanState, planApprovalBlockMessage, readPlanState, writePlanState, type PlanState } from "../plans/state.js";
 import type {
@@ -378,112 +376,42 @@ export class TuiApp {
     }
     this.#goalSupervisorActive = true;
     try {
-      let iteration = 0;
-      for (; iteration < FOREGROUND_GOAL_MAX_ITERATIONS && this.#running && !this.#promptQueue.length; iteration += 1) {
-        const session = this.optionalSession();
-        if (!session) {
-          return;
-        }
-        const state = readGoalState(this.app.store, session.session_id);
-        if (!this.shouldRunForegroundGoal(state)) {
-          return;
-        }
-        if (isGoalFrontierExhausted(state.goal)) {
-          const shouldContinue = await this.runForegroundGoalAudit(session.session_id, state);
-          if (!shouldContinue) {
-            return;
-          }
-          continue;
-        }
-        const result = await this.submitPrompt(buildGoalWorkPrompt(state.goal.objective), {
-          renderPrompt: false,
-          requestClass: "interactive",
-          activityLabel: "Continuing goal frontier",
-        });
-        if (!result || !this.goalUpdatedDuringRun(session.session_id, result.run_id)) {
-          this.renderGoalSupervisorRecord("Goal waiting", "last foreground turn did not update the frontier");
-          return;
-        }
-      }
-      if (iteration < FOREGROUND_GOAL_MAX_ITERATIONS || !this.#running || this.#promptQueue.length) {
+      const session = this.optionalSession();
+      if (!session) {
         return;
       }
-      const session = this.optionalSession();
-      const state = session ? readGoalState(this.app.store, session.session_id) : undefined;
-      if (session && this.shouldRunForegroundGoal(state)) {
-        this.pauseForegroundGoal(session.session_id, state, undefined, "max_iterations");
-      }
+      await runGoalSupervisor({
+        store: this.app.store,
+        sessionId: session.session_id,
+        supervisor: "foreground",
+        maxIterations: FOREGROUND_GOAL_MAX_ITERATIONS,
+        workRequestClass: "interactive",
+        shouldContinue: () => this.#running && !this.#promptQueue.length,
+        runTurn: async (request) =>
+          await this.submitPrompt(request.prompt, {
+            renderPrompt: false,
+            requestClass: request.requestClass,
+            visibility: request.visibility,
+            runId: request.runId,
+            activityLabel: request.activityLabel,
+            suppressTranscript: request.suppressTranscript,
+          }),
+        onAuditExpanded: (state) => {
+          this.renderGoalSupervisorRecord("Goal audit", auditDetail("expanded frontier", state.goal.last_audit_summary, state.goal.frontier_generation), 75);
+        },
+        onCompleted: (state) => {
+          this.renderGoalSupervisorRecord("Goal complete", state.goal.last_audit_summary ?? "audit found no remaining frontier", 48);
+        },
+        onPaused: (_state, _runId, reason) => {
+          this.renderGoalSupervisorRecord("Goal paused", reason, 220);
+        },
+        onWaiting: (reason) => {
+          this.renderGoalSupervisorRecord("Goal waiting", reason);
+        },
+      });
     } finally {
       this.#goalSupervisorActive = false;
     }
-  }
-
-  private async runForegroundGoalAudit(sessionId: string, state: GoalState): Promise<boolean> {
-    const auditRunId = randomId("run");
-    writeGoalState(this.app.store, sessionId, markGoalAuditStarted(state, auditRunId), auditRunId);
-    this.app.store.appendEvent({
-      session_id: sessionId,
-      run_id: auditRunId,
-      type: "goal.audit.started",
-      data: { goal_id: state.goal.id, frontier_generation: state.goal.frontier_generation, supervisor: "foreground" },
-    });
-    await this.submitPrompt(buildGoalAuditPrompt(state.goal.objective), {
-      renderPrompt: false,
-      requestClass: "audit",
-      visibility: "internal",
-      runId: auditRunId,
-      activityLabel: "Auditing goal frontier",
-      suppressTranscript: true,
-    });
-    const audited = readGoalState(this.app.store, sessionId);
-    if (!audited || audited.goal.status === "complete" || audited.goal.status === "dropped") {
-      return false;
-    }
-    if (audited.goal.last_audit_run_id !== auditRunId || audited.goal.audit_status !== "completed") {
-      this.pauseForegroundGoal(sessionId, audited, auditRunId, "audit_missing_decision");
-      return false;
-    }
-    if (audited.goal.last_audit_decision === "expand") {
-      this.renderGoalSupervisorRecord("Goal audit", auditDetail("expanded frontier", audited.goal.last_audit_summary, audited.goal.frontier_generation), 75);
-      return true;
-    }
-    if (audited.goal.last_audit_decision === "done") {
-      try {
-        const completed = completeGoalAfterAudit(audited, audited.goal.last_audit_summary);
-        writeGoalState(this.app.store, sessionId, completed, auditRunId);
-        recordGoalCompletionReport(this.app.store, sessionId, auditRunId);
-        this.renderGoalSupervisorRecord("Goal complete", audited.goal.last_audit_summary ?? "audit found no remaining frontier", 48);
-      } catch (error) {
-        this.pauseForegroundGoal(sessionId, audited, auditRunId, error instanceof Error ? error.message : String(error));
-      }
-      return false;
-    }
-    this.pauseForegroundGoal(sessionId, audited, auditRunId, audited.goal.blocker ?? audited.goal.last_audit_decision ?? "audit_decision");
-    return false;
-  }
-
-  private shouldRunForegroundGoal(state: GoalState | undefined): state is GoalState {
-    return Boolean(state?.enabled && state.goal.status === "active");
-  }
-
-  private goalUpdatedDuringRun(sessionId: string, runId: string): boolean {
-    return this.app.store.listEvents(sessionId).some((event) => event.run_id === runId && event.type === "goal.updated");
-  }
-
-  private pauseForegroundGoal(sessionId: string, state: GoalState, runId: string | undefined, reason: string): void {
-    const next = cloneGoalState(state);
-    next.enabled = false;
-    next.goal.status = "paused";
-    next.goal.blocker = reason;
-    next.goal.updated_at = new Date().toISOString();
-    writeGoalState(this.app.store, sessionId, next, runId);
-    this.app.store.appendEvent({
-      session_id: sessionId,
-      run_id: runId,
-      type: "goal.supervisor.paused",
-      data: { goal_id: state.goal.id, reason, supervisor: "foreground" },
-    });
-    this.renderGoalSupervisorRecord("Goal paused", reason, 220);
   }
 
   private updateQueueFooter(): void {

@@ -9,7 +9,7 @@ import os from "node:os";
 import YAML from "yaml";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonGoal, queueDaemonRun, serveDaemon } from "../src/daemon/supervisor.js";
-import { createGoalState, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { completeGoalAudit, createGoalState, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
 import { SessionStore } from "../src/session/store.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 
@@ -82,7 +82,7 @@ test("daemon goal supervisor expands frontier through internal audit and complet
                   }),
                 },
               }
-            : auditCalls === 3
+            : auditCalls === 2
               ? {
                   id: "call_audit_done",
                   type: "function",
@@ -169,6 +169,156 @@ test("daemon goal supervisor expands frontier through internal audit and complet
     assert.ok(events.some((event) => event.type === "goal.frontier.expanded"));
     assert.ok(events.some((event) => event.type === "goal.completion_report"));
     assert.ok(events.some((event) => event.type === "user.prompt" && event.data.visibility === "internal" && event.data.request_class === "audit"));
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("daemon goal supervisor pauses when audit omits a decision instead of reusing stale audit state", async () => {
+  let auditCalls = 0;
+  const server = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
+      if (requestClass === "audit") {
+        auditCalls += 1;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      writeSse(res, {
+        id: `resp_${requestClass}_${auditCalls}`,
+        model: "daemon-goal-test",
+        choices: [{ delta: { content: requestClass === "audit" ? "audit without decision" : "work settled" } }],
+      });
+      writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 4 } });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-goal-stale-audit-"));
+  const workspaceRoot = path.join(dir, "workspace");
+  const state = path.join(dir, "state");
+  const store = await SessionStore.open(state);
+  try {
+    await mkdir(path.join(workspaceRoot, ".inferoa"), { recursive: true });
+    const configPath = path.join(workspaceRoot, ".inferoa", "config.yaml");
+    await writeFile(configPath, YAML.stringify(testConfig(`http://127.0.0.1:${address.port}/v1`)), "utf8");
+    const workspace: WorkspaceIdentity = { id: "w_daemon_stale_audit", root: workspaceRoot, alias: "daemon-stale-audit" };
+    const session = store.createSession(workspace, "daemon stale audit");
+    let goal = createGoalState({ objective: "Do not reuse stale audit decisions" });
+    goal = replaceGoalPlanning(goal, { steps: [{ id: "done", title: "Already done frontier", status: "completed" }] });
+    goal = completeGoalAudit(goal, {
+      decision: "done",
+      summary: "Old audit should not count.",
+      verification_evidence: { old: true },
+    }, "run_old_audit");
+    writeGoalState(store, session.session_id, goal);
+
+    const job = await queueDaemonGoal({ stateDir: state, workspaceRoot, sessionId: session.session_id, maxIterations: 2, configPath });
+    await serveDaemon({ stateDir: state, once: true });
+
+    assert.equal(auditCalls, 1);
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "paused");
+    assert.equal(current?.last_audit_run_id === "run_old_audit", false);
+    assert.notEqual(current?.last_audit_decision, "done");
+    const finishedJob = store.getSupervisorJob(job.job_id);
+    assert.equal(finishedJob?.status, "paused");
+    assert.equal(finishedJob?.metadata.pause_reason, "audit_missing_decision");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("daemon run with an active goal triggers hidden goal supervision after the visible turn", async () => {
+  let auditCalls = 0;
+  let backgroundCalls = 0;
+  const server = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (requestClass === "audit") {
+        auditCalls += 1;
+        if (auditCalls === 1) {
+          writeSse(res, {
+            id: "resp_hidden_audit_done",
+            model: "daemon-goal-test",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call_hidden_audit_done",
+                      type: "function",
+                      function: {
+                        name: "goal",
+                        arguments: JSON.stringify({
+                          op: "audit",
+                          decision: "done",
+                          summary: "The post-turn supervisor found no remaining frontier.",
+                          verification_evidence: { post_turn_audit: true },
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+          writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 22, completion_tokens: 3 } });
+        } else {
+          writeSse(res, { id: "resp_hidden_audit_final", model: "daemon-goal-test", choices: [{ delta: { content: "audit settled" } }] });
+          writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 21, completion_tokens: 4 } });
+        }
+      } else {
+        backgroundCalls += 1;
+        writeSse(res, { id: "resp_visible_turn", model: "daemon-goal-test", choices: [{ delta: { content: "visible turn settled" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 4 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-run-goal-supervisor-"));
+  const workspaceRoot = path.join(dir, "workspace");
+  const state = path.join(dir, "state");
+  const store = await SessionStore.open(state);
+  try {
+    await mkdir(path.join(workspaceRoot, ".inferoa"), { recursive: true });
+    const configPath = path.join(workspaceRoot, ".inferoa", "config.yaml");
+    await writeFile(configPath, YAML.stringify(testConfig(`http://127.0.0.1:${address.port}/v1`)), "utf8");
+    const workspace: WorkspaceIdentity = { id: "w_daemon_run_goal", root: workspaceRoot, alias: "daemon-run-goal" };
+    const session = store.createSession(workspace, "daemon run goal");
+    let goal = createGoalState({ objective: "Finish after visible daemon turn" });
+    goal = replaceGoalPlanning(goal, { steps: [{ id: "visible", title: "Visible turn frontier", status: "completed" }] });
+    writeGoalState(store, session.session_id, goal);
+
+    const job = await queueDaemonRun({ stateDir: state, workspaceRoot, sessionId: session.session_id, prompt: "visible daemon work", configPath });
+    await serveDaemon({ stateDir: state, once: true });
+
+    assert.equal(backgroundCalls, 1);
+    assert.equal(auditCalls, 1);
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "complete");
+    assert.equal(current?.last_audit_decision, "done");
+    assert.equal(store.getSupervisorJob(job.job_id)?.status, "complete");
+    const prompts = store.listEvents(session.session_id).filter((event) => event.type === "user.prompt");
+    assert.ok(prompts.some((event) => event.data.prompt === "visible daemon work" && event.data.visibility === "normal"));
+    assert.ok(prompts.some((event) => event.data.request_class === "audit" && event.data.visibility === "internal"));
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

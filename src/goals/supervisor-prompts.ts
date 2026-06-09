@@ -11,6 +11,8 @@ export function buildGoalAuditPrompt(objective: string): string {
     `Goal objective: ${objective}`,
     "Run an internal read-only frontier exhaustion audit for the active goal.",
     "Use available read/search/git/code-intelligence/verification tools as needed to decide whether the top-level objective has more undiscovered frontier.",
+    "Treat the current plan as a hypothesis, not as the boundary of the objective.",
+    "Actively look for missing work implied by the top-level objective, even if all listed steps are complete.",
     "Do not edit files or execute new business work in this audit.",
     "Finish by calling goal op=audit exactly once.",
     "Use decision=expand with concrete new steps if more frontier exists.",

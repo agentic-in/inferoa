@@ -6,6 +6,7 @@ import os from "node:os";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { PromptBuilder } from "../src/context/prompt.js";
 import { readAutoresearchState, setAutoresearchMode } from "../src/autoresearch/state.js";
+import { buildGoalAuditPrompt } from "../src/goals/supervisor-prompts.js";
 import {
   applyGoalUsage,
   cloneGoalState,
@@ -14,6 +15,7 @@ import {
   incompleteGoalPlanningMessage,
   readGoalState,
   recordGoalCompletionReport,
+  replaceGoalPlanning,
   writeGoalState,
 } from "../src/goals/state.js";
 import { readPlanState } from "../src/plans/state.js";
@@ -38,6 +40,14 @@ function approvingContext(sessionId: string, runId: string) {
     }),
   };
 }
+
+test("goal audit prompt treats completed plans as a hypothesis, not a boundary", () => {
+  const prompt = buildGoalAuditPrompt("Ship reliable goal mode");
+
+  assert.match(prompt, /current plan as a hypothesis/i);
+  assert.match(prompt, /not as the boundary/i);
+  assert.match(prompt, /Actively look for missing work/i);
+});
 
 test("goal tool persists state and PromptBuilder injects active goal context", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-"));
@@ -77,7 +87,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
         name: "goal",
         arguments: { op: "audit", decision: "done", summary: "No remaining frontier.", verification_evidence: { checked: true } },
       },
-      { session_id: session.session_id, run_id: "run_goal" },
+      { session_id: session.session_id, run_id: "run_goal", request_class: "audit", visibility: "internal" },
     );
     assert.equal(audited.ok, true, JSON.stringify(audited));
 
@@ -677,7 +687,7 @@ test("goal completion requires a summary and accepts long summaries", async () =
         name: "goal",
         arguments: { op: "audit", decision: "done", summary: "No additional frontier.", verification_evidence: { git_status: "clean enough" } },
       },
-      { session_id: session.session_id, run_id: "run_gs" },
+      { session_id: session.session_id, run_id: "run_gs", request_class: "audit", visibility: "internal" },
     );
     assert.equal(audit.ok, true, JSON.stringify(audit));
 
@@ -736,7 +746,7 @@ test("goal audit gates completion and can expand a new frontier generation", asy
           steps: [{ id: "second", title: "Second frontier", status: "pending" }],
         },
       },
-      { session_id: session.session_id, run_id: "run_audit_expand" },
+      { session_id: session.session_id, run_id: "run_audit_expand", request_class: "audit", visibility: "internal" },
     );
     assert.equal(expanded.ok, true, JSON.stringify(expanded));
     const afterExpand = readGoalState(store, session.session_id)?.goal;
@@ -747,7 +757,7 @@ test("goal audit gates completion and can expand a new frontier generation", asy
 
     const missingEvidence = await registry.call(
       { id: "ga_done_missing", name: "goal", arguments: { op: "audit", decision: "done", summary: "No more work." } },
-      { session_id: session.session_id, run_id: "run_audit_done_missing" },
+      { session_id: session.session_id, run_id: "run_audit_done_missing", request_class: "audit", visibility: "internal" },
     );
     assert.equal(missingEvidence.ok, false);
     assert.equal(missingEvidence.error?.code, "goal_audit_failed");
@@ -764,7 +774,7 @@ test("goal audit gates completion and can expand a new frontier generation", asy
         name: "goal",
         arguments: { op: "audit", decision: "done", summary: "No more work.", verification_evidence: { git_status: "checked" } },
       },
-      { session_id: session.session_id, run_id: "run_audit_done" },
+      { session_id: session.session_id, run_id: "run_audit_done", request_class: "audit", visibility: "internal" },
     );
     assert.equal(done.ok, true, JSON.stringify(done));
 
@@ -774,6 +784,75 @@ test("goal audit gates completion and can expand a new frontier generation", asy
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
     assert.equal(readGoalState(store, session.session_id)?.goal.status, "complete");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal audit decisions require an internal audit run context", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-audit-context-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_audit_context", root: dir, alias: "goal-audit-context" };
+    const session = store.createSession(workspace, "goal-audit-context");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const created = await registry.call(
+      { id: "gac_create", name: "goal", arguments: { op: "create", objective: "Reject visible audit spoofing" } },
+      { session_id: session.session_id, run_id: "run_gac" },
+    );
+    assert.equal(created.ok, true, JSON.stringify(created));
+
+    const visibleAudit = await registry.call(
+      {
+        id: "gac_visible_audit",
+        name: "goal",
+        arguments: { op: "audit", decision: "done", summary: "Visible turn should not audit.", verification_evidence: { spoofed: true } },
+      },
+      { session_id: session.session_id, run_id: "run_visible" },
+    );
+    assert.equal(visibleAudit.ok, false);
+    assert.equal(visibleAudit.error?.code, "goal_audit_context_required");
+    assert.equal(readGoalState(store, session.session_id)?.goal.last_audit_decision, undefined);
+
+    const internalAudit = await registry.call(
+      {
+        id: "gac_internal_audit",
+        name: "goal",
+        arguments: { op: "audit", decision: "done", summary: "Internal audit accepted.", verification_evidence: { checked: true } },
+      },
+      { session_id: session.session_id, run_id: "run_internal", request_class: "audit", visibility: "internal" },
+    );
+    assert.equal(internalAudit.ok, true, JSON.stringify(internalAudit));
+    assert.equal(readGoalState(store, session.session_id)?.goal.last_audit_decision, "done");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal completion force cannot bypass the internal audit gate", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-force-audit-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_force_audit", root: dir, alias: "goal-force-audit" };
+    const session = store.createSession(workspace, "goal-force-audit");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Require audit even with force" }), {
+      steps: [{ id: "done", title: "Completed frontier", status: "completed" }],
+    });
+    writeGoalState(store, session.session_id, state);
+
+    const blocked = await registry.call(
+      { id: "force_complete_without_audit", name: "goal", arguments: { op: "complete", summary: "Forced visible completion.", force: true } },
+      { session_id: session.session_id, run_id: "run_force_complete" },
+    );
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error?.code, "goal_audit_required");
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.summary, undefined);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

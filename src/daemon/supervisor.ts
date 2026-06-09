@@ -9,16 +9,9 @@ import { Runtime } from "../runtime.js";
 import type { JsonObject } from "../types.js";
 import { homeStateDir, pathExists } from "../util/fs.js";
 import { randomId } from "../util/hash.js";
-import {
-  completeGoalAfterAudit,
-  incompleteGoalPlanningSteps,
-  isGoalFrontierExhausted,
-  markGoalAuditStarted,
-  readGoalState,
-  recordGoalCompletionReport,
-  writeGoalState,
-} from "../goals/state.js";
-import { buildGoalAuditPrompt, buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
+import { readGoalState } from "../goals/state.js";
+import { buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
+import { DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS, runGoalSupervisor } from "../goals/supervisor.js";
 
 export interface DaemonStatus {
   pid?: number;
@@ -289,7 +282,31 @@ async function runJob(store: SessionStore, job: SupervisorJob, stateDir?: string
       owner_kind: "daemon",
       request_class: "background",
     });
-    const after = store.getSupervisorJob(job.job_id);
+    let after = store.getSupervisorJob(job.job_id);
+    if (after?.status !== "cancel_requested") {
+      await runGoalSupervisor({
+        store,
+        sessionId: job.session_id,
+        supervisor: "daemon",
+        maxIterations: numberMeta(job.metadata.goal_max_iterations, DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS),
+        workRequestClass: "background",
+        shouldContinue: () => {
+          const latest = store.getSupervisorJob(job.job_id);
+          return Boolean(latest && latest.status !== "cancel_requested" && latest.status !== "cancelled");
+        },
+        runTurn: async (request) =>
+          await runtime.run({
+            prompt: request.prompt,
+            session_id: job.session_id,
+            client_id: `daemon:${process.pid}:goal-auto`,
+            owner_kind: "daemon",
+            request_class: request.requestClass,
+            visibility: request.visibility,
+            run_id: request.runId,
+          }),
+      });
+    }
+    after = store.getSupervisorJob(job.job_id);
     if (after?.status === "cancel_requested") {
       store.updateSupervisorJob(job.job_id, { status: "cancelled" });
       store.appendEvent({ session_id: job.session_id, run_id: runId, type: "daemon.job.cancelled", data: { job_id: job.job_id } });
@@ -321,110 +338,67 @@ async function runGoalJob(store: SessionStore, job: SupervisorJob, stateDir?: st
     const { config } = await loadConfig(job.workspace_root, configPathFromMetadata(job.metadata));
     const workspace = await resolveWorkspace(job.workspace_root, config, job.workspace_root);
     const runtime = new Runtime(config, workspace, store);
-    const maxIterations = numberMeta(job.metadata.max_iterations, 1000);
-    let iteration = job.iteration;
-    while (iteration < maxIterations) {
-      const latestJob = store.getSupervisorJob(job.job_id);
-      if (!latestJob || latestJob.status === "cancel_requested" || latestJob.status === "cancelled") {
-        store.updateSupervisorJob(job.job_id, { status: "cancelled", iteration });
-        store.appendEvent({ session_id: job.session_id, run_id: startedRunId, type: "daemon.job.cancelled", data: { job_id: job.job_id } });
-        return;
-      }
+    let currentIteration = job.iteration;
+    const outcome = await runGoalSupervisor({
+      store,
+      sessionId: job.session_id,
+      supervisor: "daemon",
+      maxIterations: numberMeta(job.metadata.max_iterations, DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS),
+      workRequestClass: "background",
+      shouldContinue: () => {
+        const latest = store.getSupervisorJob(job.job_id);
+        return Boolean(latest && latest.status !== "cancel_requested" && latest.status !== "cancelled");
+      },
+      onIteration: (iteration) => {
+        currentIteration = iteration;
+        store.updateSupervisorJob(job.job_id, { status: "running", iteration });
+      },
+      runTurn: async (request) => {
+        const run = await runtime.run({
+          prompt: request.prompt,
+          session_id: job.session_id,
+          client_id: `daemon:${process.pid}:goal`,
+          owner_kind: "daemon",
+          request_class: request.requestClass,
+          visibility: request.visibility,
+          run_id: request.runId,
+        });
+        store.updateSupervisorJob(job.job_id, { run_id: run.run_id, iteration: currentIteration });
+        return run;
+      },
+    });
+    const latestJob = store.getSupervisorJob(job.job_id);
+    if (!latestJob || latestJob.status === "cancel_requested" || latestJob.status === "cancelled" || outcome.status === "stopped") {
+      store.updateSupervisorJob(job.job_id, { status: "cancelled", iteration: currentIteration });
+      store.appendEvent({ session_id: job.session_id, run_id: outcome.run_id ?? startedRunId, type: "daemon.job.cancelled", data: { job_id: job.job_id } });
+      return;
+    }
+    if (outcome.status === "idle") {
       const state = readGoalState(store, job.session_id);
-      if (!state || state.goal.status === "complete" || state.goal.status === "dropped") {
-        store.updateSupervisorJob(job.job_id, { status: "complete", iteration });
-        store.appendEvent({ session_id: job.session_id, run_id: startedRunId, type: "daemon.job.complete", data: { job_id: job.job_id, kind: "goal" } });
-        return;
-      }
-      if (!state.enabled || state.goal.status === "paused" || state.goal.status === "budget-limited") {
-        store.updateSupervisorJob(job.job_id, { status: "paused", iteration });
+      if (state && state.goal.status !== "complete" && state.goal.status !== "dropped") {
+        store.updateSupervisorJob(job.job_id, {
+          status: "paused",
+          iteration: currentIteration,
+          metadata: { ...latestJob.metadata, pause_reason: state.goal.status },
+        });
         store.appendEvent({
           session_id: job.session_id,
-          run_id: startedRunId,
+          run_id: outcome.run_id ?? startedRunId,
           type: "goal.supervisor.paused",
           data: { job_id: job.job_id, goal_id: state.goal.id, status: state.goal.status },
         });
         return;
       }
-
-      iteration += 1;
-      store.updateSupervisorJob(job.job_id, { status: "running", iteration });
-      if (isGoalFrontierExhausted(state.goal)) {
-        const auditRunId = randomId("run");
-        writeGoalState(store, job.session_id, markGoalAuditStarted(state, auditRunId), auditRunId);
-        store.appendEvent({
-          session_id: job.session_id,
-          run_id: auditRunId,
-          type: "goal.audit.started",
-          data: { job_id: job.job_id, goal_id: state.goal.id, frontier_generation: state.goal.frontier_generation },
-        });
-        await runtime.run({
-          prompt: buildGoalAuditPrompt(state.goal.objective),
-          session_id: job.session_id,
-          client_id: `daemon:${process.pid}:goal-audit`,
-          owner_kind: "daemon",
-          request_class: "audit",
-          visibility: "internal",
-          run_id: auditRunId,
-        });
-        const audited = readGoalState(store, job.session_id);
-        if (!audited || audited.goal.status === "complete" || audited.goal.status === "dropped") {
-          continue;
-        }
-        if (audited.goal.last_audit_run_id !== auditRunId) {
-          store.updateSupervisorJob(job.job_id, { status: "paused", iteration, metadata: { ...latestJob.metadata, pause_reason: "audit_missing_decision" } });
-          store.appendEvent({
-            session_id: job.session_id,
-            run_id: auditRunId,
-            type: "goal.supervisor.paused",
-            data: { job_id: job.job_id, goal_id: audited.goal.id, reason: "audit_missing_decision" },
-          });
-          return;
-        }
-        if (audited.goal.last_audit_decision === "expand") {
-          continue;
-        }
-        if (audited.goal.last_audit_decision === "done") {
-          const completed = completeGoalAfterAudit(audited, audited.goal.last_audit_summary);
-          writeGoalState(store, job.session_id, completed, auditRunId);
-          recordGoalCompletionReport(store, job.session_id, auditRunId);
-          store.updateSupervisorJob(job.job_id, { status: "complete", iteration });
-          store.appendEvent({ session_id: job.session_id, run_id: auditRunId, type: "daemon.job.complete", data: { job_id: job.job_id, kind: "goal" } });
-          return;
-        }
-        store.updateSupervisorJob(job.job_id, {
-          status: audited.goal.last_audit_decision === "blocked" ? "blocked" : "paused",
-          iteration,
-          metadata: { ...latestJob.metadata, pause_reason: audited.goal.last_audit_decision ?? "audit_decision" },
-        });
-        store.appendEvent({
-          session_id: job.session_id,
-          run_id: auditRunId,
-          type: "goal.supervisor.paused",
-          data: { job_id: job.job_id, goal_id: audited.goal.id, reason: audited.goal.last_audit_decision, blocker: audited.goal.blocker },
-        });
-        return;
-      }
-
-      const workRun = await runtime.run({
-        prompt: buildGoalWorkPrompt(state.goal.objective),
-        session_id: job.session_id,
-        client_id: `daemon:${process.pid}:goal`,
-        owner_kind: "daemon",
-        request_class: "background",
-      });
-      store.updateSupervisorJob(job.job_id, { run_id: workRun.run_id, iteration });
-      const afterWork = readGoalState(store, job.session_id);
-      if (afterWork && afterWork.goal.planning && incompleteGoalPlanningSteps(afterWork.goal).length === 0) {
-        continue;
-      }
     }
-    store.updateSupervisorJob(job.job_id, { status: "paused", iteration, metadata: { ...job.metadata, pause_reason: "max_iterations" } });
-    store.appendEvent({
-      session_id: job.session_id,
-      run_id: startedRunId,
-      type: "goal.supervisor.paused",
-      data: { job_id: job.job_id, goal_id: job.goal_id, reason: "max_iterations", max_iterations: maxIterations },
+    if (outcome.status === "complete" || outcome.status === "idle") {
+      store.updateSupervisorJob(job.job_id, { status: "complete", iteration: currentIteration });
+      store.appendEvent({ session_id: job.session_id, run_id: outcome.run_id ?? startedRunId, type: "daemon.job.complete", data: { job_id: job.job_id, kind: "goal" } });
+      return;
+    }
+    store.updateSupervisorJob(job.job_id, {
+      status: outcome.status === "blocked" ? "blocked" : "paused",
+      iteration: currentIteration,
+      metadata: { ...latestJob.metadata, pause_reason: outcome.reason ?? outcome.status },
     });
   } catch (error) {
     store.updateSupervisorJob(job.job_id, { status: "failed" });
