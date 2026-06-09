@@ -831,7 +831,36 @@ test("ToolRegistry runs workspace, search, command, git, and evidence tools", as
     );
     assert.equal(urlOnlyExport.ok, false);
     assert.equal(urlOnlyExport.error?.code, "resource_export_url_only");
-    const rootList = await registry.call({ id: "tc3j", name: "list_dir", arguments: { path: "/" } }, { session_id: session.session_id });
+    const legacyImageResource = store.putResource(
+      session.session_id,
+      "omni.legacy.image",
+      JSON.stringify({
+        request: { response_format: "b64_json" },
+        response: { data: [{ b64_json: Buffer.from("legacy-png").toString("base64") }] },
+      }),
+      { content_type: "application/json" },
+    );
+    const legacyExport = await registry.call(
+      { id: "tc3j", name: "export_resource", arguments: { uri: legacyImageResource.uri, path: "exports/legacy.png" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(legacyExport.ok, true);
+    assert.equal(legacyExport.data?.mime, "image/png");
+    assert.deepEqual(await readFile(path.join(dir, "exports/legacy.png")), Buffer.from("legacy-png"));
+    const textExport = await registry.call(
+      { id: "tc3k", name: "export_resource", arguments: { uri: resource.uri, path: "exports/resource.txt" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(textExport.ok, true);
+    assert.equal(textExport.data?.mime, "text/plain");
+    assert.equal(await readFile(path.join(dir, "exports/resource.txt"), "utf8"), "alpha\nbeta\n");
+    const ambiguousExport = await registry.call(
+      { id: "tc3l", name: "export_resource", arguments: { uri: "r_" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(ambiguousExport.ok, false);
+    assert.equal(ambiguousExport.error?.code, "resource_uri_ambiguous");
+    const rootList = await registry.call({ id: "tc3m", name: "list_dir", arguments: { path: "/" } }, { session_id: session.session_id });
     assert.equal(rootList.ok, true);
     assert.ok((rootList.data?.entries as Array<{ name?: string }>).some((entry) => entry.name === "README.md"));
     const command = await registry.call(
