@@ -210,13 +210,13 @@ function turnCacheLabel(cache?: CacheObservation): string | undefined {
     return "cache warmup";
   }
   if (cache.actualHit !== undefined && cache.oracleHit !== undefined) {
-    return `actual/oracle cache ${formatPercent(cache.actualHit)}/${formatPercent(cache.oracleHit)} · cache diff ${formatCacheDiff(cache.cacheDiff ?? 0)}`;
+    return `actual/oracle cache ${formatCacheHit(cache.actualHit)}/${formatCacheHit(cache.oracleHit)} · cache diff ${formatCacheDiff(cache.cacheDiff ?? 0)}`;
   }
   if (cache.actualHit !== undefined) {
-    return `cache ${formatPercent(cache.actualHit)}`;
+    return `cache ${formatCacheHit(cache.actualHit)}`;
   }
   if (cache.oracleHit !== undefined) {
-    return `oracle cache ${formatPercent(cache.oracleHit)}`;
+    return `oracle cache ${formatCacheHit(cache.oracleHit)}`;
   }
   return undefined;
 }
@@ -272,8 +272,22 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function formatCacheHit(value: number): string {
+  return fg256(cacheHitColor(value), formatPercent(value));
+}
+
 function formatCacheDiff(value: number): string {
   return fg256(cacheDiffColor(value), formatPercent(value));
+}
+
+function cacheHitColor(value: number): number {
+  if (value >= 0.8) {
+    return 48;
+  }
+  if (value >= 0.5) {
+    return 220;
+  }
+  return 203;
 }
 
 function cacheDiffColor(value: number): number {

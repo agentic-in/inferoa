@@ -60,6 +60,7 @@ test("tokenmaxxing view combines prefix cache, RTK, and recent turn signal", () 
   assert.match(plain, /rtk 2 cmds .*io 300->60 .*saved 240 .*tool 80\.0%/);
   assert.match(plain, /model selection .*cost compute rates pending/);
   assert.match(plain, /turn 2 .*tokens 200\/440 .*actual\/oracle cache 94\.0%\/95\.2% .*cache diff 1\.2% .*rtk 240 .*tools 3/);
+  assert.match(lines.join("\n"), /\x1b\[38;5;48m94\.0%\x1b\[0m\/\x1b\[38;5;48m95\.2%\x1b\[0m/);
   assert.match(lines.join("\n"), /\x1b\[38;5;48m1\.2%\x1b\[0m/);
   assert.match(plain, /turn 1 .*tokens 100\/100 .*cache warmup .*tools 1/);
   assert.doesNotMatch(plain, /run_2|[{}"]/);
@@ -109,6 +110,7 @@ test("tokenmaxxing cache diff marks large provider cache gaps in red", () => {
   const plain = stripAnsi(lines.join("\n"));
 
   assert.match(plain, /cache diff 45\.5%/);
+  assert.match(lines.join("\n"), /\x1b\[38;5;203m45\.5%\x1b\[0m\/\x1b\[38;5;48m90\.9%\x1b\[0m/);
   assert.match(lines.join("\n"), /\x1b\[38;5;203m45\.5%\x1b\[0m/);
 });
 
