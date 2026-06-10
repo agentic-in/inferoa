@@ -50,6 +50,15 @@ export interface GoalPlanningStep {
   updated_at: string;
 }
 
+export interface GoalFrontierSnapshot {
+  generation: number;
+  summary?: string;
+  active_step_id?: string;
+  steps: GoalPlanningStep[];
+  updated_at: string;
+  current: boolean;
+}
+
 export interface GoalPlanningInput {
   summary?: string;
   active_step_id?: string;
@@ -111,6 +120,35 @@ export function readGoalState(store: SessionStore, sessionId: string): GoalState
     return undefined;
   }
   return parseGoalState(event.data);
+}
+
+export function readGoalFrontiers(store: SessionStore, sessionId: string, goalId?: string): GoalFrontierSnapshot[] {
+  const events = store.listEvents(sessionId).filter((event) => event.type === "goal.updated");
+  const latest = readGoalState(store, sessionId)?.goal;
+  const targetGoalId = goalId ?? latest?.id;
+  if (!targetGoalId) {
+    return [];
+  }
+  const byGeneration = new Map<number, GoalFrontierSnapshot>();
+  for (const event of events) {
+    const state = parseGoalState(event.data);
+    const goal = state?.goal;
+    if (!goal || goal.id !== targetGoalId || !goal.planning || goal.frontier_generation <= 0) {
+      continue;
+    }
+    byGeneration.set(goal.frontier_generation, {
+      generation: goal.frontier_generation,
+      summary: goal.planning.summary,
+      active_step_id: goal.planning.active_step_id,
+      steps: cloneGoalPlanning(goal.planning).steps,
+      updated_at: goal.planning.updated_at || goal.updated_at,
+      current: false,
+    });
+  }
+  const currentGeneration = latest?.id === targetGoalId ? latest.frontier_generation : undefined;
+  return [...byGeneration.values()]
+    .sort((a, b) => a.generation - b.generation)
+    .map((frontier) => ({ ...frontier, current: frontier.generation === currentGeneration }));
 }
 
 export function createGoalState(input: GoalCreateInput, now = new Date()): GoalState {
@@ -389,6 +427,7 @@ export function recordGoalCompletionReport(store: SessionStore, sessionId: strin
       report: completion.report,
       tool_rounds: state.goal.tool_rounds_used,
       tool_calls: state.goal.tool_calls_used,
+      frontiers: state.goal.frontier_generation,
       tokens: state.goal.tokens_used,
       duration_ms: goalDurationMs(state.goal),
     };
@@ -502,7 +541,7 @@ export function completionBudgetReport(goal: GoalRecord): string | undefined {
     goal.token_budget === undefined
       ? `${goal.tokens_used} tokens used`
       : `${goal.tokens_used} of ${goal.token_budget} tokens used`;
-  return `Goal achieved. ${countLabel(goal.tool_rounds_used, "loop")} · ${countLabel(goal.tool_calls_used, "tool call")} · ${formatDurationMs(goalDurationMs(goal))} · ${usage}.`;
+  return `Goal achieved. ${countLabel(goal.tool_rounds_used, "loop")} · ${countLabel(goal.tool_calls_used, "tool call")} · ${countLabel(goal.frontier_generation, "frontier")} · ${formatDurationMs(goalDurationMs(goal))} · ${usage}.`;
 }
 
 export function goalDurationMs(goal: GoalRecord): number {

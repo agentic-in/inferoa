@@ -109,6 +109,26 @@ test("activity view renders goal completion reports as native metrics", () => {
   assert.ok(lines.every((line) => visibleWidth(line) <= 180));
 });
 
+test("activity view renders frontier expansion as a native event", () => {
+  const lines = renderSessionActivityLines(
+    [
+      event("goal.frontier.expanded", {
+        goal_id: "goal_1",
+        previous_frontier_generation: 1,
+        frontier_generation: 2,
+        step_count: 3,
+        active_step_id: "verify",
+      }),
+    ],
+    120,
+  );
+  const plain = stripAnsi(lines.join("\n"));
+
+  assert.match(plain, /goal frontier started .*frontier 2 .*previous 1 .*steps 3 .*active verify/);
+  assert.doesNotMatch(plain, /previous_frontier_generation|frontier_generation|step_count|active_step_id/);
+  assert.ok(lines.every((line) => visibleWidth(line) <= 120));
+});
+
 test("activity view renders run lifecycle events as native metrics", () => {
   const lines = renderSessionActivityLines(
     [

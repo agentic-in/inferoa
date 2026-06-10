@@ -10,14 +10,17 @@ import { buildGoalReflectionPrompt } from "../src/goals/supervisor-prompts.js";
 import {
   applyGoalUsage,
   cloneGoalState,
+  completeGoalReflection,
   createGoalState,
   goalDurationMs,
   incompleteGoalPlanningMessage,
+  readGoalFrontiers,
   readGoalState,
   recordGoalCompletionReport,
   replaceGoalPlanning,
   writeGoalState,
 } from "../src/goals/state.js";
+import { runGoalSupervisor } from "../src/goals/supervisor.js";
 import { readPlanState } from "../src/plans/state.js";
 import { SessionStore } from "../src/session/store.js";
 import { CORE_TOOL_DEFINITIONS } from "../src/tools/schemas.js";
@@ -801,7 +804,23 @@ test("goal reflection gates completion and can expand a new frontier generation"
     assert.equal(afterExpand?.frontier_generation, 2);
     assert.equal(afterExpand?.last_reflection_decision, "expand");
     assert.equal(afterExpand?.planning?.active_step_id, "second");
-    assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.frontier.expanded"));
+    const expandedEvent = store.listEvents(session.session_id).find((event) => event.type === "goal.frontier.expanded");
+    assert.equal(expandedEvent?.data.previous_frontier_generation, 1);
+    assert.equal(expandedEvent?.data.frontier_generation, 2);
+    assert.equal(expandedEvent?.data.step_count, 1);
+
+    const frontiers = readGoalFrontiers(store, session.session_id, afterExpand?.id);
+    assert.deepEqual(
+      frontiers.map((frontier) => [
+        frontier.generation,
+        frontier.current,
+        frontier.steps.map((step) => [step.id, step.title, step.status]),
+      ]),
+      [
+        [1, false, [["first", "First frontier", "completed"]]],
+        [2, true, [["second", "Second frontier", "in_progress"]]],
+      ],
+    );
 
     const missingEvidence = await registry.call(
       { id: "ga_done_missing", name: "goal", arguments: { op: "reflect", decision: "done", summary: "No more work." } },
@@ -832,6 +851,58 @@ test("goal reflection gates completion and can expand a new frontier generation"
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
     assert.equal(readGoalState(store, session.session_id)?.goal.status, "complete");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal supervisor activity labels include the current frontier generation", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-activity-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_activity", root: dir, alias: "goal-frontier-activity" };
+    const workSession = store.createSession(workspace, "goal-work-frontier");
+    writeGoalState(
+      store,
+      workSession.session_id,
+      replaceGoalPlanning(createGoalState({ objective: "Work current frontier" }), {
+        steps: [{ id: "active", title: "Active frontier work", status: "in_progress" }],
+      }),
+    );
+    const workLabels: string[] = [];
+    await runGoalSupervisor({
+      store,
+      sessionId: workSession.session_id,
+      supervisor: "test",
+      maxIterations: 1,
+      runTurn: async (request) => {
+        workLabels.push(request.activityLabel ?? "");
+        return { run_id: "run_work" };
+      },
+    });
+    assert.deepEqual(workLabels, ["Continuing goal frontier 1"]);
+
+    const reflectionSession = store.createSession(workspace, "goal-reflection-frontier");
+    writeGoalState(
+      store,
+      reflectionSession.session_id,
+      replaceGoalPlanning(createGoalState({ objective: "Reflect current frontier" }), {
+        steps: [{ id: "done", title: "Done frontier work", status: "completed" }],
+      }),
+    );
+    const reflectionLabels: string[] = [];
+    await runGoalSupervisor({
+      store,
+      sessionId: reflectionSession.session_id,
+      supervisor: "test",
+      maxIterations: 1,
+      runTurn: async (request) => {
+        reflectionLabels.push(request.activityLabel ?? "");
+        return { run_id: request.runId ?? "run_reflection" };
+      },
+    });
+    assert.deepEqual(reflectionLabels, ["Reflecting goal frontier 1"]);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -1025,6 +1096,44 @@ test("goal completion reports persist cumulative usage totals", async () => {
     assert.equal(events[0]?.data.tokens, 123);
     assert.equal(events[0]?.data.duration_ms, 20_000);
     assert.equal(events[0]?.data.completion_summary, "Verified cumulative report totals.");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal completion reports include the frontier count", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-report-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_report", root: dir, alias: "goal-frontier-report" };
+    const session = store.createSession(workspace, "goal-frontier-report");
+    let state = replaceGoalPlanning(createGoalState({ objective: "Finish multi-frontier reporting" }), {
+      steps: [{ id: "first", title: "First frontier", status: "completed" }],
+    });
+    state = completeGoalReflection(
+      state,
+      {
+        decision: "expand",
+        summary: "Second frontier found.",
+        steps: [{ id: "second", title: "Second frontier", status: "completed" }],
+      },
+      "run_reflect_expand",
+    );
+    writeGoalState(store, session.session_id, state, "run_goal_frontiers");
+
+    const complete = cloneGoalState(state);
+    complete.enabled = false;
+    complete.goal.status = "complete";
+    complete.goal.summary = "Verified both frontiers.";
+    complete.goal.updated_at = new Date().toISOString();
+    writeGoalState(store, session.session_id, complete, "run_goal_complete");
+
+    const report = recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
+    assert.match(report?.report ?? "", /2 frontiers/);
+
+    const event = store.listEvents(session.session_id).find((item) => item.type === "goal.completion_report");
+    assert.equal(event?.data.frontiers, 2);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

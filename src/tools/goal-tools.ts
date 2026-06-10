@@ -12,6 +12,7 @@ import {
   goalPlanningProgressSummary,
   parseGoalReflectionDecision,
   parseGoalStepStatus,
+  readGoalFrontiers,
   readGoalState,
   replaceGoalPlanning,
   updateGoalPlanningStep,
@@ -29,7 +30,7 @@ export async function goalTool(args: JsonObject, context: ToolExecutionContext):
       case "create":
         return createGoal(args, context);
       case "get":
-        return describeGoal(readGoalState(context.store, context.session_id), "Goal state");
+        return describeGoal(readGoalState(context.store, context.session_id), "Goal state", context);
       case "decompose":
       case "update_plan":
         return updateGoalPlan(args, context, op);
@@ -75,7 +76,7 @@ function createGoal(args: JsonObject, context: ToolExecutionContext): ToolResult
     );
   }
   state = writeGoalState(context.store, context.session_id, state, context.run_id);
-  return describeGoal(state, "Goal created");
+  return describeGoal(state, "Goal created", context);
 }
 
 function updateGoalPlan(args: JsonObject, context: ToolExecutionContext, op: string): ToolResult {
@@ -120,7 +121,7 @@ function updateGoalPlan(args: JsonObject, context: ToolExecutionContext, op: str
   } else {
     return fail("goal_steps_required", "steps are required before goal planning can be updated");
   }
-  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), steps ? "Goal decomposed" : "Goal plan updated");
+  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), steps ? "Goal decomposed" : "Goal plan updated", context);
 }
 
 function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolResult {
@@ -148,7 +149,7 @@ function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolRe
       evidence: objectArg(args.evidence),
       active_step_id: stringArg(args.active_step_id),
     });
-    return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal step updated");
+    return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal step updated", context);
   } catch (error) {
     return failGoalWithState(state, "goal_step_update_failed", error instanceof Error ? error.message : String(error));
   }
@@ -203,13 +204,14 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
         type: "goal.frontier.expanded",
         data: {
           goal_id: saved.goal.id,
+          previous_frontier_generation: state.goal.frontier_generation,
           frontier_generation: saved.goal.frontier_generation,
           step_count: saved.goal.planning?.steps.length ?? 0,
           active_step_id: saved.goal.planning?.active_step_id,
         },
       });
     }
-    return describeGoal(saved, decision === "expand" ? "Goal frontier expanded" : "Goal reflection recorded");
+    return describeGoal(saved, decision === "expand" ? "Goal frontier expanded" : "Goal reflection recorded", context);
   } catch (error) {
     return failGoalWithState(state, "goal_reflection_failed", error instanceof Error ? error.message : String(error));
   }
@@ -230,7 +232,7 @@ function resumeGoal(context: ToolExecutionContext): ToolResult {
   next.enabled = true;
   next.goal.status = "active";
   next.goal.updated_at = new Date().toISOString();
-  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal resumed");
+  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal resumed", context);
 }
 
 function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "complete" | "dropped"): ToolResult {
@@ -279,7 +281,7 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   next.enabled = false;
   next.goal.status = status;
   next.goal.updated_at = new Date().toISOString();
-  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), status === "complete" ? "Goal complete" : "Goal dropped");
+  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), status === "complete" ? "Goal complete" : "Goal dropped", context);
 }
 
 function isInternalReflectionContext(context: ToolExecutionContext): boolean {
@@ -295,11 +297,12 @@ function failGoalWithState(state: GoalState, code: string, message: string, extr
   });
 }
 
-function describeGoal(state: GoalState | undefined, summary: string): ToolResult {
+function describeGoal(state: GoalState | undefined, summary: string, context?: ToolExecutionContext): ToolResult {
   if (!state) {
     return ok("No goal set.", { goal: null });
   }
   const goal = state.goal;
+  const frontiers = context ? readGoalFrontiers(context.store, context.session_id, goal.id) : [];
   const completion =
     goal.status === "complete"
       ? {
@@ -310,6 +313,7 @@ function describeGoal(state: GoalState | undefined, summary: string): ToolResult
   return ok(goalSummary(summary, goal), {
     enabled: state.enabled,
     goal: goal as unknown as JsonObject,
+    frontiers: frontiers as unknown as JsonObject[],
     remaining_tokens: goal.token_budget === undefined ? null : Math.max(0, goal.token_budget - goal.tokens_used),
     ...completion,
   });

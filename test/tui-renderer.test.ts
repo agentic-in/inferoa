@@ -345,6 +345,21 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
                   ],
                 },
               },
+              frontiers: [
+                {
+                  generation: 1,
+                  current: false,
+                  summary: "First pass",
+                  steps: [{ id: "inspect", title: "Inspect flow", status: "completed" }],
+                },
+                {
+                  generation: 2,
+                  current: true,
+                  summary: "Verification pass",
+                  active_step_id: "verify",
+                  steps: [{ id: "verify", title: "Run verification", status: "in_progress" }],
+                },
+              ],
               completion_budget_report: "Goal achieved. 1 loop · 2 tool calls · 3s · 34 tokens used.",
               remaining_tokens: null,
             },
@@ -554,9 +569,12 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
     assert.doesNotMatch(goalBlock, /objective Ship mode/);
     assert.doesNotMatch(goalBlock, /loops 1 · tools 2/);
     assert.match(goalBlock, /report Goal achieved\. 1 loop · 2 tool calls · 3s · 34 tokens used\./);
+    assert.match(goalBlock, /frontier 1/);
+    assert.match(goalBlock, /sub-goal .*inspect Inspect flow/);
+    assert.match(goalBlock, /frontier 2 current/);
+    assert.match(goalBlock, /sub-goal .*\* verify Run verification/);
     assert.match(goalBlock, /plan 1 completed · 1 in progress/);
     assert.match(goalBlock, /now \* verify Run verification/);
-    assert.doesNotMatch(goalBlock, /inspect Inspect flow/);
     assert.match(plain, /Updated goal failed · Blocked goal · active/);
     assert.match(plain, /goal_incomplete_plan: Cannot complete goal with unfinished internal plan steps: verify/);
     assert.match(plain, /Initialized experiment failed · harness exited 2; missing METRIC latency_ms=value/);

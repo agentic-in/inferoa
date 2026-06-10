@@ -8,6 +8,7 @@ import { SessionStore } from "../src/session/store.js";
 import { TuiApp } from "../src/tui/app.js";
 import { buildGoalWorkPrompt } from "../src/goals/supervisor-prompts.js";
 import { stripAnsi } from "../src/tui/ansi.js";
+import { completeGoalReflection, createGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
 
 test("clear starts a clean default session without prompting or rendering creation details", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-clear-session-"));
@@ -193,6 +194,101 @@ test("goal continuation queues a hidden foreground prompt instead of a daemon jo
     assert.deepEqual(queued, [{ prompt: buildGoalWorkPrompt("deep research on this repo"), renderPrompt: false }]);
     assert.deepEqual(panels, []);
   } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal show renders wrapped tree frontiers without repeated command hints", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-show-tree-"));
+  const originalStdoutWrite = process.stdout.write;
+  const originalColumns = process.stdout.columns;
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_show_tree", root: stateDir, alias: "goal-show-tree" };
+    const session = store.createSession(workspace, "goal show tree");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      renderGoalPanel: (state: ReturnType<typeof createGoalState>) => void;
+      renderInlinePanel: (title: string, body: string[]) => void;
+      renderPanel: (title: string, body: string[]) => void;
+      optionalSession: () => { session_id: string } | undefined;
+    };
+    const longSummary =
+      "Successfully improved the vLLM Semantic Router codebase across all three sub-projects with Python CLI, Go core, and fleet simulator verification completed without truncation.";
+    const longReflection =
+      "Successfully improved the vLLM Semantic Router codebase across all three sub-projects after reflection, including Python tests passing and release notes prepared without hidden tail text.";
+    let goal = replaceGoalPlanning(createGoalState({ objective: "improve codebase" }), {
+      summary: "Initial audit and repair frontier",
+      steps: [
+        { id: "explore_and_audit", title: "Explore codebase and identify concrete improvement areas", status: "completed" },
+        { id: "fix_python_issues", title: "Fix Python code quality issues in the vllm-sr CLI", status: "completed" },
+      ],
+    });
+    goal.goal.summary = longSummary;
+    writeGoalState(store, session.session_id, goal, "run_frontier_1");
+    goal = completeGoalReflection(
+      goal,
+      {
+        decision: "expand",
+        summary: longReflection,
+        steps: [
+          {
+            id: "verify_build_and_test_full_suite",
+            title: "Verify build and test full suite across all three projects before calling the goal complete",
+            status: "in_progress",
+          },
+        ],
+        active_step_id: "verify_build_and_test_full_suite",
+      },
+      "run_reflection",
+    );
+    goal.goal.summary = longSummary;
+    writeGoalState(store, session.session_id, goal, "run_frontier_2");
+
+    const panels: Array<{ title: string; body: string[] }> = [];
+    view.optionalSession = () => session;
+    view.renderPanel = (title, body) => {
+      panels.push({ title, body });
+    };
+
+    process.stdout.columns = 88;
+    view.renderGoalPanel(goal);
+
+    const latest = panels.at(-1);
+    assert.equal(latest?.title, "Goal");
+    const plain = stripAnsi(latest?.body.join("\n") ?? "");
+    assert.match(plain, /◇ Frontier 1/);
+    assert.match(plain, /◆ Frontier 2 current/);
+    assert.match(plain, /├─ x explore_and_audit/);
+    assert.match(plain, /└─ \* verify_build_and_test_full_suite/);
+    assert.doesNotMatch(plain, /\/goal plan/);
+    assert.doesNotMatch(plain, /\/goal complete/);
+    assert.match(plain, /fleet simulator verification\s+completed without truncation/);
+    assert.match(plain, /release notes\s+prepared without hidden tail text/);
+
+    let inlineOutput = "";
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      inlineOutput += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      return true;
+    }) as typeof process.stdout.write;
+    view.renderInlinePanel("Goal", latest?.body ?? []);
+
+    const rendered = stripAnsi(inlineOutput);
+    assert.doesNotMatch(rendered, /…/);
+    assert.match(rendered, /fleet simulator verification\s+completed without truncation/);
+    assert.match(rendered, /release notes\s+prepared without hidden tail text/);
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    process.stdout.columns = originalColumns;
     store.close();
     await rm(stateDir, { recursive: true, force: true });
   }

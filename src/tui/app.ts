@@ -30,10 +30,12 @@ import {
   incompleteGoalPlanningMessage,
   goalCompletionReflectionBlockMessage,
   goalPlanningProgressSummary,
+  readGoalFrontiers,
   readGoalState,
   recordGoalCompletionReport,
   validateTokenBudget,
   writeGoalState,
+  type GoalFrontierSnapshot,
   type GoalRecord,
   type GoalState,
 } from "../goals/state.js";
@@ -3035,34 +3037,41 @@ export class TuiApp {
       return;
     }
     const goal = state.goal;
+    const width = goalPanelContentWidth();
     const status = `${goal.status}${state.enabled ? "" : " (paused)"}`;
-    const lines = [`${fg256(39, status)} ${goal.objective}`];
+    const lines = renderGoalPanelStatus(status, goal.objective, width);
     const usage = goalPanelUsage(goal);
     if (usage) {
       lines.push(fg256(244, usage));
     }
     if (goal.summary) {
-      lines.push(`${fg256(39, "summary")} ${goal.summary}`);
-    }
-    if (goal.frontier_generation > 0) {
-      lines.push(`${fg256(39, "frontier")} generation ${goal.frontier_generation}`);
+      appendGoalPanelField(lines, "summary", goal.summary, width);
     }
     if (goal.last_reflection_decision) {
-      lines.push(`${fg256(39, "reflection")} ${goal.last_reflection_decision}${goal.last_reflection_summary ? ` · ${goal.last_reflection_summary}` : ""}`);
+      appendGoalPanelField(
+        lines,
+        "reflection",
+        `${goal.last_reflection_decision}${goal.last_reflection_summary ? ` · ${goal.last_reflection_summary}` : ""}`,
+        width,
+      );
     }
     if (goal.blocker) {
-      lines.push(`${fg256(203, "blocker")} ${goal.blocker}`);
+      appendGoalPanelField(lines, "blocker", goal.blocker, width, 203, 203);
     }
     if (goal.planning) {
       lines.push(`${fg256(39, "plan")} ${goalPlanningProgressSummary(goal.planning)}`);
       const active = goal.planning.active_step_id ? goal.planning.steps.find((step) => step.id === goal.planning?.active_step_id) : undefined;
       if (active) {
-        lines.push(`${fg256(39, "now")} ${goalStepStatusMarker(active.status)} ${active.id} ${active.title}`);
+        appendGoalPanelField(lines, "now", `${goalStepPlainStatusMarker(active.status)} ${active.id} ${active.title}`, width);
+      }
+      const session = this.optionalSession();
+      const frontiers = session ? readGoalFrontiers(this.app.store, session.session_id, goal.id) : [];
+      if (frontiers.length) {
+        lines.push("", ...renderGoalPanelFrontiers(frontiers, width));
       }
     } else {
       lines.push(fg256(244, "No internal plan yet."));
     }
-    lines.push("", `${fg256(39, "/goal plan")} plan · ${fg256(39, "/goal complete")} complete · ${fg256(39, "/goal pause")} pause · ${fg256(39, "/goal drop")} drop`);
     this.renderPanel("Goal", lines);
   }
 
@@ -4448,12 +4457,105 @@ function goalPanelUsage(goal: GoalRecord): string | undefined {
   return parts.length ? parts.join(" · ") : undefined;
 }
 
+function goalPanelContentWidth(): number {
+  return Math.max(24, safeTerminalWidth() - 3);
+}
+
+function renderGoalPanelStatus(status: string, objective: string, width: number): string[] {
+  const prefixPlain = `${status} `;
+  const prefix = `${fg256(39, status)} `;
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(objective), room);
+  const continuation = " ".repeat(visibleWidth(prefixPlain));
+  return chunks.map((chunk, index) => (index === 0 ? `${prefix}${chunk}` : `${continuation}${chunk}`));
+}
+
+function appendGoalPanelField(lines: string[], label: string, text: string, width: number, textColor = 250, labelColor = 39): void {
+  const prefixPlain = `${label} `;
+  const prefix = `${fg256(labelColor, label)} `;
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(text), room);
+  const continuation = " ".repeat(visibleWidth(prefixPlain));
+  for (const [index, chunk] of chunks.entries()) {
+    lines.push(index === 0 ? `${prefix}${fg256(textColor, chunk)}` : `${continuation}${fg256(textColor, chunk)}`);
+  }
+}
+
 function goalCompletionRecordDetails(goal: GoalRecord): GoalSupervisorRecordDetail[] {
   const summary = goal.last_reflection_summary || goal.summary || "reflection found no remaining frontier";
   return [
     { label: "summary", text: summary, color: 250 },
     { label: "stats", text: completionBudgetReport(goal) ?? goalPanelUsage(goal) ?? "no usage recorded", color: 244 },
   ];
+}
+
+function renderGoalPanelFrontiers(frontiers: GoalFrontierSnapshot[], width: number): string[] {
+  return frontiers.flatMap((frontier, index) => {
+    const headingMarker = frontier.current ? fg256(75, "◆") : fg256(244, "◇");
+    const heading = `${headingMarker} ${fg256(252, `Frontier ${frontier.generation}${frontier.current ? " current" : ""}`)}`;
+    const lines = [heading];
+    appendGoalTreeText(lines, "│  ", goalFrontierProgressSummary(frontier), width, 244);
+    if (frontier.summary) {
+      appendGoalTreeText(lines, "│  ", frontier.summary, width, 244);
+    }
+    if (frontier.steps.length) {
+      for (const [stepIndex, step] of frontier.steps.entries()) {
+        lines.push(...renderGoalPanelFrontierStep(step, stepIndex === frontier.steps.length - 1, width));
+      }
+    } else {
+      lines.push(`${fg256(244, "└─")} ${fg256(244, "-")} ${fg256(244, "no sub-goals")}`);
+    }
+    if (index < frontiers.length - 1) {
+      lines.push(fg256(244, "│"));
+    }
+    return lines;
+  });
+}
+
+function appendGoalTreeText(lines: string[], prefixPlain: string, text: string, width: number, color: number): void {
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(text), room);
+  const prefix = fg256(244, prefixPlain);
+  for (const chunk of chunks) {
+    lines.push(`${prefix}${fg256(color, chunk)}`);
+  }
+}
+
+function renderGoalPanelFrontierStep(step: GoalFrontierSnapshot["steps"][number], isLast: boolean, width: number): string[] {
+  const branch = isLast ? "└─" : "├─";
+  const continuationBranch = isLast ? "   " : "│  ";
+  const markerPlain = goalStepPlainStatusMarker(step.status);
+  const prefixPlain = `${branch} ${markerPlain} ${step.id} `;
+  const prefix = `${fg256(244, branch)} ${goalStepStatusMarker(step.status)} ${fg256(250, step.id)} `;
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(step.title), room);
+  const continuation = `${fg256(244, continuationBranch)}${" ".repeat(visibleWidth(`${markerPlain} ${step.id} `))}`;
+  return chunks.map((chunk, index) => (index === 0 ? `${prefix}${chunk}` : `${continuation}${chunk}`));
+}
+
+function goalFrontierProgressSummary(frontier: GoalFrontierSnapshot): string {
+  if (!frontier.steps.length) {
+    return "0 sub-goals";
+  }
+  const order = ["completed", "in_progress", "blocked", "pending", "skipped"];
+  const labels: Record<string, string> = {
+    completed: "completed",
+    in_progress: "in progress",
+    blocked: "blocked",
+    pending: "pending",
+    skipped: "skipped",
+  };
+  const counts = new Map<string, number>();
+  for (const step of frontier.steps) {
+    counts.set(step.status, (counts.get(step.status) ?? 0) + 1);
+  }
+  return order
+    .map((status) => {
+      const count = counts.get(status) ?? 0;
+      return count > 0 ? `${count} ${labels[status]}` : undefined;
+    })
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
 }
 
 function renderGoalSupervisorDetail(detail: GoalSupervisorRecordDetail, width: number): string[] {
@@ -4479,6 +4581,21 @@ function goalStepStatusMarker(status: string): string {
       return fg256(244, "-");
     default:
       return fg256(244, " ");
+  }
+}
+
+function goalStepPlainStatusMarker(status: string): string {
+  switch (status) {
+    case "completed":
+      return "x";
+    case "in_progress":
+      return "*";
+    case "blocked":
+      return "!";
+    case "skipped":
+      return "-";
+    default:
+      return " ";
   }
 }
 

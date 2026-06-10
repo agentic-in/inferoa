@@ -76,7 +76,7 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
     const workRun = await options.runTurn({
       prompt: buildGoalWorkPrompt(state.goal.objective),
       requestClass: options.workRequestClass ?? "background",
-      activityLabel: "Continuing goal frontier",
+      activityLabel: goalFrontierActivityLabel("Continuing goal frontier", state.goal.frontier_generation),
     });
     if (!workRun || !goalUpdatedDuringRun(options.store, options.sessionId, workRun.run_id)) {
       const reason = "last supervisor turn did not update the frontier";
@@ -114,7 +114,7 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
     requestClass: "reflection",
     visibility: "internal",
     runId: reflectionRunId,
-    activityLabel: "Reflecting goal frontier",
+    activityLabel: goalFrontierActivityLabel("Reflecting goal frontier", state.goal.frontier_generation),
     suppressTranscript: true,
   });
   const reflected = readGoalState(options.store, options.sessionId);
@@ -161,6 +161,10 @@ function isRunnableGoal(state: GoalState | undefined): state is GoalState {
 
 function goalId(state: GoalState | undefined): string | undefined {
   return state?.goal.id;
+}
+
+function goalFrontierActivityLabel(prefix: string, generation: number): string {
+  return generation > 0 ? `${prefix} ${generation}` : prefix;
 }
 
 function isCompletedReflectionForRun(state: GoalState, reflectionRunId: string): boolean {
