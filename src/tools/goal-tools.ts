@@ -7,19 +7,25 @@ import {
   completionBudgetReport,
   createGoalState,
   formatGoalDuration,
+  goalCompletionCandidateBlockMessage,
   goalCompletionReflectionBlockMessage,
   incompleteGoalPlanningMessage,
   goalPlanningProgressSummary,
   parseGoalReflectionDecision,
   parseGoalStepStatus,
-  readGoalFrontiers,
+  readGoalHorizons,
   readGoalState,
   replaceGoalPlanning,
+  setGoalStrategy,
   updateGoalPlanningStep,
+  updateGoalLedger,
   validateTokenBudget,
   writeGoalState,
+  type GoalCandidateInput,
+  type GoalCandidateValue,
   type GoalPlanningStepInput,
   type GoalRecord,
+  type GoalStrategyMode,
   type GoalState,
 } from "../goals/state.js";
 
@@ -38,6 +44,10 @@ export async function goalTool(args: JsonObject, context: ToolExecutionContext):
         return updateGoalStep(args, context);
       case "reflect":
         return recordGoalReflection(args, context);
+      case "set_strategy":
+        return updateGoalStrategy(args, context);
+      case "update_ledger":
+        return updateLedger(args, context);
       case "resume":
         return resumeGoal(context);
       case "complete":
@@ -63,7 +73,22 @@ function createGoal(args: JsonObject, context: ToolExecutionContext): ToolResult
   }
   const tokenBudget = numberArg(args.token_budget);
   validateTokenBudget(tokenBudget);
-  let state = createGoalState({ objective, token_budget: tokenBudget });
+  const mode = parseGoalStrategyModeArg(args.mode);
+  if (args.mode !== undefined && !mode) {
+    return fail("goal_strategy_mode_invalid", "mode must be surgical, opportunistic, or campaign");
+  }
+  let state = createGoalState({
+    objective,
+    token_budget: tokenBudget,
+    strategy: mode
+      ? {
+          mode,
+          inferred: booleanArg(args.inferred),
+          target_hours: numberArg(args.target_hours),
+          rationale: stringArg(args.rationale),
+        }
+      : undefined,
+  });
   const steps = stepsArg(args.steps);
   if (steps) {
     state = replaceGoalPlanning(
@@ -155,6 +180,47 @@ function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolRe
   }
 }
 
+function updateGoalStrategy(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to update.");
+  }
+  if (state.goal.status === "complete" || state.goal.status === "dropped") {
+    return fail("goal_closed", `Cannot update a ${state.goal.status} goal.`);
+  }
+  const mode = parseGoalStrategyModeArg(args.mode);
+  if (!mode) {
+    return failGoalWithState(state, "goal_strategy_mode_required", "mode is required and must be surgical, opportunistic, or campaign");
+  }
+  const next = setGoalStrategy(state, {
+    mode,
+    inferred: args.inferred === undefined ? true : booleanArg(args.inferred),
+    target_hours: numberArg(args.target_hours),
+    rationale: stringArg(args.rationale),
+  });
+  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal strategy updated", context);
+}
+
+function updateLedger(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to update.");
+  }
+  if (state.goal.status === "complete" || state.goal.status === "dropped") {
+    return fail("goal_closed", `Cannot update a ${state.goal.status} goal.`);
+  }
+  try {
+    const next = updateGoalLedger(state, {
+      open: candidatesArg(args.open),
+      done: candidatesArg(args.done),
+      rejected: candidatesArg(args.rejected),
+    });
+    return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal ledger updated", context);
+  } catch (error) {
+    return failGoalWithState(state, "goal_ledger_update_failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): ToolResult {
   if (context.request_class !== "reflection" || context.visibility !== "internal") {
     return fail("goal_reflection_context_required", "goal reflection decisions can only be recorded by an internal reflection run");
@@ -190,7 +256,8 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
       type: "goal.reflection.completed",
       data: {
         goal_id: saved.goal.id,
-        frontier_generation: saved.goal.frontier_generation,
+        source_horizon_generation: state.goal.horizon_generation,
+        horizon_generation: saved.goal.horizon_generation,
         decision,
         summary: saved.goal.last_reflection_summary,
         verification_evidence: saved.goal.verification_evidence,
@@ -201,17 +268,17 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
       context.store.appendEvent({
         session_id: context.session_id,
         run_id: context.run_id,
-        type: "goal.frontier.expanded",
+        type: "goal.horizon.expanded",
         data: {
           goal_id: saved.goal.id,
-          previous_frontier_generation: state.goal.frontier_generation,
-          frontier_generation: saved.goal.frontier_generation,
+          previous_horizon_generation: state.goal.horizon_generation,
+          horizon_generation: saved.goal.horizon_generation,
           step_count: saved.goal.planning?.steps.length ?? 0,
           active_step_id: saved.goal.planning?.active_step_id,
         },
       });
     }
-    return describeGoal(saved, decision === "expand" ? "Goal frontier expanded" : "Goal reflection recorded", context);
+    return describeGoal(saved, decision === "expand" ? "Goal horizon expanded" : "Goal reflection recorded", context);
   } catch (error) {
     return failGoalWithState(state, "goal_reflection_failed", error instanceof Error ? error.message : String(error));
   }
@@ -263,15 +330,17 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
     );
   }
   if (status === "complete") {
-    if (!booleanArg(args.force)) {
-      const incompleteMessage = incompleteGoalPlanningMessage(state.goal);
-      if (incompleteMessage) {
-        return failGoalWithState(state, "goal_incomplete_plan", incompleteMessage);
-      }
+    const incompleteMessage = incompleteGoalPlanningMessage(state.goal);
+    if (incompleteMessage) {
+      return failGoalWithState(state, "goal_incomplete_plan", incompleteMessage);
     }
     const reflectionMessage = goalCompletionReflectionBlockMessage(state.goal);
     if (reflectionMessage) {
       return failGoalWithState(state, "goal_reflection_required", reflectionMessage);
+    }
+    const candidateMessage = goalCompletionCandidateBlockMessage(state.goal);
+    if (candidateMessage) {
+      return failGoalWithState(state, "goal_completion_candidates_remaining", candidateMessage);
     }
   }
   const next = cloneGoalState(state);
@@ -302,7 +371,7 @@ function describeGoal(state: GoalState | undefined, summary: string, context?: T
     return ok("No goal set.", { goal: null });
   }
   const goal = state.goal;
-  const frontiers = context ? readGoalFrontiers(context.store, context.session_id, goal.id) : [];
+  const horizons = context ? readGoalHorizons(context.store, context.session_id, goal.id) : [];
   const completion =
     goal.status === "complete"
       ? {
@@ -313,7 +382,7 @@ function describeGoal(state: GoalState | undefined, summary: string, context?: T
   return ok(goalSummary(summary, goal), {
     enabled: state.enabled,
     goal: goal as unknown as JsonObject,
-    frontiers: frontiers as unknown as JsonObject[],
+    horizons: horizons as unknown as JsonObject[],
     remaining_tokens: goal.token_budget === undefined ? null : Math.max(0, goal.token_budget - goal.tokens_used),
     ...completion,
   });
@@ -332,7 +401,7 @@ function goalSummary(prefix: string, goal: GoalRecord): string {
     lines.push(`Time: ${formatGoalDuration(goal)}`);
   }
   if (goal.planning) {
-    lines.push(`Frontier generation: ${goal.frontier_generation}`);
+    lines.push(`Horizon: ${goal.horizon_generation}`);
     lines.push(`Plan: ${goalPlanningProgressSummary(goal.planning)}`);
     const active = goal.planning.active_step_id ? goal.planning.steps.find((step) => step.id === goal.planning!.active_step_id) : undefined;
     if (active) {
@@ -371,6 +440,47 @@ function objectArg(value: unknown): JsonObject | undefined {
     return undefined;
   }
   return value as JsonObject;
+}
+
+function parseGoalStrategyModeArg(value: unknown): GoalStrategyMode | undefined {
+  return value === "surgical" || value === "opportunistic" || value === "campaign" ? value : undefined;
+}
+
+function parseGoalCandidateValueArg(value: unknown): GoalCandidateValue | undefined {
+  return value === "high" || value === "medium" || value === "low" ? value : undefined;
+}
+
+function candidatesArg(value: unknown): GoalCandidateInput[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const candidates: GoalCandidateInput[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const title = item.trim();
+      if (title) {
+        candidates.push({ title });
+      }
+      continue;
+    }
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const data = item as Record<string, unknown>;
+    const title = stringArg(data.title)?.trim();
+    if (!title) {
+      continue;
+    }
+    candidates.push({
+      id: stringArg(data.id),
+      title,
+      source: stringArg(data.source),
+      value: parseGoalCandidateValueArg(data.value),
+      reason: stringArg(data.reason),
+      evidence: objectArg(data.evidence),
+    });
+  }
+  return candidates.length ? candidates : undefined;
 }
 
 function stepsArg(value: unknown): GoalPlanningStepInput[] | undefined {

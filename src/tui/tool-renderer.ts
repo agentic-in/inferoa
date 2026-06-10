@@ -574,9 +574,9 @@ function renderGoalTool(data: JsonObject): string[] {
     lines.push(`${fg256(39, "remaining")} ${remaining} tokens`);
   }
   const planning = objectField(goal.planning);
-  const frontiers = Array.isArray(data.frontiers) ? data.frontiers.map(objectField) : [];
-  if (frontiers.length) {
-    lines.push(...renderGoalFrontiersTool(frontiers));
+  const horizons = Array.isArray(data.horizons) ? data.horizons.map(objectField) : [];
+  if (horizons.length) {
+    lines.push(...renderGoalHorizonsTool(horizons));
   }
   if (Object.keys(planning).length) {
     lines.push(...renderGoalPlanningTool(planning));
@@ -588,13 +588,13 @@ function renderGoalTool(data: JsonObject): string[] {
   return lines.length ? lines : [fg256(243, "Goal state saved.")];
 }
 
-function renderGoalFrontiersTool(frontiers: JsonObject[]): string[] {
-  return frontiers.flatMap((frontier) => {
-    const generation = numberField(frontier.generation) ?? 0;
-    const current = frontier.current === true ? " current" : "";
-    const steps = Array.isArray(frontier.steps) ? frontier.steps.map(objectField) : [];
-    const summary = stringField(frontier.summary);
-    const heading = `${fg256(39, "frontier")} ${generation}${current}${summary ? ` · ${summary}` : ""}`;
+function renderGoalHorizonsTool(horizons: JsonObject[]): string[] {
+  return horizons.flatMap((horizon) => {
+    const generation = numberField(horizon.generation) ?? 0;
+    const current = horizon.current === true ? " current" : "";
+    const steps = Array.isArray(horizon.steps) ? horizon.steps.map(objectField) : [];
+    const title = stringField(horizon.title) ?? stringField(horizon.summary);
+    const heading = `${fg256(39, "horizon")} ${generation}${title ? ` · ${title}` : ""}${current}`;
     const stepLines = steps.map((step) => {
       const id = stringField(step.id) ?? "step";
       const title = stringField(step.title) ?? "";

@@ -28,15 +28,20 @@ import {
   completionBudgetReport,
   createGoalState,
   incompleteGoalPlanningMessage,
+  goalCompletionCandidateBlockMessage,
   goalCompletionReflectionBlockMessage,
   goalPlanningProgressSummary,
-  readGoalFrontiers,
+  readGoalHorizons,
+  readGoalReflections,
   readGoalState,
   recordGoalCompletionReport,
   validateTokenBudget,
   writeGoalState,
-  type GoalFrontierSnapshot,
+  type GoalHorizonSnapshot,
+  type GoalReflectionSnapshot,
   type GoalRecord,
+  type GoalStrategyInput,
+  type GoalStrategyMode,
   type GoalState,
 } from "../goals/state.js";
 import { runGoalSupervisor } from "../goals/supervisor.js";
@@ -131,6 +136,12 @@ type SessionAction = "resume" | "new" | "rename" | "archive" | "all";
 type DaemonAction = "status" | "queue" | "attach" | "detach" | "cancel";
 type DoctorAction = "status" | "run";
 type ToolTraceMode = "compact" | "expanded";
+type GoalSetupChoice = "auto" | "explicit";
+type GoalCampaignHoursChoice = "auto" | "30m" | "2h" | "4h" | "custom";
+
+interface GoalStartOptions {
+  strategy?: GoalStrategyInput;
+}
 
 interface EndpointProbeResult {
   models: string[];
@@ -203,6 +214,7 @@ interface ReadComposerOptions {
   placeholder?: string;
   initialBuffer?: string;
   suggestions?: boolean;
+  cancelOnInterrupt?: boolean;
 }
 
 const FOREGROUND_GOAL_MAX_ITERATIONS = 10_000;
@@ -432,7 +444,7 @@ export class TuiApp {
             suppressTranscript: request.suppressTranscript,
           }),
         onReflectionExpanded: (state) => {
-          this.renderGoalSupervisorRecord("Goal reflection", reflectionDetail("expanded frontier", state.goal.last_reflection_summary, state.goal.frontier_generation), 75);
+          this.renderGoalSupervisorRecord("Goal reflection", reflectionDetail("expanded horizon", state.goal.last_reflection_summary, state.goal.horizon_generation), 75);
         },
         onCompleted: (state) => {
           this.renderGoalSupervisorRecord("Goal complete", goalCompletionRecordDetails(state.goal), 48);
@@ -550,7 +562,7 @@ export class TuiApp {
     this.#rl?.pause();
     stdout.write(`${BRACKETED_PASTE_ENABLE}${ansi.showCursor}`);
 
-    return await new Promise((resolve) => {
+    return await new Promise((resolve, reject) => {
       const resetRenderedState = () => {
         renderedLines = 0;
         renderedCursorLine = 0;
@@ -658,6 +670,11 @@ export class TuiApp {
         cleanup();
         stdout.write(ansi.reset);
         resolve(text);
+      };
+      const cancel = () => {
+        cleanup();
+        stdout.write(ansi.reset);
+        reject(new Error("Input cancelled"));
       };
       const render = () => {
         const items = composerItems();
@@ -850,10 +867,17 @@ export class TuiApp {
           if (pasted !== undefined) {
             insertPaste(pasted);
           } else if (key === "\u0003") {
-            finish("/exit");
+            if (options.cancelOnInterrupt) {
+              cancel();
+            } else {
+              finish("/exit");
+            }
             done = true;
           } else if (key === "\u001b") {
-            if (buffer) {
+            if (options.cancelOnInterrupt) {
+              cancel();
+              done = true;
+            } else if (buffer) {
               buffer = "";
               cursor = 0;
               compactRanges = [];
@@ -1137,7 +1161,7 @@ export class TuiApp {
     this.#composerPanel = {
       lines: [
         `  ${fg256(39, label)}`,
-        `  ${fg256(244, "enter submit · esc cancel")}`,
+        `  ${fg256(244, "enter submit · esc/ctrl+c cancel")}`,
       ],
     };
     try {
@@ -1145,6 +1169,7 @@ export class TuiApp {
         placeholder: label,
         initialBuffer: defaultValue,
         suggestions: false,
+        cancelOnInterrupt: true,
       });
     } finally {
       this.#composerPanel = previousPanel;
@@ -1393,6 +1418,7 @@ export class TuiApp {
     render();
     return await new Promise((resolve, reject) => {
       const cleanup = () => {
+        this.clearCenteredPrompt();
         stdin.off("data", onData);
         stdout.off("resize", onResize);
         if (stdin.isTTY) {
@@ -1802,6 +1828,7 @@ export class TuiApp {
     render();
     return await new Promise((resolve, reject) => {
       const cleanup = () => {
+        this.clearCenteredPrompt();
         stdin.off("data", onData);
         stdout.off("resize", onResize);
         if (stdin.isTTY) {
@@ -1913,6 +1940,7 @@ export class TuiApp {
         ], true);
       };
       const cleanup = () => {
+        this.clearCenteredPrompt();
         stdin.off("data", onData);
         stdout.off("resize", onResize);
         if (stdin.isTTY) {
@@ -2099,6 +2127,7 @@ export class TuiApp {
     render();
     return await new Promise((resolve, reject) => {
       const cleanup = () => {
+        this.clearCenteredPrompt();
         stdin.off("data", onData);
         stdout.off("resize", onResize);
         if (stdin.isTTY) {
@@ -2109,7 +2138,6 @@ export class TuiApp {
       const finish = () => {
         const value = options[selected]?.value ?? options[0]!.value;
         cleanup();
-        stdout.write("\n");
         resolve(value);
       };
       const cancel = () => {
@@ -2867,7 +2895,7 @@ export class TuiApp {
   }
 
   private async renderGoalView(args: string): Promise<void> {
-    const parsed = parseModeAction(args, new Set(["show", "set", "plan", "pause", "resume", "budget", "complete", "drop"]));
+    const parsed = parseModeAction(args, new Set(["show", "set", "explicit", "plan", "pause", "resume", "budget", "complete", "drop"]));
     const existingSession = this.optionalSession();
     if (!existingSession && parsed.action === "show") {
       this.renderPanel("Goal", ["No active session yet. Use /goal <objective> to start one."]);
@@ -2881,12 +2909,23 @@ export class TuiApp {
         this.renderGoalPanel(current);
         return;
       }
+      const setup = await this.chooseGoalSetup();
       const objective = (await this.askModeObjective("Goal objective")).trim();
       if (!objective) {
         this.renderNotice("No goal objective entered.");
         return;
       }
-      await this.startGoal(session, objective);
+      await this.startGoal(session, objective, setup);
+      return;
+    }
+
+    if (parsed.action === "explicit") {
+      const objective = parsed.rest.trim() || (await this.askModeObjective("Goal objective", current?.goal.objective)).trim();
+      if (!objective) {
+        this.renderNotice("No goal objective entered.");
+        return;
+      }
+      await this.startGoal(session, objective, await this.chooseGoalSetup(true));
       return;
     }
 
@@ -2983,6 +3022,12 @@ export class TuiApp {
           this.renderGoalPanel(current);
           return;
         }
+        const candidateMessage = goalCompletionCandidateBlockMessage(current.goal);
+        if (candidateMessage) {
+          this.renderNotice(candidateMessage);
+          this.renderGoalPanel(current);
+          return;
+        }
       }
       if (summary) {
         next.goal.summary = summary;
@@ -2999,10 +3044,77 @@ export class TuiApp {
     }
   }
 
-  private async startGoal(session: SessionRecord, objective: string): Promise<void> {
-    const state = writeGoalState(this.app.store, session.session_id, createGoalState({ objective }));
+  private async startGoal(session: SessionRecord, objective: string, options: GoalStartOptions = {}): Promise<void> {
+    const state = writeGoalState(this.app.store, session.session_id, createGoalState({ objective, strategy: options.strategy }));
     this.renderGoalPanel(state);
     await this.enqueueGoalContinuation(objective);
+  }
+
+  private async chooseGoalSetup(forceExplicit = false): Promise<GoalStartOptions> {
+    const choice = forceExplicit
+      ? "explicit"
+      : await this.selectOption<GoalSetupChoice>(
+          "Goal Mode",
+          [
+            { value: "auto", label: "Auto", description: "Inferoa decides after the first scan." },
+            { value: "explicit", label: "Explicit", description: "Choose the strategy yourself now." },
+          ],
+          0,
+        );
+    if (choice === "auto") {
+      return {};
+    }
+    const mode = await this.selectOption<GoalStrategyMode>(
+      "Goal Strategy",
+      [
+        { value: "surgical", label: "Surgical", description: "Finish the specific request, then verify." },
+        { value: "opportunistic", label: "Opportunistic", description: "Also improve nearby high-value issues." },
+        { value: "campaign", label: "Campaign", description: "Keep working until a time checkpoint." },
+      ],
+      0,
+    );
+    const targetHours = mode === "campaign" ? await this.chooseCampaignHours() : undefined;
+    return {
+      strategy: {
+        mode,
+        inferred: false,
+        target_hours: targetHours,
+        rationale: "Explicit user selection.",
+      },
+    };
+  }
+
+  private async chooseCampaignHours(): Promise<number | undefined> {
+    const choice = await this.selectOption<GoalCampaignHoursChoice>(
+      "Campaign Hours",
+      [
+        { value: "auto", label: "Auto", description: "Inferoa picks the checkpoint time." },
+        { value: "30m", label: "30m", description: "0.5h quick run." },
+        { value: "2h", label: "2h", description: "2h focused run." },
+        { value: "4h", label: "4h", description: "4h long run." },
+        { value: "custom", label: "Custom", description: "Enter a time like 1h or 90m." },
+      ],
+      0,
+    );
+    if (choice === "auto") {
+      return undefined;
+    }
+    if (choice === "30m") {
+      return 0.5;
+    }
+    if (choice === "2h") {
+      return 2;
+    }
+    if (choice === "4h") {
+      return 4;
+    }
+    const raw = (await this.ask("Campaign Time", "4h")).trim();
+    const value = parseGoalCampaignHours(raw);
+    if (value === undefined) {
+      this.renderNotice("Use a positive time like 2h or 90m.");
+      return await this.chooseCampaignHours();
+    }
+    return value;
   }
 
   private async enqueueGoalContinuation(objective: string): Promise<void> {
@@ -3038,16 +3150,22 @@ export class TuiApp {
     }
     const goal = state.goal;
     const width = goalPanelContentWidth();
-    const status = `${goal.status}${state.enabled ? "" : " (paused)"}`;
+    const status = goalPanelStatusLabel(state);
+    const session = this.optionalSession();
+    const reflections = session ? readGoalReflections(this.app.store, session.session_id, goal.id) : [];
     const lines = renderGoalPanelStatus(status, goal.objective, width);
     const usage = goalPanelUsage(goal);
     if (usage) {
       lines.push(fg256(244, usage));
     }
+    appendGoalPanelField(lines, "strategy", goalPanelStrategy(goal), width, 244);
+    appendGoalPanelField(lines, "ledger", goalPanelLedger(goal), width, 244);
     if (goal.summary) {
       appendGoalPanelField(lines, "summary", goal.summary, width);
     }
-    if (goal.last_reflection_decision) {
+    if (reflections.length) {
+      appendGoalPanelField(lines, "reflections", goalPanelReflectionsSummary(reflections), width, 244);
+    } else if (goal.last_reflection_decision) {
       appendGoalPanelField(
         lines,
         "reflection",
@@ -3064,10 +3182,9 @@ export class TuiApp {
       if (active) {
         appendGoalPanelField(lines, "now", `${goalStepPlainStatusMarker(active.status)} ${active.id} ${active.title}`, width);
       }
-      const session = this.optionalSession();
-      const frontiers = session ? readGoalFrontiers(this.app.store, session.session_id, goal.id) : [];
-      if (frontiers.length) {
-        lines.push("", ...renderGoalPanelFrontiers(frontiers, width));
+      const horizons = session ? readGoalHorizons(this.app.store, session.session_id, goal.id) : [];
+      if (horizons.length) {
+        lines.push("", ...renderGoalPanelHorizons(horizons, width, reflections));
       }
     } else {
       lines.push(fg256(244, "No internal plan yet."));
@@ -4323,6 +4440,14 @@ export class TuiApp {
     stdout.write("\n\n");
   }
 
+  private clearCenteredPrompt(): void {
+    if (this.#inlineMode) {
+      this.eraseInlinePanel();
+      return;
+    }
+    stdout.write(ansi.clear);
+  }
+
   private renderInlinePanel(title: string, body: string[]): void {
     this.eraseInlinePanel();
     const width = safeTerminalWidth();
@@ -4457,6 +4582,34 @@ function goalPanelUsage(goal: GoalRecord): string | undefined {
   return parts.length ? parts.join(" · ") : undefined;
 }
 
+function goalPanelStrategy(goal: GoalRecord): string {
+  const strategy = goal.strategy;
+  if (!strategy) {
+    return "auto · opportunistic";
+  }
+  return [
+    strategy.inferred ? "auto" : "explicit",
+    strategy.mode,
+    strategy.target_hours !== undefined ? formatGoalCampaignHours(strategy.target_hours) : undefined,
+  ].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function goalPanelLedger(goal: GoalRecord): string {
+  const ledger = goal.ledger;
+  if (!ledger) {
+    return "0 open · 0 done · 0 rejected";
+  }
+  return `${ledger.open.length} open · ${ledger.done.length} done · ${ledger.rejected.length} rejected`;
+}
+
+function goalPanelStatusLabel(state: GoalState): string {
+  const status = state.goal.status;
+  if (status === "complete" || status === "dropped" || status === "paused") {
+    return status;
+  }
+  return state.enabled ? status : `${status} (paused)`;
+}
+
 function goalPanelContentWidth(): number {
   return Math.max(24, safeTerminalWidth() - 3);
 }
@@ -4482,34 +4635,73 @@ function appendGoalPanelField(lines: string[], label: string, text: string, widt
 }
 
 function goalCompletionRecordDetails(goal: GoalRecord): GoalSupervisorRecordDetail[] {
-  const summary = goal.last_reflection_summary || goal.summary || "reflection found no remaining frontier";
+  const summary = goal.last_reflection_summary || goal.summary || "reflection found no remaining horizon";
   return [
     { label: "summary", text: summary, color: 250 },
     { label: "stats", text: completionBudgetReport(goal) ?? goalPanelUsage(goal) ?? "no usage recorded", color: 244 },
   ];
 }
 
-function renderGoalPanelFrontiers(frontiers: GoalFrontierSnapshot[], width: number): string[] {
-  return frontiers.flatMap((frontier, index) => {
-    const headingMarker = frontier.current ? fg256(75, "◆") : fg256(244, "◇");
-    const heading = `${headingMarker} ${fg256(252, `Frontier ${frontier.generation}${frontier.current ? " current" : ""}`)}`;
-    const lines = [heading];
-    appendGoalTreeText(lines, "│  ", goalFrontierProgressSummary(frontier), width, 244);
-    if (frontier.summary) {
-      appendGoalTreeText(lines, "│  ", frontier.summary, width, 244);
+function goalPanelReflectionsSummary(reflections: GoalReflectionSnapshot[]): string {
+  const latest = reflections.at(-1);
+  if (!latest) {
+    return "none";
+  }
+  return `${reflections.length} recorded · latest ${latest.decision} · horizon ${latest.generation}`;
+}
+
+function renderGoalPanelHorizons(horizons: GoalHorizonSnapshot[], width: number, reflections: GoalReflectionSnapshot[] = []): string[] {
+  const reflectionsByGeneration = groupGoalReflectionsByGeneration(reflections);
+  return horizons.flatMap((horizon, index) => {
+    const lines = renderGoalHorizonHeading(horizon, width);
+    appendGoalTreeText(lines, "│  ", goalHorizonProgressSummary(horizon), width, 244);
+    if (horizon.summary && !isSameGoalHorizonTitle(horizon.summary, horizon.title)) {
+      appendGoalTreeText(lines, "│  ", horizon.summary, width, 244);
     }
-    if (frontier.steps.length) {
-      for (const [stepIndex, step] of frontier.steps.entries()) {
-        lines.push(...renderGoalPanelFrontierStep(step, stepIndex === frontier.steps.length - 1, width));
+    if (horizon.steps.length) {
+      for (const [stepIndex, step] of horizon.steps.entries()) {
+        lines.push(...renderGoalPanelHorizonStep(step, stepIndex === horizon.steps.length - 1, width));
       }
     } else {
       lines.push(`${fg256(244, "└─")} ${fg256(244, "-")} ${fg256(244, "no sub-goals")}`);
     }
-    if (index < frontiers.length - 1) {
+    for (const reflection of reflectionsByGeneration.get(horizon.generation) ?? []) {
+      lines.push(...renderGoalPanelHorizonReflection(reflection, width));
+    }
+    if (index < horizons.length - 1) {
       lines.push(fg256(244, "│"));
     }
     return lines;
   });
+}
+
+function renderGoalHorizonHeading(horizon: GoalHorizonSnapshot, width: number): string[] {
+  const marker = horizon.current ? fg256(75, "◆") : fg256(244, "◇");
+  const markerPlain = "◇ ";
+  const title = horizon.title ? ` · ${horizon.title}` : "";
+  const text = `Horizon ${horizon.generation}${horizon.current ? " current" : ""}${title}`;
+  const room = Math.max(12, width - visibleWidth(markerPlain));
+  const chunks = wrapPlainText(oneLine(text), room);
+  const continuation = " ".repeat(visibleWidth(markerPlain));
+  return chunks.map((chunk, index) => (index === 0 ? `${marker} ${fg256(252, chunk)}` : `${continuation}${fg256(252, chunk)}`));
+}
+
+function isSameGoalHorizonTitle(summary: string, title: string | undefined): boolean {
+  if (!title) {
+    return false;
+  }
+  const normalizedSummary = summary.replace(/^horizon\s+\d+\s*(?:[·:.-])\s*/i, "").trim();
+  return normalizedSummary === title;
+}
+
+function groupGoalReflectionsByGeneration(reflections: GoalReflectionSnapshot[]): Map<number, GoalReflectionSnapshot[]> {
+  const byGeneration = new Map<number, GoalReflectionSnapshot[]>();
+  for (const reflection of reflections) {
+    const group = byGeneration.get(reflection.generation) ?? [];
+    group.push(reflection);
+    byGeneration.set(reflection.generation, group);
+  }
+  return byGeneration;
 }
 
 function appendGoalTreeText(lines: string[], prefixPlain: string, text: string, width: number, color: number): void {
@@ -4521,7 +4713,31 @@ function appendGoalTreeText(lines: string[], prefixPlain: string, text: string, 
   }
 }
 
-function renderGoalPanelFrontierStep(step: GoalFrontierSnapshot["steps"][number], isLast: boolean, width: number): string[] {
+function renderGoalPanelHorizonReflection(reflection: GoalReflectionSnapshot, width: number): string[] {
+  const text = reflection.decision === "done" ? "" : reflection.summary ?? reflection.blocker ?? "";
+  const prefixPlain = `│  reflection ${reflection.decision}${text ? " · " : ""}`;
+  const prefix = `${fg256(244, "│  ")}${fg256(39, "reflection")} ${goalReflectionDecisionLabel(reflection.decision)}${text ? fg256(244, " · ") : ""}`;
+  if (!text) {
+    return [prefix.trimEnd()];
+  }
+  const room = Math.max(12, width - visibleWidth(prefixPlain));
+  const chunks = wrapPlainText(oneLine(text), room);
+  const continuation = `${fg256(244, "│  ")}${" ".repeat(visibleWidth(`reflection ${reflection.decision} · `))}`;
+  return chunks.map((chunk, index) => (index === 0 ? `${prefix}${fg256(250, chunk)}` : `${continuation}${fg256(250, chunk)}`));
+}
+
+function goalReflectionDecisionLabel(decision: GoalReflectionSnapshot["decision"]): string {
+  switch (decision) {
+    case "expand":
+      return fg256(75, decision);
+    case "done":
+      return fg256(48, decision);
+    case "blocked":
+      return fg256(203, decision);
+  }
+}
+
+function renderGoalPanelHorizonStep(step: GoalHorizonSnapshot["steps"][number], isLast: boolean, width: number): string[] {
   const branch = isLast ? "└─" : "├─";
   const continuationBranch = isLast ? "   " : "│  ";
   const markerPlain = goalStepPlainStatusMarker(step.status);
@@ -4533,8 +4749,8 @@ function renderGoalPanelFrontierStep(step: GoalFrontierSnapshot["steps"][number]
   return chunks.map((chunk, index) => (index === 0 ? `${prefix}${chunk}` : `${continuation}${chunk}`));
 }
 
-function goalFrontierProgressSummary(frontier: GoalFrontierSnapshot): string {
-  if (!frontier.steps.length) {
+function goalHorizonProgressSummary(horizon: GoalHorizonSnapshot): string {
+  if (!horizon.steps.length) {
     return "0 sub-goals";
   }
   const order = ["completed", "in_progress", "blocked", "pending", "skipped"];
@@ -4546,7 +4762,7 @@ function goalFrontierProgressSummary(frontier: GoalFrontierSnapshot): string {
     skipped: "skipped",
   };
   const counts = new Map<string, number>();
-  for (const step of frontier.steps) {
+  for (const step of horizon.steps) {
     counts.set(step.status, (counts.get(step.status) ?? 0) + 1);
   }
   return order
@@ -5084,6 +5300,29 @@ function renderSetupOptionLine(label: string, description: string | undefined, a
   return `${marker} ${name}${detail}`;
 }
 
+function parseGoalCampaignHours(input: string): number | undefined {
+  const normalized = input.trim().toLowerCase();
+  const match = /^(\d+(?:\.\d+)?|\.\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)?$/.exec(normalized);
+  if (!match) {
+    return undefined;
+  }
+  const value = Number.parseFloat(match[1] ?? "");
+  if (!Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  const unit = match[2];
+  if (!unit || unit.startsWith("h")) {
+    return value;
+  }
+  return value / 60;
+}
+
+function formatGoalCampaignHours(hours: number): string {
+  const precision = hours < 1 ? 3 : 2;
+  const formatted = hours.toFixed(precision).replace(/\.?0+$/, "");
+  return `${formatted}h`;
+}
+
 function renderProviderSetupOptionLine(option: ExternalProviderSetupOption, active: boolean): string {
   const marker = active ? fg256(75, "›") : fg256(238, " ");
   const nameColor = active ? 252 : 248;
@@ -5187,7 +5426,7 @@ function isActivityEvent(event: SessionEvent): boolean {
     event.type === "goal.completion_report" ||
     event.type === "goal.reflection.started" ||
     event.type === "goal.reflection.completed" ||
-    event.type === "goal.frontier.expanded" ||
+    event.type === "goal.horizon.expanded" ||
     event.type.startsWith("goal.supervisor.") ||
     event.type === "run.completed" ||
     event.type === "run.stopped" ||
@@ -5307,8 +5546,8 @@ function terminalLine(text: string): string {
   return text.replace(/[\r\n]+/g, " ");
 }
 
-function reflectionDetail(action: string, summary: string | undefined, frontierGeneration: number): string {
-  const parts = [`${action} generation ${frontierGeneration}`];
+function reflectionDetail(action: string, summary: string | undefined, horizonGeneration: number): string {
+  const parts = [`${action} ${horizonGeneration}`];
   if (summary) {
     parts.push(summary);
   }

@@ -7,6 +7,9 @@ export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "
 export type GoalStepStatus = "pending" | "in_progress" | "completed" | "blocked" | "skipped";
 export type GoalReflectionDecision = "expand" | "done" | "blocked";
 export type GoalReflectionStatus = "running" | "completed";
+export type GoalStrategyMode = "surgical" | "opportunistic" | "campaign";
+export type GoalCandidateValue = "high" | "medium" | "low";
+export type GoalCandidateStatus = "open" | "done" | "rejected";
 
 const PLAN_PROMPT_BODY_LIMIT = 6000;
 
@@ -20,7 +23,9 @@ export interface GoalRecord {
   time_used_seconds: number;
   tool_rounds_used: number;
   tool_calls_used: number;
-  frontier_generation: number;
+  horizon_generation: number;
+  strategy?: GoalStrategy;
+  ledger?: GoalLedger;
   reflection_status?: GoalReflectionStatus;
   last_reflection_run_id?: string;
   last_reflection_decision?: GoalReflectionDecision;
@@ -31,6 +36,31 @@ export interface GoalRecord {
   plan?: GoalPlanSnapshot;
   summary?: string;
   created_at: string;
+  updated_at: string;
+}
+
+export interface GoalStrategy {
+  mode: GoalStrategyMode;
+  inferred: boolean;
+  target_hours?: number;
+  rationale?: string;
+}
+
+export interface GoalLedger {
+  open: GoalCandidate[];
+  done: GoalCandidate[];
+  rejected: GoalCandidate[];
+  updated_at: string;
+}
+
+export interface GoalCandidate {
+  id: string;
+  title: string;
+  source?: string;
+  value: GoalCandidateValue;
+  status: GoalCandidateStatus;
+  reason?: string;
+  evidence?: JsonObject;
   updated_at: string;
 }
 
@@ -50,13 +80,25 @@ export interface GoalPlanningStep {
   updated_at: string;
 }
 
-export interface GoalFrontierSnapshot {
+export interface GoalHorizonSnapshot {
   generation: number;
+  title?: string;
   summary?: string;
   active_step_id?: string;
   steps: GoalPlanningStep[];
   updated_at: string;
   current: boolean;
+}
+
+export interface GoalReflectionSnapshot {
+  generation: number;
+  next_generation?: number;
+  run_id?: string;
+  decision: GoalReflectionDecision;
+  summary?: string;
+  blocker?: string;
+  verification_evidence?: JsonObject;
+  created_at: string;
 }
 
 export interface GoalPlanningInput {
@@ -112,6 +154,30 @@ export interface GoalCompletionReport {
 export interface GoalCreateInput {
   objective: string;
   token_budget?: number;
+  strategy?: GoalStrategyInput;
+}
+
+export interface GoalStrategyInput {
+  mode: GoalStrategyMode;
+  inferred?: boolean;
+  target_hours?: number;
+  rationale?: string;
+}
+
+export interface GoalLedgerInput {
+  open?: GoalCandidateInput[];
+  done?: GoalCandidateInput[];
+  rejected?: GoalCandidateInput[];
+}
+
+export interface GoalCandidateInput {
+  id?: string;
+  title: string;
+  source?: string;
+  value?: GoalCandidateValue;
+  status?: GoalCandidateStatus;
+  reason?: string;
+  evidence?: JsonObject;
 }
 
 export function readGoalState(store: SessionStore, sessionId: string): GoalState | undefined {
@@ -122,22 +188,23 @@ export function readGoalState(store: SessionStore, sessionId: string): GoalState
   return parseGoalState(event.data);
 }
 
-export function readGoalFrontiers(store: SessionStore, sessionId: string, goalId?: string): GoalFrontierSnapshot[] {
+export function readGoalHorizons(store: SessionStore, sessionId: string, goalId?: string): GoalHorizonSnapshot[] {
   const events = store.listEvents(sessionId).filter((event) => event.type === "goal.updated");
   const latest = readGoalState(store, sessionId)?.goal;
   const targetGoalId = goalId ?? latest?.id;
   if (!targetGoalId) {
     return [];
   }
-  const byGeneration = new Map<number, GoalFrontierSnapshot>();
+  const byGeneration = new Map<number, GoalHorizonSnapshot>();
   for (const event of events) {
     const state = parseGoalState(event.data);
     const goal = state?.goal;
-    if (!goal || goal.id !== targetGoalId || !goal.planning || goal.frontier_generation <= 0) {
+    if (!goal || goal.id !== targetGoalId || !goal.planning) {
       continue;
     }
-    byGeneration.set(goal.frontier_generation, {
-      generation: goal.frontier_generation,
+    byGeneration.set(goal.horizon_generation, {
+      generation: goal.horizon_generation,
+      title: goalHorizonTitle(goal.horizon_generation, goal.planning.summary),
       summary: goal.planning.summary,
       active_step_id: goal.planning.active_step_id,
       steps: cloneGoalPlanning(goal.planning).steps,
@@ -145,10 +212,62 @@ export function readGoalFrontiers(store: SessionStore, sessionId: string, goalId
       current: false,
     });
   }
-  const currentGeneration = latest?.id === targetGoalId ? latest.frontier_generation : undefined;
+  const currentGeneration = latest?.id === targetGoalId ? latest.horizon_generation : undefined;
   return [...byGeneration.values()]
     .sort((a, b) => a.generation - b.generation)
-    .map((frontier) => ({ ...frontier, current: frontier.generation === currentGeneration }));
+    .map((horizon) => ({ ...horizon, current: horizon.generation === currentGeneration }));
+}
+
+export function readGoalReflections(store: SessionStore, sessionId: string, goalId?: string): GoalReflectionSnapshot[] {
+  const events = store.listEvents(sessionId);
+  const latest = readGoalState(store, sessionId)?.goal;
+  const targetGoalId = goalId ?? latest?.id;
+  if (!targetGoalId) {
+    return [];
+  }
+  const startedByRun = new Map<string, number>();
+  const reflections: GoalReflectionSnapshot[] = [];
+  for (const event of events) {
+    if (event.data.goal_id !== targetGoalId) {
+      continue;
+    }
+    if (event.type === "goal.reflection.started") {
+      const generation = numericValue(event.data.horizon_generation) ?? 0;
+      if (event.run_id) {
+        startedByRun.set(event.run_id, generation);
+      }
+      continue;
+    }
+    if (event.type !== "goal.reflection.completed") {
+      continue;
+    }
+    const decision = parseGoalReflectionDecision(event.data.decision);
+    if (!decision) {
+      continue;
+    }
+    const generation =
+      numericValue(event.data.source_horizon_generation) ??
+      (event.run_id ? startedByRun.get(event.run_id) : undefined) ??
+      numericValue(event.data.previous_horizon_generation) ??
+      numericValue(event.data.horizon_generation);
+    if (generation === undefined) {
+      continue;
+    }
+    const nextGeneration = numericValue(event.data.horizon_generation);
+    reflections.push({
+      generation,
+      next_generation: nextGeneration,
+      run_id: event.run_id,
+      decision,
+      summary: optionalString(event.data.summary),
+      blocker: optionalString(event.data.blocker),
+      verification_evidence: event.data.verification_evidence && typeof event.data.verification_evidence === "object" && !Array.isArray(event.data.verification_evidence)
+        ? cloneJsonObject(event.data.verification_evidence as JsonObject)
+        : undefined,
+      created_at: event.created_at ?? "",
+    });
+  }
+  return reflections;
 }
 
 export function createGoalState(input: GoalCreateInput, now = new Date()): GoalState {
@@ -158,6 +277,7 @@ export function createGoalState(input: GoalCreateInput, now = new Date()): GoalS
   }
   validateTokenBudget(input.token_budget);
   const timestamp = now.toISOString();
+  const strategy = createGoalStrategy(input.strategy);
   return {
     enabled: true,
     goal: {
@@ -170,21 +290,102 @@ export function createGoalState(input: GoalCreateInput, now = new Date()): GoalS
       time_used_seconds: 0,
       tool_rounds_used: 0,
       tool_calls_used: 0,
-      frontier_generation: 0,
+      horizon_generation: 0,
+      strategy,
+      ledger: emptyGoalLedger(timestamp),
+      planning: createGoalPlanning(horizonZeroPlanningInput(), now),
       created_at: timestamp,
       updated_at: timestamp,
     },
   };
 }
 
+function horizonZeroPlanningInput(): GoalPlanningInput {
+  return {
+    summary: "Horizon 0 · Orientation",
+    active_step_id: "read_objective_and_constraints",
+    steps: [
+      { id: "read_objective_and_constraints", title: "Read objective and constraints", status: "in_progress" },
+      { id: "inspect_workspace_shape", title: "Inspect workspace shape", status: "pending" },
+      { id: "identify_candidate_sources", title: "Identify candidate sources", status: "pending" },
+      { id: "infer_goal_strategy", title: "Infer goal strategy and seed candidate ledger", status: "pending" },
+    ],
+  };
+}
+
+function createGoalStrategy(input?: GoalStrategyInput): GoalStrategy {
+  if (!input) {
+    return {
+      mode: "opportunistic",
+      inferred: true,
+      rationale: "Auto mode starts opportunistic and should be refined after Horizon 0 orientation.",
+    };
+  }
+  const targetHours = input.target_hours === undefined ? undefined : Math.max(0, input.target_hours);
+  return {
+    mode: input.mode,
+    inferred: input.inferred ?? true,
+    target_hours: targetHours && Number.isFinite(targetHours) ? targetHours : undefined,
+    rationale: cleanOptionalString(input.rationale),
+  };
+}
+
+function emptyGoalLedger(timestamp: string): GoalLedger {
+  return {
+    open: [],
+    done: [],
+    rejected: [],
+    updated_at: timestamp,
+  };
+}
+
+function createGoalCandidates(inputs: GoalCandidateInput[], status: GoalCandidateStatus, timestamp: string): GoalCandidate[] {
+  const used = new Set<string>();
+  return inputs.map((input, index) => {
+    const title = input.title.trim();
+    if (!title) {
+      throw new Error("goal ledger candidates must have non-empty titles");
+    }
+    const id = normalizeGoalStepId(input.id, title, index, used);
+    used.add(id);
+    return {
+      id,
+      title,
+      source: cleanOptionalString(input.source),
+      value: input.value ?? "medium",
+      status,
+      reason: cleanOptionalString(input.reason),
+      evidence: input.evidence ? cloneJsonObject(input.evidence) : undefined,
+      updated_at: timestamp,
+    };
+  });
+}
+
 export function replaceGoalPlanning(state: GoalState, input: GoalPlanningInput, now = new Date()): GoalState {
   const next = cloneGoalState(state);
-  const hadPlanning = Boolean(next.goal.planning);
   next.goal.planning = createGoalPlanning(input, now);
-  if (!hadPlanning && next.goal.frontier_generation <= 0) {
-    next.goal.frontier_generation = 1;
-  }
   next.goal.updated_at = next.goal.planning.updated_at;
+  return next;
+}
+
+export function setGoalStrategy(state: GoalState, input: GoalStrategyInput, now = new Date()): GoalState {
+  const next = cloneGoalState(state);
+  next.goal.strategy = createGoalStrategy(input);
+  next.goal.updated_at = now.toISOString();
+  return next;
+}
+
+export function updateGoalLedger(state: GoalState, input: GoalLedgerInput, now = new Date()): GoalState {
+  const next = cloneGoalState(state);
+  const timestamp = now.toISOString();
+  const current = next.goal.ledger ?? emptyGoalLedger(timestamp);
+  next.goal.ledger = {
+    open: input.open !== undefined ? createGoalCandidates(input.open, "open", timestamp) : current.open,
+    done: input.done !== undefined ? createGoalCandidates(input.done, "done", timestamp) : current.done,
+    rejected: input.rejected !== undefined ? createGoalCandidates(input.rejected, "rejected", timestamp) : current.rejected,
+    updated_at: timestamp,
+  };
+  next.goal.updated_at = timestamp;
   return next;
 }
 
@@ -213,7 +414,7 @@ export function completeGoalReflection(state: GoalState, input: GoalReflectionIn
     if (!input.steps?.length) {
       throw new Error("reflection decision expand requires concrete new steps with substantive impact on the original goal");
     }
-    next.goal.frontier_generation = Math.max(0, next.goal.frontier_generation) + 1;
+    next.goal.horizon_generation = Math.max(0, next.goal.horizon_generation) + 1;
     next.goal.planning = createGoalPlanning(
       {
         summary: input.summary ?? next.goal.planning?.summary,
@@ -234,6 +435,10 @@ export function completeGoalAfterReflection(state: GoalState, summary: string | 
   const reflectionMessage = goalCompletionReflectionBlockMessage(state.goal);
   if (reflectionMessage) {
     throw new Error(reflectionMessage);
+  }
+  const candidateMessage = goalCompletionCandidateBlockMessage(state.goal);
+  if (candidateMessage) {
+    throw new Error(candidateMessage);
   }
   const next = cloneGoalState(state);
   const trimmed = summary?.trim() || next.goal.last_reflection_summary;
@@ -356,6 +561,7 @@ export function updateGoalPlanningStep(state: GoalState, input: GoalStepUpdateIn
     active.status = "in_progress";
     active.updated_at = timestamp;
   }
+  reconcileLedgerCandidateFromStep(next.goal, step, timestamp);
   planning.updated_at = timestamp;
   next.goal.updated_at = timestamp;
   return next;
@@ -427,7 +633,7 @@ export function recordGoalCompletionReport(store: SessionStore, sessionId: strin
       report: completion.report,
       tool_rounds: state.goal.tool_rounds_used,
       tool_calls: state.goal.tool_calls_used,
-      frontiers: state.goal.frontier_generation,
+      horizons: state.goal.horizon_generation + 1,
       tokens: state.goal.tokens_used,
       duration_ms: goalDurationMs(state.goal),
     };
@@ -520,7 +726,9 @@ export function renderGoalModeSection(state: GoalState | undefined): string | un
     loopLine,
     `time used seconds: ${goal.time_used_seconds}`,
     `time used ms: ${goalDurationMs(goal)}`,
-    goal.frontier_generation > 0 ? `frontier generation: ${goal.frontier_generation}` : undefined,
+    `horizon: ${goal.horizon_generation}`,
+    renderGoalStrategy(goal.strategy),
+    renderGoalLedger(goal.ledger),
     goal.planning ? renderGoalPlanning(goal.planning) : "Internal goal plan: not decomposed yet.",
     renderLatestReflection(goal),
     goal.plan ? renderApprovedPlan(goal.plan, Boolean(goal.planning)) : undefined,
@@ -528,7 +736,7 @@ export function renderGoalModeSection(state: GoalState | undefined): string | un
       ? "Keep the internal goal plan current with goal op=update_step as findings, edits, and verification change."
       : "For broad or multi-step work, call goal op=decompose with concrete steps before risky edits.",
     "Work on the objective until it is genuinely handled. Use the goal tool to inspect, resume, complete, or drop goal state when appropriate.",
-    "When the current frontier appears exhausted, a tool-enabled internal reflection run must decide whether more frontier, verification, decomposition, or polish work with substantive impact on the original objective remains before completion.",
+    "When the current horizon appears exhausted, a tool-enabled internal reflection run must decide whether more horizon, verification, decomposition, or polish work with substantive impact on the original objective remains before completion.",
     "When completing the goal, include a completion summary in the goal tool call.",
     "Do not mark the goal complete merely because the current checklist is empty, the turn is ending, or the budget is low.",
   ]
@@ -541,7 +749,7 @@ export function completionBudgetReport(goal: GoalRecord): string | undefined {
     goal.token_budget === undefined
       ? `${goal.tokens_used} tokens used`
       : `${goal.tokens_used} of ${goal.token_budget} tokens used`;
-  return `Goal achieved. ${countLabel(goal.tool_rounds_used, "loop")} · ${countLabel(goal.tool_calls_used, "tool call")} · ${countLabel(goal.frontier_generation, "frontier")} · ${formatDurationMs(goalDurationMs(goal))} · ${usage}.`;
+  return `Goal achieved. ${countLabel(goal.tool_rounds_used, "loop")} · ${countLabel(goal.tool_calls_used, "tool call")} · ${countLabel(goal.horizon_generation + 1, "horizon")} · ${formatDurationMs(goalDurationMs(goal))} · ${usage}.`;
 }
 
 export function goalDurationMs(goal: GoalRecord): number {
@@ -566,6 +774,8 @@ export function cloneGoalState(state: GoalState): GoalState {
     goal: {
       ...state.goal,
       verification_evidence: state.goal.verification_evidence ? cloneJsonObject(state.goal.verification_evidence) : undefined,
+      strategy: state.goal.strategy ? cloneGoalStrategy(state.goal.strategy) : undefined,
+      ledger: state.goal.ledger ? cloneGoalLedger(state.goal.ledger) : undefined,
       planning: state.goal.planning ? cloneGoalPlanning(state.goal.planning) : undefined,
       plan: state.goal.plan ? { ...state.goal.plan } : undefined,
     },
@@ -586,7 +796,7 @@ export function incompleteGoalPlanningMessage(goal: GoalRecord): string | undefi
   return `Cannot complete goal with unfinished internal plan steps: ${visible.join(", ")}${suffix}`;
 }
 
-export function isGoalFrontierExhausted(goal: GoalRecord): boolean {
+export function isGoalHorizonExhausted(goal: GoalRecord): boolean {
   return Boolean(goal.planning && incompleteGoalPlanningSteps(goal).length === 0);
 }
 
@@ -598,6 +808,29 @@ export function goalCompletionReflectionBlockMessage(goal: GoalRecord): string |
     return "Cannot complete goal until the latest done reflection records verification_evidence.";
   }
   return undefined;
+}
+
+export function goalCompletionCandidateBlockMessage(goal: GoalRecord): string | undefined {
+  const strategy = goal.strategy ?? createGoalStrategy();
+  const openCandidates = goal.ledger?.open ?? [];
+  if (strategy.mode === "surgical") {
+    return undefined;
+  }
+  if (strategy.mode === "opportunistic") {
+    const highMedium = openCandidates.filter((candidate) => candidate.value === "high" || candidate.value === "medium");
+    if (highMedium.length > 0) {
+      return `Cannot complete opportunistic goal while open high/medium ledger candidates remain (${highMedium.length}).`;
+    }
+    return undefined;
+  }
+  if (openCandidates.length === 0) {
+    return undefined;
+  }
+  const targetHours = strategy.target_hours;
+  if (targetHours !== undefined && goalDurationMs(goal) >= targetHours * 60 * 60 * 1000) {
+    return `Campaign target reached with ${countLabel(openCandidates.length, "open ledger candidate")} remaining; checkpoint or pause instead of completing.`;
+  }
+  return `Cannot complete campaign goal while ${countLabel(openCandidates.length, "open ledger candidate")} remains before the time budget; expand the next horizon.`;
 }
 
 export function goalPlanningProgressSummary(planning: GoalPlanningState): string {
@@ -700,7 +933,7 @@ function parseGoalState(data: JsonObject): GoalState | undefined {
   }
   const tokenBudget = numericOrUndefined(candidate.token_budget);
   const planning = parseGoalPlanning(candidate.planning);
-  const frontierGeneration = numeric(candidate.frontier_generation) || (planning ? 1 : 0);
+  const horizonGeneration = numeric(candidate.horizon_generation);
   return {
     enabled: data.enabled === true,
     goal: {
@@ -713,7 +946,9 @@ function parseGoalState(data: JsonObject): GoalState | undefined {
       time_used_seconds: numeric(candidate.time_used_seconds),
       tool_rounds_used: numeric(candidate.tool_rounds_used),
       tool_calls_used: numeric(candidate.tool_calls_used),
-      frontier_generation: frontierGeneration,
+      horizon_generation: horizonGeneration,
+      strategy: parseGoalStrategy(candidate.strategy),
+      ledger: parseGoalLedger(candidate.ledger),
       reflection_status: parseGoalReflectionStatus(candidate.reflection_status),
       last_reflection_run_id: optionalString(candidate.last_reflection_run_id),
       last_reflection_decision: parseGoalReflectionDecision(candidate.last_reflection_decision),
@@ -754,6 +989,15 @@ function renderGoalPlanning(planning: GoalPlanningState): string {
     .join("\n");
 }
 
+function goalHorizonTitle(generation: number, summary: string | undefined): string | undefined {
+  const trimmed = cleanOptionalString(summary);
+  if (!trimmed) {
+    return undefined;
+  }
+  const prefix = new RegExp(`^horizon\\s+${generation}\\s*(?:[·:.-])\\s*`, "i");
+  return trimmed.replace(prefix, "").trim() || trimmed;
+}
+
 function renderLatestReflection(goal: GoalRecord): string | undefined {
   if (!goal.reflection_status && !goal.last_reflection_decision && !goal.last_reflection_summary && !goal.verification_evidence && !goal.blocker) {
     return undefined;
@@ -770,6 +1014,41 @@ function renderLatestReflection(goal: GoalRecord): string | undefined {
     .join("\n");
 }
 
+function renderGoalStrategy(strategy: GoalStrategy | undefined): string {
+  const current = strategy ?? createGoalStrategy();
+  return [
+    "Goal strategy:",
+    `mode: ${current.mode}`,
+    `source: ${current.inferred ? "auto" : "explicit"}`,
+    current.target_hours !== undefined ? `target hours: ${formatGoalTargetHours(current.target_hours)}` : undefined,
+    current.rationale ? `rationale: ${escapeXmlText(truncateEvidenceText(current.rationale, 500))}` : undefined,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+function formatGoalTargetHours(hours: number): string {
+  const precision = hours < 1 ? 3 : 2;
+  const formatted = hours.toFixed(precision).replace(/\.?0+$/, "");
+  return `${formatted}h`;
+}
+
+function renderGoalLedger(ledger: GoalLedger | undefined): string {
+  const current = ledger ?? emptyGoalLedger("");
+  const visibleOpen = current.open
+    .filter((candidate) => candidate.value === "high" || candidate.value === "medium")
+    .slice(0, 8)
+    .map((candidate) => `- [${candidate.value}] ${escapeXmlText(candidate.id)} ${escapeXmlText(candidate.title)}`);
+  return [
+    "Candidate ledger:",
+    `open: ${current.open.length}; done: ${current.done.length}; rejected: ${current.rejected.length}`,
+    visibleOpen.length ? "Open high/medium candidates:" : undefined,
+    ...visibleOpen,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
 function renderGoalPlanningStep(step: GoalPlanningStep): string[] {
   const marker = stepMarker(step.status);
   const lines = [`[${marker}] ${escapeXmlText(step.id)} ${escapeXmlText(step.title)}`];
@@ -780,6 +1059,36 @@ function renderGoalPlanningStep(step: GoalPlanningStep): string[] {
     lines.push(`evidence: ${escapeXmlText(compactEvidenceSummary(step.evidence))}`);
   }
   return lines;
+}
+
+function reconcileLedgerCandidateFromStep(goal: GoalRecord, step: GoalPlanningStep, timestamp: string): void {
+  if (!goal.ledger || (step.status !== "completed" && step.status !== "skipped")) {
+    return;
+  }
+  const openIndex = goal.ledger.open.findIndex((candidate) => candidate.id === step.id);
+  if (openIndex < 0) {
+    return;
+  }
+  const [candidate] = goal.ledger.open.splice(openIndex, 1);
+  if (!candidate) {
+    return;
+  }
+  const status: GoalCandidateStatus = step.status === "completed" ? "done" : "rejected";
+  const moved: GoalCandidate = {
+    ...candidate,
+    status,
+    reason: step.notes ?? candidate.reason,
+    evidence: step.evidence ? cloneJsonObject(step.evidence) : candidate.evidence ? cloneJsonObject(candidate.evidence) : undefined,
+    updated_at: timestamp,
+  };
+  if (status === "done") {
+    goal.ledger.done = [...goal.ledger.done.filter((item) => item.id !== moved.id), moved];
+    goal.ledger.rejected = goal.ledger.rejected.filter((item) => item.id !== moved.id);
+  } else {
+    goal.ledger.rejected = [...goal.ledger.rejected.filter((item) => item.id !== moved.id), moved];
+    goal.ledger.done = goal.ledger.done.filter((item) => item.id !== moved.id);
+  }
+  goal.ledger.updated_at = timestamp;
 }
 
 function compactEvidenceSummary(value: JsonObject): string {
@@ -852,6 +1161,67 @@ function parseGoalPlan(value: unknown): GoalPlanSnapshot | undefined {
   };
 }
 
+function parseGoalStrategy(value: unknown): GoalStrategy | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const data = value as Record<string, unknown>;
+  const mode = parseGoalStrategyMode(data.mode);
+  if (!mode) {
+    return undefined;
+  }
+  return createGoalStrategy({
+    mode,
+    inferred: data.inferred === undefined ? true : data.inferred === true,
+    target_hours: positiveNumberOrUndefined(data.target_hours),
+    rationale: optionalString(data.rationale),
+  });
+}
+
+function parseGoalLedger(value: unknown): GoalLedger | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const data = value as Record<string, unknown>;
+  const updatedAt = typeof data.updated_at === "string" ? data.updated_at : "";
+  return {
+    open: parseGoalCandidates(data.open, "open"),
+    done: parseGoalCandidates(data.done, "done"),
+    rejected: parseGoalCandidates(data.rejected, "rejected"),
+    updated_at: updatedAt,
+  };
+}
+
+function parseGoalCandidates(value: unknown, status: GoalCandidateStatus): GoalCandidate[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => parseGoalCandidate(item, status)).filter((candidate): candidate is GoalCandidate => Boolean(candidate));
+}
+
+function parseGoalCandidate(value: unknown, status: GoalCandidateStatus): GoalCandidate | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const data = value as Record<string, unknown>;
+  const id = optionalString(data.id);
+  const title = optionalString(data.title);
+  const candidateValue = parseGoalCandidateValue(data.value);
+  if (!id || !title || !candidateValue) {
+    return undefined;
+  }
+  return {
+    id,
+    title,
+    source: optionalString(data.source),
+    value: candidateValue,
+    status,
+    reason: optionalString(data.reason),
+    evidence: parseJsonObject(data.evidence),
+    updated_at: typeof data.updated_at === "string" ? data.updated_at : "",
+  };
+}
+
 function parseGoalPlanning(value: unknown): GoalPlanningState | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -898,6 +1268,14 @@ function parseGoalStatus(value: unknown): GoalStatus | undefined {
     : undefined;
 }
 
+function parseGoalStrategyMode(value: unknown): GoalStrategyMode | undefined {
+  return value === "surgical" || value === "opportunistic" || value === "campaign" ? value : undefined;
+}
+
+function parseGoalCandidateValue(value: unknown): GoalCandidateValue | undefined {
+  return value === "high" || value === "medium" || value === "low" ? value : undefined;
+}
+
 export function parseGoalStepStatus(value: unknown): GoalStepStatus | undefined {
   return value === "pending" || value === "in_progress" || value === "completed" || value === "blocked" || value === "skipped"
     ? value
@@ -908,8 +1286,16 @@ function numeric(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 
+function numericValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : undefined;
+}
+
 function numericOrUndefined(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function positiveNumberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function durationMsFromGoalData(candidate: Record<string, unknown>): number {
@@ -977,6 +1363,26 @@ function cloneGoalPlanning(planning: GoalPlanningState): GoalPlanningState {
       ...step,
       evidence: step.evidence ? cloneJsonObject(step.evidence) : undefined,
     })),
+  };
+}
+
+function cloneGoalStrategy(strategy: GoalStrategy): GoalStrategy {
+  return { ...strategy };
+}
+
+function cloneGoalLedger(ledger: GoalLedger): GoalLedger {
+  return {
+    open: ledger.open.map(cloneGoalCandidate),
+    done: ledger.done.map(cloneGoalCandidate),
+    rejected: ledger.rejected.map(cloneGoalCandidate),
+    updated_at: ledger.updated_at,
+  };
+}
+
+function cloneGoalCandidate(candidate: GoalCandidate): GoalCandidate {
+  return {
+    ...candidate,
+    evidence: candidate.evidence ? cloneJsonObject(candidate.evidence) : undefined,
   };
 }
 

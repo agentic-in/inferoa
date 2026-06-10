@@ -4,12 +4,15 @@ import { randomId } from "../util/hash.js";
 import {
   cloneGoalState,
   completeGoalAfterReflection,
+  goalDurationMs,
   incompleteGoalPlanningSteps,
-  isGoalFrontierExhausted,
+  isGoalHorizonExhausted,
   markGoalReflectionStarted,
   readGoalState,
   recordGoalCompletionReport,
+  replaceGoalPlanning,
   writeGoalState,
+  type GoalCandidate,
   type GoalState,
 } from "./state.js";
 import { buildGoalReflectionPrompt, buildGoalWorkPrompt } from "./supervisor-prompts.js";
@@ -66,7 +69,7 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
       return { status: "idle", iteration, goal_id: goalId(state) };
     }
     options.onIteration?.(iteration + 1);
-    if (isGoalFrontierExhausted(state.goal)) {
+    if (isGoalHorizonExhausted(state.goal)) {
       const result = await runGoalReflection(options, state, iteration + 1);
       if (result.status === "waiting") {
         continue;
@@ -76,10 +79,10 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
     const workRun = await options.runTurn({
       prompt: buildGoalWorkPrompt(state.goal.objective),
       requestClass: options.workRequestClass ?? "background",
-      activityLabel: goalFrontierActivityLabel("Continuing goal frontier", state.goal.frontier_generation),
+      activityLabel: goalHorizonActivityLabel("Continuing goal horizon", state.goal.horizon_generation),
     });
     if (!workRun || !goalUpdatedDuringRun(options.store, options.sessionId, workRun.run_id)) {
-      const reason = "last supervisor turn did not update the frontier";
+      const reason = "last supervisor turn did not update the horizon";
       options.onWaiting?.(reason);
       return { status: "waiting", iteration: iteration + 1, reason, run_id: workRun?.run_id, goal_id: state.goal.id };
     }
@@ -105,7 +108,7 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
     type: "goal.reflection.started",
     data: {
       goal_id: state.goal.id,
-      frontier_generation: state.goal.frontier_generation,
+      horizon_generation: state.goal.horizon_generation,
       supervisor: options.supervisor,
     },
   });
@@ -114,7 +117,7 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
     requestClass: "reflection",
     visibility: "internal",
     runId: reflectionRunId,
-    activityLabel: goalFrontierActivityLabel("Reflecting goal frontier", state.goal.frontier_generation),
+    activityLabel: goalHorizonActivityLabel("Reflecting goal horizon", state.goal.horizon_generation),
     suppressTranscript: true,
   });
   const reflected = readGoalState(options.store, options.sessionId);
@@ -140,6 +143,26 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
       return { status: "complete", iteration, run_id: reflectionRunId, goal_id: saved.goal.id };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      const expanded = expandGoalFromLedgerCandidates(reflected);
+      if (expanded) {
+        const saved = writeGoalState(options.store, options.sessionId, expanded, reflectionRunId);
+        options.store.appendEvent({
+          session_id: options.sessionId,
+          run_id: reflectionRunId,
+          type: "goal.horizon.expanded",
+          data: {
+            goal_id: saved.goal.id,
+            previous_horizon_generation: reflected.goal.horizon_generation,
+            horizon_generation: saved.goal.horizon_generation,
+            step_count: saved.goal.planning?.steps.length ?? 0,
+            active_step_id: saved.goal.planning?.active_step_id,
+            reason: "completion_gate",
+            blocked_completion: reason,
+          },
+        });
+        options.onReflectionExpanded?.(saved);
+        return { status: "waiting", iteration, reason: "expanded_from_ledger", run_id: reflectionRunId, goal_id: saved.goal.id };
+      }
       const paused = pauseGoal(options, reflected, reflectionRunId, reason);
       return { status: "paused", iteration, reason, run_id: reflectionRunId, goal_id: paused.goal.id };
     }
@@ -163,12 +186,62 @@ function goalId(state: GoalState | undefined): string | undefined {
   return state?.goal.id;
 }
 
-function goalFrontierActivityLabel(prefix: string, generation: number): string {
-  return generation > 0 ? `${prefix} ${generation}` : prefix;
+function goalHorizonActivityLabel(prefix: string, generation: number): string {
+  return `${prefix} ${generation}`;
 }
 
 function isCompletedReflectionForRun(state: GoalState, reflectionRunId: string): boolean {
   return state.goal.last_reflection_run_id === reflectionRunId && state.goal.reflection_status === "completed";
+}
+
+function expandGoalFromLedgerCandidates(state: GoalState): GoalState | undefined {
+  const goal = state.goal;
+  const strategy = goal.strategy;
+  if (!goal.ledger || strategy?.mode === "surgical") {
+    return undefined;
+  }
+  if (strategy?.mode === "campaign" && strategy.target_hours !== undefined && goalDurationMs(goal) >= strategy.target_hours * 60 * 60 * 1000) {
+    return undefined;
+  }
+  const candidates = nextHorizonCandidates(goal.ledger.open, strategy?.mode ?? "opportunistic");
+  if (!candidates.length) {
+    return undefined;
+  }
+  const next = cloneGoalState(state);
+  next.goal.horizon_generation += 1;
+  const planned = replaceGoalPlanning(next, {
+    summary: `Horizon ${next.goal.horizon_generation} · Candidate ledger`,
+    active_step_id: candidates[0]?.id,
+    steps: candidates.map((candidate) => ({
+      id: candidate.id,
+      title: candidate.title,
+      status: "pending",
+      notes: candidate.reason ?? candidate.source,
+      evidence: candidate.evidence,
+    })),
+  });
+  planned.enabled = true;
+  planned.goal.status = "active";
+  return planned;
+}
+
+function nextHorizonCandidates(candidates: GoalCandidate[], mode: "opportunistic" | "campaign" | undefined): GoalCandidate[] {
+  const eligible = mode === "campaign" ? candidates : candidates.filter((candidate) => candidate.value === "high" || candidate.value === "medium");
+  return eligible
+    .slice()
+    .sort((a, b) => candidateValueRank(b.value) - candidateValueRank(a.value))
+    .slice(0, 5);
+}
+
+function candidateValueRank(value: GoalCandidate["value"]): number {
+  switch (value) {
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+  }
 }
 
 function goalUpdatedDuringRun(store: SessionStore, sessionId: string, runId: string): boolean {

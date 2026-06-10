@@ -26,6 +26,18 @@ const goalStep = objectSchema(
   ["title"],
 );
 
+const goalCandidate = objectSchema(
+  {
+    id: string("Optional stable candidate id. If omitted, one is derived from the title."),
+    title: string("Concrete candidate title."),
+    source: string("Optional source, subsystem, file, or rationale origin."),
+    value: stringEnum("Expected value if pursued.", ["high", "medium", "low"]),
+    reason: string("Optional reason for keeping, completing, or rejecting this candidate."),
+    evidence: jsonObject("Optional structured candidate evidence."),
+  },
+  ["title"],
+);
+
 const clarifyChoice = objectSchema(
   {
     id: string("Optional stable choice id."),
@@ -204,13 +216,20 @@ const DEFINITIONS = [
   },
   {
     name: "goal",
-    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, reflect, resume, complete, or drop the active goal.",
+    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, set strategy, update the candidate ledger, reflect, resume, complete, or drop the active goal.",
     permission: "read",
     parameters: objectSchema(
       {
-        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "reflect", "resume", "complete", "drop"]),
+        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "set_strategy", "update_ledger", "reflect", "resume", "complete", "drop"]),
         objective: string("Goal objective. Required for op=create."),
         token_budget: number("Optional positive token budget for op=create."),
+        mode: stringEnum("Goal strategy mode for op=create or op=set_strategy.", ["surgical", "opportunistic", "campaign"]),
+        inferred: boolean("Whether the strategy was inferred automatically. Use true for auto mode and false for explicit user choice."),
+        target_hours: number("Optional campaign time budget in hours. Do not expose target horizon counts to users."),
+        rationale: string("Short rationale for the selected strategy."),
+        open: { type: "array", description: "Open candidate ledger entries for op=update_ledger.", items: goalCandidate },
+        done: { type: "array", description: "Completed candidate ledger entries for op=update_ledger.", items: goalCandidate },
+        rejected: { type: "array", description: "Rejected candidate ledger entries for op=update_ledger.", items: goalCandidate },
         steps: { type: "array", description: "Concrete internal goal steps for op=create, decompose, update_plan, or op=reflect with decision=expand. Required when decision=expand.", items: goalStep },
         active_step_id: string("Optional active step id for op=create, decompose, update_plan, update_step, or reflect expand."),
         step_id: string("Required when op=update_step. If updating the active step, pass the current active_step_id value as step_id; when omitted, the tool falls back to the active step if one is set."),
@@ -222,7 +241,6 @@ const DEFINITIONS = [
         verification_evidence: jsonObject("Structured verification evidence for op=reflect with decision=done in an internal reflection run."),
         blocker: string("Optional blocker details for op=reflect with decision=blocked in an internal reflection run."),
         summary: string("Completion summary for op=complete, or reason for op=drop."),
-        force: boolean("Allow op=complete even if internal goal plan has unfinished steps."),
       },
       ["op"],
     ),

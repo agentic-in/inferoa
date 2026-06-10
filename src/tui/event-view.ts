@@ -114,7 +114,7 @@ function renderActivityEvent(event: SessionEvent): string[] {
       const parts = [
         labeled("loops", data.tool_rounds),
         labeled("tools", data.tool_calls),
-        labeled("frontiers", data.frontiers ?? data.frontier_count),
+        labeled("horizons", data.horizons ?? data.horizon_count),
         durationMs !== undefined ? `${fg256(39, "time")} ${formatDuration(durationMs)}` : "",
         labeled("tokens", data.tokens),
       ].filter(Boolean);
@@ -129,14 +129,14 @@ function renderActivityEvent(event: SessionEvent): string[] {
         report ? `${fg256(244, "  ")}${report}` : undefined,
       ].filter((line): line is string => Boolean(line));
     }
-    case "goal.frontier.expanded": {
+    case "goal.horizon.expanded": {
       const parts = [
-        labeled("frontier", data.frontier_generation),
-        labeled("previous", data.previous_frontier_generation),
+        labeled("horizon", data.horizon_generation),
+        labeled("previous", data.previous_horizon_generation),
         labeled("steps", data.step_count),
         labeled("active", data.active_step_id),
       ].filter(Boolean);
-      return [`${stamp} · ${fg256(39, "goal frontier started")}${parts.length ? ` · ${parts.join(" · ")}` : ""}`];
+      return [`${stamp} · ${fg256(39, "goal horizon started")}${parts.length ? ` · ${parts.join(" · ")}` : ""}`];
     }
     case "run.completed":
     case "run.stopped":

@@ -29,7 +29,7 @@ import { isAbortError, throwIfAborted } from "./util/abort.js";
 import {
   applyGoalUsage,
   goalCompletionReportForRun,
-  isGoalFrontierExhausted,
+  isGoalHorizonExhausted,
   modelUsageTokenCost,
   readGoalState,
   recordGoalCompletionReport,
@@ -807,7 +807,7 @@ function goalYieldEventAfterToolCall(
         type: "goal.reflection.decision_recorded",
         data: {
           goal_id: state.goal.id,
-          frontier_generation: state.goal.frontier_generation,
+          horizon_generation: state.goal.horizon_generation,
           decision: state.goal.last_reflection_decision,
           request_class: requestClass,
           visibility,
@@ -816,16 +816,16 @@ function goalYieldEventAfterToolCall(
     }
     return undefined;
   }
-  if (!state?.enabled || state.goal.status !== "active" || !isGoalFrontierExhausted(state.goal)) {
+  if (!state?.enabled || state.goal.status !== "active" || !isGoalHorizonExhausted(state.goal)) {
     return undefined;
   }
   return {
     session_id: sessionId,
     run_id: runId,
-    type: "goal.frontier.exhausted",
+    type: "goal.horizon.exhausted",
     data: {
       goal_id: state.goal.id,
-      frontier_generation: state.goal.frontier_generation,
+      horizon_generation: state.goal.horizon_generation,
       request_class: requestClass,
       visibility,
     },

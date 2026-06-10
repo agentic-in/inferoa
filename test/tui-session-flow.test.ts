@@ -8,7 +8,7 @@ import { SessionStore } from "../src/session/store.js";
 import { TuiApp } from "../src/tui/app.js";
 import { buildGoalWorkPrompt } from "../src/goals/supervisor-prompts.js";
 import { stripAnsi } from "../src/tui/ansi.js";
-import { completeGoalReflection, createGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { completeGoalAfterReflection, completeGoalReflection, createGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
 
 test("clear starts a clean default session without prompting or rendering creation details", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-clear-session-"));
@@ -199,7 +199,88 @@ test("goal continuation queues a hidden foreground prompt instead of a daemon jo
   }
 });
 
-test("goal show renders wrapped tree frontiers without repeated command hints", async () => {
+test("bare goal command chooses auto or explicit before asking for the objective", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-setup-order-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_setup_order", root: stateDir, alias: "goal-setup-order" };
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const session = store.createSession(workspace, "goal setup order");
+    const calls: string[] = [];
+    const view = tui as unknown as {
+      renderGoalView: (args: string) => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      createModeSession: (title: string) => { session_id: string };
+      chooseGoalSetup: () => Promise<object>;
+      askModeObjective: (label: string) => Promise<string>;
+      startGoal: (session: { session_id: string }, objective: string, options?: object) => Promise<void>;
+    };
+    view.optionalSession = () => undefined;
+    view.createModeSession = () => session;
+    view.chooseGoalSetup = async () => {
+      calls.push("setup");
+      return {};
+    };
+    view.askModeObjective = async () => {
+      calls.push("objective");
+      return "Improve codebase";
+    };
+    view.startGoal = async (_session, objective) => {
+      calls.push(`start:${objective}`);
+    };
+
+    await view.renderGoalView("");
+
+    assert.deepEqual(calls, ["setup", "objective", "start:Improve codebase"]);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("mode objective composer cancels on interrupt instead of submitting exit text", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-mode-objective-cancel-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_mode_objective_cancel", root: stateDir, alias: "mode-objective-cancel" };
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      askModeObjective: (label: string) => Promise<string>;
+      readComposer: (options: { suggestions?: boolean; cancelOnInterrupt?: boolean }) => Promise<string>;
+    };
+    let composerOptions: { suggestions?: boolean; cancelOnInterrupt?: boolean } | undefined;
+    view.readComposer = async (options) => {
+      composerOptions = options;
+      throw new Error("Input cancelled");
+    };
+
+    await assert.rejects(() => view.askModeObjective("Goal objective"), /Input cancelled/);
+
+    assert.equal(composerOptions?.suggestions, false);
+    assert.equal(composerOptions?.cancelOnInterrupt, true);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal show renders wrapped tree horizons without repeated command hints", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-show-tree-"));
   const originalStdoutWrite = process.stdout.write;
   const originalColumns = process.stdout.columns;
@@ -224,22 +305,29 @@ test("goal show renders wrapped tree frontiers without repeated command hints", 
     };
     const longSummary =
       "Successfully improved the vLLM Semantic Router codebase across all three sub-projects with Python CLI, Go core, and fleet simulator verification completed without truncation.";
-    const longReflection =
-      "Successfully improved the vLLM Semantic Router codebase across all three sub-projects after reflection, including Python tests passing and release notes prepared without hidden tail text.";
+    const expandReflection = "Found a second horizon after the first audit and verification pass.";
+    const doneReflection =
+      "Successfully improved the vLLM Semantic Router codebase across all three sub-projects after final reflection, including Python tests passing and release notes prepared without hidden tail text.";
     let goal = replaceGoalPlanning(createGoalState({ objective: "improve codebase" }), {
-      summary: "Initial audit and repair frontier",
+      summary: "Initial audit and repair horizon",
       steps: [
         { id: "explore_and_audit", title: "Explore codebase and identify concrete improvement areas", status: "completed" },
         { id: "fix_python_issues", title: "Fix Python code quality issues in the vllm-sr CLI", status: "completed" },
       ],
     });
     goal.goal.summary = longSummary;
-    writeGoalState(store, session.session_id, goal, "run_frontier_1");
+    writeGoalState(store, session.session_id, goal, "run_horizon_0");
+    store.appendEvent({
+      session_id: session.session_id,
+      run_id: "run_reflection_expand",
+      type: "goal.reflection.started",
+      data: { goal_id: goal.goal.id, horizon_generation: 0 },
+    });
     goal = completeGoalReflection(
       goal,
       {
         decision: "expand",
-        summary: longReflection,
+        summary: expandReflection,
         steps: [
           {
             id: "verify_build_and_test_full_suite",
@@ -249,10 +337,55 @@ test("goal show renders wrapped tree frontiers without repeated command hints", 
         ],
         active_step_id: "verify_build_and_test_full_suite",
       },
-      "run_reflection",
+      "run_reflection_expand",
     );
     goal.goal.summary = longSummary;
-    writeGoalState(store, session.session_id, goal, "run_frontier_2");
+    writeGoalState(store, session.session_id, goal, "run_horizon_1");
+    store.appendEvent({
+      session_id: session.session_id,
+      run_id: "run_reflection_expand",
+      type: "goal.reflection.completed",
+      data: {
+        goal_id: goal.goal.id,
+        source_horizon_generation: 0,
+        horizon_generation: 1,
+        decision: "expand",
+        summary: expandReflection,
+      },
+    });
+    goal.goal.planning!.steps[0]!.status = "completed";
+    writeGoalState(store, session.session_id, goal, "run_horizon_1_done");
+    store.appendEvent({
+      session_id: session.session_id,
+      run_id: "run_reflection_done",
+      type: "goal.reflection.started",
+      data: { goal_id: goal.goal.id, horizon_generation: 1 },
+    });
+    goal = completeGoalReflection(
+      goal,
+      {
+        decision: "done",
+        summary: doneReflection,
+        verification_evidence: { test: "passed" },
+      },
+      "run_reflection_done",
+    );
+    writeGoalState(store, session.session_id, goal, "run_reflection_done");
+    store.appendEvent({
+      session_id: session.session_id,
+      run_id: "run_reflection_done",
+      type: "goal.reflection.completed",
+      data: {
+        goal_id: goal.goal.id,
+        source_horizon_generation: 1,
+        horizon_generation: 1,
+        decision: "done",
+        summary: doneReflection,
+        verification_evidence: { test: "passed" },
+      },
+    });
+    goal = completeGoalAfterReflection(goal, longSummary);
+    writeGoalState(store, session.session_id, goal, "run_goal_complete");
 
     const panels: Array<{ title: string; body: string[] }> = [];
     view.optionalSession = () => session;
@@ -266,14 +399,21 @@ test("goal show renders wrapped tree frontiers without repeated command hints", 
     const latest = panels.at(-1);
     assert.equal(latest?.title, "Goal");
     const plain = stripAnsi(latest?.body.join("\n") ?? "");
-    assert.match(plain, /◇ Frontier 1/);
-    assert.match(plain, /◆ Frontier 2 current/);
+    assert.match(plain, /^complete improve codebase/m);
+    assert.doesNotMatch(plain, /complete \(paused\)/);
+    assert.match(plain, /reflections 2 recorded .*latest done/);
+    assert.match(plain, /strategy auto .*opportunistic/);
+    assert.match(plain, /ledger 0 open .*0 done .*0 rejected/);
+    assert.match(plain, /◇ Horizon 0 .*Initial audit and repair horizon/);
+    assert.match(plain, /◆ Horizon 1 current .*Found a second horizon/);
     assert.match(plain, /├─ x explore_and_audit/);
-    assert.match(plain, /└─ \* verify_build_and_test_full_suite/);
+    assert.match(plain, /└─ x verify_build_and_test_full_suite/);
+    assert.match(plain, /reflection expand .*Found a second horizon/);
+    assert.match(plain, /reflection done/);
     assert.doesNotMatch(plain, /\/goal plan/);
     assert.doesNotMatch(plain, /\/goal complete/);
     assert.match(plain, /fleet simulator verification\s+completed without truncation/);
-    assert.match(plain, /release notes\s+prepared without hidden tail text/);
+    assert.doesNotMatch(plain, /release notes[\s\S]*prepared without hidden[\s\S]*tail text/);
 
     let inlineOutput = "";
     process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -285,7 +425,7 @@ test("goal show renders wrapped tree frontiers without repeated command hints", 
     const rendered = stripAnsi(inlineOutput);
     assert.doesNotMatch(rendered, /…/);
     assert.match(rendered, /fleet simulator verification\s+completed without truncation/);
-    assert.match(rendered, /release notes\s+prepared without hidden tail text/);
+    assert.doesNotMatch(rendered, /release notes[\s\S]*prepared without hidden[\s\S]*tail text/);
   } finally {
     process.stdout.write = originalStdoutWrite;
     process.stdout.columns = originalColumns;
@@ -429,7 +569,7 @@ test("suppressed internal reflection renders tool trace without assistant text",
                 id: "goal_reflection_trace",
                 objective: "improve docs wording",
                 status: "active",
-                frontier_generation: 1,
+                horizon_generation: 1,
                 reflection_status: "completed",
                 last_reflection_decision: "done",
               },

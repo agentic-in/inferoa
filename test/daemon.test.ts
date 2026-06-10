@@ -54,7 +54,7 @@ test("daemon cancel preserves terminal job states", async () => {
   }
 });
 
-test("daemon goal supervisor expands frontier through internal reflection and completes after done reflection", async () => {
+test("daemon goal supervisor expands horizon through internal reflection and completes after done reflection", async () => {
   let reflectionCalls = 0;
   let backgroundCalls = 0;
   const server = createServer((req, res) => {
@@ -77,8 +77,8 @@ test("daemon goal supervisor expands frontier through internal reflection and co
                   arguments: JSON.stringify({
                     op: "reflect",
                     decision: "expand",
-                    summary: "Hidden frontier discovered.",
-                    steps: [{ id: "hidden-frontier", title: "Handle hidden frontier", status: "pending" }],
+                    summary: "Hidden horizon discovered.",
+                    steps: [{ id: "hidden-horizon", title: "Handle hidden horizon", status: "pending" }],
                   }),
                 },
               }
@@ -91,8 +91,8 @@ test("daemon goal supervisor expands frontier through internal reflection and co
                     arguments: JSON.stringify({
                       op: "reflect",
                       decision: "done",
-                      summary: "No additional frontier remains.",
-                      verification_evidence: { git_status: "checked", hidden_frontier: "complete" },
+                      summary: "No additional horizon remains.",
+                      verification_evidence: { git_status: "checked", hidden_horizon: "complete" },
                     }),
                   },
                 }
@@ -119,7 +119,7 @@ test("daemon goal supervisor expands frontier through internal reflection and co
                       type: "function",
                       function: {
                         name: "goal",
-                        arguments: JSON.stringify({ op: "update_step", step_id: "hidden-frontier", status: "completed", notes: "Handled hidden frontier." }),
+                        arguments: JSON.stringify({ op: "update_step", step_id: "hidden-horizon", status: "completed", notes: "Handled hidden horizon." }),
                       },
                     },
                   ],
@@ -151,7 +151,7 @@ test("daemon goal supervisor expands frontier through internal reflection and co
     const session = store.createSession(workspace, "daemon-goal");
     let goal = createGoalState({ objective: "Complete long horizon goal" });
     goal = replaceGoalPlanning(goal, {
-      steps: [{ id: "initial", title: "Initial frontier", status: "completed" }],
+      steps: [{ id: "initial", title: "Initial horizon", status: "completed" }],
     });
     writeGoalState(store, session.session_id, goal);
 
@@ -162,11 +162,11 @@ test("daemon goal supervisor expands frontier through internal reflection and co
     const finished = readGoalState(store, session.session_id)?.goal;
     assert.equal(finished?.status, "complete");
     assert.equal(finished?.last_reflection_decision, "done");
-    assert.equal(finished?.frontier_generation, 2);
+    assert.equal(finished?.horizon_generation, 1);
     assert.equal(store.getSupervisorJob(job.job_id)?.status, "complete");
     const events = store.listEvents(session.session_id);
     assert.ok(events.some((event) => event.type === "goal.reflection.started"));
-    assert.ok(events.some((event) => event.type === "goal.frontier.expanded"));
+    assert.ok(events.some((event) => event.type === "goal.horizon.expanded"));
     assert.ok(events.some((event) => event.type === "goal.completion_report"));
     assert.ok(events.some((event) => event.type === "user.prompt" && event.data.visibility === "internal" && event.data.request_class === "reflection"));
   } finally {
@@ -212,7 +212,7 @@ test("daemon goal supervisor pauses when reflection omits a decision instead of 
     const workspace: WorkspaceIdentity = { id: "w_daemon_stale_reflection", root: workspaceRoot, alias: "daemon-stale-reflection" };
     const session = store.createSession(workspace, "daemon stale reflection");
     let goal = createGoalState({ objective: "Do not reuse stale reflection decisions" });
-    goal = replaceGoalPlanning(goal, { steps: [{ id: "done", title: "Already done frontier", status: "completed" }] });
+    goal = replaceGoalPlanning(goal, { steps: [{ id: "done", title: "Already done horizon", status: "completed" }] });
     goal = completeGoalReflection(goal, {
       decision: "done",
       summary: "Old reflection should not count.",
@@ -267,7 +267,7 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
                         arguments: JSON.stringify({
                           op: "reflect",
                           decision: "done",
-                          summary: "The post-turn supervisor found no remaining frontier.",
+                          summary: "The post-turn supervisor found no remaining horizon.",
                           verification_evidence: { post_turn_reflection: true },
                         }),
                       },
@@ -304,7 +304,7 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
     const workspace: WorkspaceIdentity = { id: "w_daemon_run_goal", root: workspaceRoot, alias: "daemon-run-goal" };
     const session = store.createSession(workspace, "daemon run goal");
     let goal = createGoalState({ objective: "Finish after visible daemon turn" });
-    goal = replaceGoalPlanning(goal, { steps: [{ id: "visible", title: "Visible turn frontier", status: "completed" }] });
+    goal = replaceGoalPlanning(goal, { steps: [{ id: "visible", title: "Visible turn horizon", status: "completed" }] });
     writeGoalState(store, session.session_id, goal);
 
     const job = await queueDaemonRun({ stateDir: state, workspaceRoot, sessionId: session.session_id, prompt: "visible daemon work", configPath });

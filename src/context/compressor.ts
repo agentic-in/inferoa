@@ -346,17 +346,18 @@ function summarizeEventForCompaction(event: { type: string; data: JsonObject; cr
     return {
       type: event.type,
       decision: event.data.decision,
-      frontier_generation: event.data.frontier_generation,
+      source_horizon_generation: event.data.source_horizon_generation,
+      horizon_generation: event.data.horizon_generation,
       summary: stringSummary(event.data.summary),
       verification_evidence: event.data.verification_evidence,
       blocker: stringSummary(event.data.blocker),
       created_at: event.created_at,
     };
   }
-  if (event.type === "goal.frontier.expanded") {
+  if (event.type === "goal.horizon.expanded") {
     return {
       type: event.type,
-      frontier_generation: event.data.frontier_generation,
+      horizon_generation: event.data.horizon_generation,
       step_count: event.data.step_count,
       active_step_id: event.data.active_step_id,
       created_at: event.created_at,

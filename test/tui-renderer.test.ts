@@ -345,15 +345,15 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
                   ],
                 },
               },
-              frontiers: [
+              horizons: [
                 {
-                  generation: 1,
+                  generation: 0,
                   current: false,
                   summary: "First pass",
                   steps: [{ id: "inspect", title: "Inspect flow", status: "completed" }],
                 },
                 {
-                  generation: 2,
+                  generation: 1,
                   current: true,
                   summary: "Verification pass",
                   active_step_id: "verify",
@@ -569,9 +569,9 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
     assert.doesNotMatch(goalBlock, /objective Ship mode/);
     assert.doesNotMatch(goalBlock, /loops 1 · tools 2/);
     assert.match(goalBlock, /report Goal achieved\. 1 loop · 2 tool calls · 3s · 34 tokens used\./);
-    assert.match(goalBlock, /frontier 1/);
+    assert.match(goalBlock, /horizon 0/);
     assert.match(goalBlock, /sub-goal .*inspect Inspect flow/);
-    assert.match(goalBlock, /frontier 2 current/);
+    assert.match(goalBlock, /horizon 1 .*Verification pass .*current/);
     assert.match(goalBlock, /sub-goal .*\* verify Run verification/);
     assert.match(goalBlock, /plan 1 completed · 1 in progress/);
     assert.match(goalBlock, /now \* verify Run verification/);

@@ -66,7 +66,7 @@ function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: bool
       time_used_seconds: 0,
       tool_rounds_used: 0,
       tool_calls_used: 0,
-      frontier_generation: 1,
+      horizon_generation: 1,
       planning: {
         active_step_id: input.blocked ? "verify" : "edit",
         updated_at: "2026-01-01T00:00:00.000Z",

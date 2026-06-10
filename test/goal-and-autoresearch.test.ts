@@ -14,7 +14,7 @@ import {
   createGoalState,
   goalDurationMs,
   incompleteGoalPlanningMessage,
-  readGoalFrontiers,
+  readGoalHorizons,
   readGoalState,
   recordGoalCompletionReport,
   replaceGoalPlanning,
@@ -44,6 +44,16 @@ function approvingContext(sessionId: string, runId: string) {
   };
 }
 
+async function completeGoalOrientation(registry: ToolRegistry, sessionId: string, runId: string): Promise<void> {
+  for (const stepId of ["read_objective_and_constraints", "inspect_workspace_shape", "identify_candidate_sources", "infer_goal_strategy"]) {
+    const result = await registry.call(
+      { id: `${runId}_${stepId}`, name: "goal", arguments: { op: "update_step", step_id: stepId, status: "completed" } },
+      { session_id: sessionId, run_id: runId },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+  }
+}
+
 test("goal reflection prompt treats completed plans as a hypothesis, not a boundary", () => {
   const prompt = buildGoalReflectionPrompt("Ship reliable goal mode");
 
@@ -63,6 +73,71 @@ test("goal reflection prompt treats completed plans as a hypothesis, not a bound
   assert.match(prompt, /Do not call goal op=complete/i);
   assert.match(prompt, /goal op=reflect exactly once/i);
   assert.doesNotMatch(prompt, /decision=continue/i);
+});
+
+test("goal creation starts with a visible Horizon 0 orientation and no frontier fields", () => {
+  const state = createGoalState({ objective: "Improve codebase" });
+  const goal = state.goal as Record<string, any>;
+
+  assert.equal(goal.horizon_generation, 0);
+  assert.equal("frontier_generation" in goal, false);
+  assert.equal(goal.planning?.summary, "Horizon 0 · Orientation");
+  assert.equal(goal.planning?.active_step_id, "read_objective_and_constraints");
+  assert.deepEqual(
+    goal.planning?.steps.map((step: { id: string; title: string; status: string }) => [step.id, step.title, step.status]),
+    [
+      ["read_objective_and_constraints", "Read objective and constraints", "in_progress"],
+      ["inspect_workspace_shape", "Inspect workspace shape", "pending"],
+      ["identify_candidate_sources", "Identify candidate sources", "pending"],
+      ["infer_goal_strategy", "Infer goal strategy and seed candidate ledger", "pending"],
+    ],
+  );
+  assert.equal(goal.strategy?.mode, "opportunistic");
+  assert.equal(goal.strategy?.inferred, true);
+  assert.deepEqual(goal.ledger?.open, []);
+  assert.deepEqual(goal.ledger?.done, []);
+  assert.deepEqual(goal.ledger?.rejected, []);
+});
+
+test("opportunistic goals cannot complete while high or medium ledger candidates remain open", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-ledger-gate-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_ledger_gate", root: dir, alias: "goal-ledger-gate" };
+    const session = store.createSession(workspace, "goal-ledger-gate");
+    const registry = new ToolRegistry(config(), workspace, store);
+    let state = replaceGoalPlanning(createGoalState({ objective: "Improve codebase broadly" }), {
+      summary: "Horizon 0 · Orientation",
+      steps: [{ id: "orientation", title: "Orientation complete", status: "completed" }],
+    });
+    const seededGoal = state.goal as any;
+    seededGoal.strategy = { mode: "opportunistic", inferred: true, rationale: "Broad improvement goal." };
+    seededGoal.ledger = {
+      open: [{ id: "tests", title: "Audit integration tests", value: "high", status: "open", updated_at: new Date().toISOString() }],
+      done: [],
+      rejected: [],
+      updated_at: new Date().toISOString(),
+    };
+    state = completeGoalReflection(
+      state,
+      { decision: "done", summary: "No more work.", verification_evidence: { checked: true } },
+      "run_reflection_done",
+    );
+    writeGoalState(store, session.session_id, state, "run_seed");
+
+    const blocked = await registry.call(
+      { id: "goal_complete_blocked_by_ledger", name: "goal", arguments: { op: "complete", summary: "Done despite open candidate.", force: true } },
+      { session_id: session.session_id, run_id: "run_complete" },
+    );
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error?.code, "goal_completion_candidates_remaining");
+    assert.match(blocked.error?.message ?? "", /open high\/medium ledger candidates/i);
+    assert.equal(readGoalState(store, session.session_id)?.goal.status, "active");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("goal tool persists state and PromptBuilder injects active goal context", async () => {
@@ -85,6 +160,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
     assert.equal(created.ok, true, JSON.stringify(created));
     assert.equal(readGoalState(store, session.session_id)?.goal.objective, "Ship <fast> mode");
     assert.ok(CORE_TOOL_DEFINITIONS.some((tool) => tool.name === "goal"));
+    await completeGoalOrientation(registry, session.session_id, "run_goal_orientation");
 
     const context = new PromptBuilder(config(), store, workspace).build(
       store.getSession(session.session_id)!,
@@ -101,7 +177,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
       {
         id: "goal_reflection",
         name: "goal",
-        arguments: { op: "reflect", decision: "done", summary: "No remaining frontier.", verification_evidence: { checked: true } },
+        arguments: { op: "reflect", decision: "done", summary: "No remaining horizon.", verification_evidence: { checked: true } },
       },
       { session_id: session.session_id, run_id: "run_goal", request_class: "reflection", visibility: "internal" },
     );
@@ -476,7 +552,7 @@ test("approved plan body is bounded in goal context without losing stored body",
 
     const goalState = readGoalState(store, session.session_id);
     assert.equal(goalState?.goal.plan?.body, longBody);
-    assert.equal(goalState?.goal.planning, undefined);
+    assert.equal(goalState?.goal.planning?.summary, "Horizon 0 · Orientation");
 
     const context = new PromptBuilder(config(), store, workspace).build(
       store.getSession(session.session_id)!,
@@ -707,6 +783,7 @@ test("goal completion requires a summary and accepts long summaries", async () =
       { session_id: session.session_id, run_id: "run_gs" },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
+    await completeGoalOrientation(registry, session.session_id, "run_gs_orientation");
 
     const missingSummary = await registry.call(
       { id: "gs_2", name: "goal", arguments: { op: "complete" } },
@@ -722,7 +799,7 @@ test("goal completion requires a summary and accepts long summaries", async () =
       {
         id: "gs_reflection",
         name: "goal",
-        arguments: { op: "reflect", decision: "done", summary: "No additional frontier.", verification_evidence: { git_status: "clean enough" } },
+        arguments: { op: "reflect", decision: "done", summary: "No additional horizon.", verification_evidence: { git_status: "clean enough" } },
       },
       { session_id: session.session_id, run_id: "run_gs", request_class: "reflection", visibility: "internal" },
     );
@@ -742,7 +819,7 @@ test("goal completion requires a summary and accepts long summaries", async () =
   }
 });
 
-test("goal reflection gates completion and can expand a new frontier generation", async () => {
+test("goal reflection gates completion and can expand a new horizon generation", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-reflection-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
@@ -756,14 +833,14 @@ test("goal reflection gates completion and can expand a new frontier generation"
         name: "goal",
         arguments: {
           op: "create",
-          objective: "Finish hidden frontier",
-          steps: [{ id: "first", title: "First frontier", status: "completed" }],
+          objective: "Finish hidden horizon",
+          steps: [{ id: "first", title: "First horizon", status: "completed" }],
         },
       },
       { session_id: session.session_id, run_id: "run_ga" },
     );
     assert.equal(created.ok, true, JSON.stringify(created));
-    assert.equal(readGoalState(store, session.session_id)?.goal.frontier_generation, 1);
+    assert.equal(readGoalState(store, session.session_id)?.goal.horizon_generation, 0);
 
     const blockedComplete = await registry.call(
       { id: "ga_complete_early", name: "goal", arguments: { op: "complete", summary: "Done too early." } },
@@ -776,14 +853,14 @@ test("goal reflection gates completion and can expand a new frontier generation"
       {
         id: "ga_expand_missing_steps",
         name: "goal",
-        arguments: { op: "reflect", decision: "expand", summary: "Found another frontier but forgot to describe it." },
+        arguments: { op: "reflect", decision: "expand", summary: "Found another horizon but forgot to describe it." },
       },
       { session_id: session.session_id, run_id: "run_reflection_expand_missing", request_class: "reflection", visibility: "internal" },
     );
     assert.equal(missingExpandSteps.ok, false);
     assert.equal(missingExpandSteps.error?.code, "goal_reflection_failed");
     assert.match(missingExpandSteps.error?.message ?? "", /requires concrete new steps/);
-    assert.equal((missingExpandSteps.data?.goal as { objective?: string } | undefined)?.objective, "Finish hidden frontier");
+    assert.equal((missingExpandSteps.data?.goal as { objective?: string } | undefined)?.objective, "Finish hidden horizon");
     assert.equal((missingExpandSteps.data?.goal as { status?: string } | undefined)?.status, "active");
 
     const expanded = await registry.call(
@@ -793,32 +870,36 @@ test("goal reflection gates completion and can expand a new frontier generation"
         arguments: {
           op: "reflect",
           decision: "expand",
-          summary: "Found another frontier.",
-          steps: [{ id: "second", title: "Second frontier", status: "pending" }],
+          summary: "Found another horizon.",
+          steps: [{ id: "second", title: "Second horizon", status: "pending" }],
         },
       },
       { session_id: session.session_id, run_id: "run_reflection_expand", request_class: "reflection", visibility: "internal" },
     );
     assert.equal(expanded.ok, true, JSON.stringify(expanded));
     const afterExpand = readGoalState(store, session.session_id)?.goal;
-    assert.equal(afterExpand?.frontier_generation, 2);
+    assert.equal(afterExpand?.horizon_generation, 1);
     assert.equal(afterExpand?.last_reflection_decision, "expand");
     assert.equal(afterExpand?.planning?.active_step_id, "second");
-    const expandedEvent = store.listEvents(session.session_id).find((event) => event.type === "goal.frontier.expanded");
-    assert.equal(expandedEvent?.data.previous_frontier_generation, 1);
-    assert.equal(expandedEvent?.data.frontier_generation, 2);
+    const expandedEvent = store.listEvents(session.session_id).find((event) => event.type === "goal.horizon.expanded");
+    assert.equal(expandedEvent?.data.previous_horizon_generation, 0);
+    assert.equal(expandedEvent?.data.horizon_generation, 1);
     assert.equal(expandedEvent?.data.step_count, 1);
+    const expandReflectionEvent = store.listEvents(session.session_id).find((event) => event.type === "goal.reflection.completed" && event.run_id === "run_reflection_expand");
+    assert.equal(expandReflectionEvent?.data.source_horizon_generation, 0);
+    assert.equal(expandReflectionEvent?.data.horizon_generation, 1);
+    assert.equal(expandReflectionEvent?.data.decision, "expand");
 
-    const frontiers = readGoalFrontiers(store, session.session_id, afterExpand?.id);
+    const horizons = readGoalHorizons(store, session.session_id, afterExpand?.id);
     assert.deepEqual(
-      frontiers.map((frontier) => [
-        frontier.generation,
-        frontier.current,
-        frontier.steps.map((step) => [step.id, step.title, step.status]),
+      horizons.map((horizon) => [
+        horizon.generation,
+        horizon.current,
+        horizon.steps.map((step) => [step.id, step.title, step.status]),
       ]),
       [
-        [1, false, [["first", "First frontier", "completed"]]],
-        [2, true, [["second", "Second frontier", "in_progress"]]],
+        [0, false, [["first", "First horizon", "completed"]]],
+        [1, true, [["second", "Second horizon", "in_progress"]]],
       ],
     );
 
@@ -830,7 +911,7 @@ test("goal reflection gates completion and can expand a new frontier generation"
     assert.equal(missingEvidence.error?.code, "goal_reflection_failed");
 
     const completedSecond = await registry.call(
-      { id: "ga_step_done", name: "goal", arguments: { op: "update_step", step_id: "second", status: "completed", notes: "Verified second frontier." } },
+      { id: "ga_step_done", name: "goal", arguments: { op: "update_step", step_id: "second", status: "completed", notes: "Verified second horizon." } },
       { session_id: session.session_id, run_id: "run_second_done" },
     );
     assert.equal(completedSecond.ok, true, JSON.stringify(completedSecond));
@@ -844,9 +925,13 @@ test("goal reflection gates completion and can expand a new frontier generation"
       { session_id: session.session_id, run_id: "run_reflection_done", request_class: "reflection", visibility: "internal" },
     );
     assert.equal(done.ok, true, JSON.stringify(done));
+    const doneReflectionEvent = store.listEvents(session.session_id).find((event) => event.type === "goal.reflection.completed" && event.run_id === "run_reflection_done");
+    assert.equal(doneReflectionEvent?.data.source_horizon_generation, 1);
+    assert.equal(doneReflectionEvent?.data.horizon_generation, 1);
+    assert.equal(doneReflectionEvent?.data.decision, "done");
 
     const completed = await registry.call(
-      { id: "ga_complete", name: "goal", arguments: { op: "complete", summary: "Verified no more frontier." } },
+      { id: "ga_complete", name: "goal", arguments: { op: "complete", summary: "Verified no more horizon." } },
       { session_id: session.session_id, run_id: "run_ga_complete" },
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
@@ -857,17 +942,17 @@ test("goal reflection gates completion and can expand a new frontier generation"
   }
 });
 
-test("goal supervisor activity labels include the current frontier generation", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-activity-"));
+test("goal supervisor activity labels include the current horizon generation", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-horizon-activity-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_activity", root: dir, alias: "goal-frontier-activity" };
-    const workSession = store.createSession(workspace, "goal-work-frontier");
+    const workspace: WorkspaceIdentity = { id: "w_goal_horizon_activity", root: dir, alias: "goal-horizon-activity" };
+    const workSession = store.createSession(workspace, "goal-work-horizon");
     writeGoalState(
       store,
       workSession.session_id,
-      replaceGoalPlanning(createGoalState({ objective: "Work current frontier" }), {
-        steps: [{ id: "active", title: "Active frontier work", status: "in_progress" }],
+      replaceGoalPlanning(createGoalState({ objective: "Work current horizon" }), {
+        steps: [{ id: "active", title: "Active horizon work", status: "in_progress" }],
       }),
     );
     const workLabels: string[] = [];
@@ -881,14 +966,14 @@ test("goal supervisor activity labels include the current frontier generation", 
         return { run_id: "run_work" };
       },
     });
-    assert.deepEqual(workLabels, ["Continuing goal frontier 1"]);
+    assert.deepEqual(workLabels, ["Continuing goal horizon 0"]);
 
-    const reflectionSession = store.createSession(workspace, "goal-reflection-frontier");
+    const reflectionSession = store.createSession(workspace, "goal-reflection-horizon");
     writeGoalState(
       store,
       reflectionSession.session_id,
-      replaceGoalPlanning(createGoalState({ objective: "Reflect current frontier" }), {
-        steps: [{ id: "done", title: "Done frontier work", status: "completed" }],
+      replaceGoalPlanning(createGoalState({ objective: "Reflect current horizon" }), {
+        steps: [{ id: "done", title: "Done horizon work", status: "completed" }],
       }),
     );
     const reflectionLabels: string[] = [];
@@ -902,7 +987,152 @@ test("goal supervisor activity labels include the current frontier generation", 
         return { run_id: request.runId ?? "run_reflection" };
       },
     });
-    assert.deepEqual(reflectionLabels, ["Reflecting goal frontier 1"]);
+    assert.deepEqual(reflectionLabels, ["Reflecting goal horizon 0"]);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal supervisor expands the next horizon when a done reflection leaves ledger candidates open", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-ledger-auto-expand-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_ledger_auto_expand", root: dir, alias: "goal-ledger-auto-expand" };
+    const session = store.createSession(workspace, "goal-ledger-auto-expand");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Improve codebase broadly" }), {
+      summary: "Horizon 0 · Orientation",
+      steps: [{ id: "orientation", title: "Orientation complete", status: "completed" }],
+    });
+    const goal = state.goal as any;
+    goal.strategy = { mode: "opportunistic", inferred: true, rationale: "Broad improvement goal." };
+    goal.ledger = {
+      open: [{ id: "tests", title: "Audit integration tests", value: "high", status: "open", updated_at: new Date().toISOString() }],
+      done: [],
+      rejected: [],
+      updated_at: new Date().toISOString(),
+    };
+    writeGoalState(store, session.session_id, state, "run_seed");
+
+    const result = await runGoalSupervisor({
+      store,
+      sessionId: session.session_id,
+      supervisor: "test",
+      maxIterations: 2,
+      runTurn: async (request) => {
+        if (request.requestClass !== "reflection") {
+          return { run_id: "run_waiting_for_work" };
+        }
+        const reflected = await registry.call(
+          { id: "ledger_done_reflection", name: "goal", arguments: { op: "reflect", decision: "done", summary: "No more work.", verification_evidence: { checked: true } } },
+          { session_id: session.session_id, run_id: request.runId ?? "run_reflection", request_class: "reflection", visibility: "internal" },
+        );
+        assert.equal(reflected.ok, true, JSON.stringify(reflected));
+        return { run_id: request.runId ?? "run_reflection" };
+      },
+    });
+
+    assert.equal(result.status, "waiting");
+    assert.equal(result.reason, "last supervisor turn did not update the horizon");
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.horizon_generation, 1);
+    assert.equal(current?.planning?.active_step_id, "tests");
+    assert.equal(current?.planning?.steps[0]?.title, "Audit integration tests");
+    assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded" && event.data.reason === "completion_gate"));
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("completing a horizon step reconciles the matching open ledger candidate", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-ledger-step-reconcile-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_ledger_step_reconcile", root: dir, alias: "goal-ledger-step-reconcile" };
+    const session = store.createSession(workspace, "goal-ledger-step-reconcile");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Improve tests" }), {
+      summary: "Horizon 1 · Candidate ledger",
+      steps: [{ id: "tests", title: "Audit integration tests", status: "in_progress" }],
+    });
+    const goal = state.goal as any;
+    goal.ledger = {
+      open: [{ id: "tests", title: "Audit integration tests", value: "high", status: "open", updated_at: new Date().toISOString() }],
+      done: [],
+      rejected: [],
+      updated_at: new Date().toISOString(),
+    };
+    writeGoalState(store, session.session_id, state, "run_seed");
+
+    const updated = await registry.call(
+      {
+        id: "complete_candidate_step",
+        name: "goal",
+        arguments: {
+          op: "update_step",
+          step_id: "tests",
+          status: "completed",
+          evidence: { tests: "passed" },
+        },
+      },
+      { session_id: session.session_id, run_id: "run_update_step" },
+    );
+
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.deepEqual(current?.ledger?.open.map((candidate) => candidate.id), []);
+    assert.deepEqual(current?.ledger?.done.map((candidate) => [candidate.id, candidate.status, candidate.evidence]), [["tests", "done", { tests: "passed" }]]);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("campaign goals checkpoint instead of completing when target time is reached with open ledger candidates", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-campaign-checkpoint-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_campaign_checkpoint", root: dir, alias: "goal-campaign-checkpoint" };
+    const session = store.createSession(workspace, "goal-campaign-checkpoint");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Run a campaign", strategy: { mode: "campaign", inferred: false, target_hours: 0.001 } }), {
+      summary: "Horizon 1 · Campaign work",
+      steps: [{ id: "done", title: "Completed campaign slice", status: "completed" }],
+    });
+    state.goal.time_used_ms = 10_000;
+    const goal = state.goal as any;
+    goal.ledger = {
+      open: [{ id: "docs", title: "Audit docs deeply", value: "medium", status: "open", updated_at: new Date().toISOString() }],
+      done: [],
+      rejected: [],
+      updated_at: new Date().toISOString(),
+    };
+    writeGoalState(store, session.session_id, state, "run_seed");
+
+    const result = await runGoalSupervisor({
+      store,
+      sessionId: session.session_id,
+      supervisor: "test",
+      maxIterations: 1,
+      runTurn: async (request) => {
+        const reflected = await registry.call(
+          { id: "campaign_done_reflection", name: "goal", arguments: { op: "reflect", decision: "done", summary: "Campaign should checkpoint.", verification_evidence: { checked: true } } },
+          { session_id: session.session_id, run_id: request.runId ?? "run_reflection", request_class: "reflection", visibility: "internal" },
+        );
+        assert.equal(reflected.ok, true, JSON.stringify(reflected));
+        return { run_id: request.runId ?? "run_reflection" };
+      },
+    });
+
+    assert.equal(result.status, "paused");
+    assert.match(result.reason ?? "", /Campaign target reached/);
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "paused");
+    assert.equal(current?.horizon_generation, 0);
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded"), false);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -958,12 +1188,12 @@ test("internal reflection complete call records a done reflection decision", asy
     const session = store.createSession(workspace, "goal-reflection-complete");
     const registry = new ToolRegistry(config(), workspace, store);
     const state = replaceGoalPlanning(createGoalState({ objective: "Finish after reflection" }), {
-      steps: [{ id: "done", title: "Completed frontier", status: "completed" }],
+      steps: [{ id: "done", title: "Completed horizon", status: "completed" }],
     });
     writeGoalState(store, session.session_id, state);
 
     const reflectionComplete = await registry.call(
-      { id: "reflection_complete", name: "goal", arguments: { op: "complete", summary: "Reflection found no remaining frontier." } },
+      { id: "reflection_complete", name: "goal", arguments: { op: "complete", summary: "Reflection found no remaining horizon." } },
       { session_id: session.session_id, run_id: "run_reflection_complete", request_class: "reflection", visibility: "internal" },
     );
 
@@ -973,7 +1203,7 @@ test("internal reflection complete call records a done reflection decision", asy
     assert.equal(current?.reflection_status, "completed");
     assert.equal(current?.last_reflection_run_id, "run_reflection_complete");
     assert.equal(current?.last_reflection_decision, "done");
-    assert.deepEqual(current?.verification_evidence, { summary: "Reflection found no remaining frontier." });
+    assert.deepEqual(current?.verification_evidence, { summary: "Reflection found no remaining horizon." });
     assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.reflection.completed" && event.run_id === "run_reflection_complete"));
   } finally {
     store.close();
@@ -989,7 +1219,7 @@ test("goal completion force cannot bypass the internal reflection gate", async (
     const session = store.createSession(workspace, "goal-force-reflection");
     const registry = new ToolRegistry(config(), workspace, store);
     const state = replaceGoalPlanning(createGoalState({ objective: "Require reflection even with force" }), {
-      steps: [{ id: "done", title: "Completed frontier", status: "completed" }],
+      steps: [{ id: "done", title: "Completed horizon", status: "completed" }],
     });
     writeGoalState(store, session.session_id, state);
 
@@ -1003,6 +1233,37 @@ test("goal completion force cannot bypass the internal reflection gate", async (
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.summary, undefined);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal completion force cannot bypass unfinished horizon steps", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-force-plan-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_force_plan", root: dir, alias: "goal-force-plan" };
+    const session = store.createSession(workspace, "goal-force-plan");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = completeGoalReflection(
+      replaceGoalPlanning(createGoalState({ objective: "Require complete horizon even with force" }), {
+        steps: [{ id: "unfinished", title: "Unfinished horizon work", status: "pending" }],
+      }),
+      { decision: "done", summary: "Reflection says done.", verification_evidence: { checked: true } },
+      "run_reflection",
+    );
+    writeGoalState(store, session.session_id, state);
+
+    const blocked = await registry.call(
+      { id: "force_complete_with_unfinished_plan", name: "goal", arguments: { op: "complete", summary: "Forced visible completion.", force: true } },
+      { session_id: session.session_id, run_id: "run_force_complete" },
+    );
+
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error?.code, "goal_incomplete_plan");
+    assert.match(blocked.error?.message ?? "", /unfinished/);
+    assert.equal(readGoalState(store, session.session_id)?.goal.status, "active");
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -1102,38 +1363,38 @@ test("goal completion reports persist cumulative usage totals", async () => {
   }
 });
 
-test("goal completion reports include the frontier count", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-report-"));
+test("goal completion reports include the horizon count", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-horizon-report-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_report", root: dir, alias: "goal-frontier-report" };
-    const session = store.createSession(workspace, "goal-frontier-report");
-    let state = replaceGoalPlanning(createGoalState({ objective: "Finish multi-frontier reporting" }), {
-      steps: [{ id: "first", title: "First frontier", status: "completed" }],
+    const workspace: WorkspaceIdentity = { id: "w_goal_horizon_report", root: dir, alias: "goal-horizon-report" };
+    const session = store.createSession(workspace, "goal-horizon-report");
+    let state = replaceGoalPlanning(createGoalState({ objective: "Finish multi-horizon reporting" }), {
+      steps: [{ id: "first", title: "First horizon", status: "completed" }],
     });
     state = completeGoalReflection(
       state,
       {
         decision: "expand",
-        summary: "Second frontier found.",
-        steps: [{ id: "second", title: "Second frontier", status: "completed" }],
+        summary: "Second horizon found.",
+        steps: [{ id: "second", title: "Second horizon", status: "completed" }],
       },
       "run_reflect_expand",
     );
-    writeGoalState(store, session.session_id, state, "run_goal_frontiers");
+    writeGoalState(store, session.session_id, state, "run_goal_horizons");
 
     const complete = cloneGoalState(state);
     complete.enabled = false;
     complete.goal.status = "complete";
-    complete.goal.summary = "Verified both frontiers.";
+    complete.goal.summary = "Verified both horizons.";
     complete.goal.updated_at = new Date().toISOString();
     writeGoalState(store, session.session_id, complete, "run_goal_complete");
 
     const report = recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
-    assert.match(report?.report ?? "", /2 frontiers/);
+    assert.match(report?.report ?? "", /2 horizons/);
 
     const event = store.listEvents(session.session_id).find((item) => item.type === "goal.completion_report");
-    assert.equal(event?.data.frontiers, 2);
+    assert.equal(event?.data.horizons, 2);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

@@ -23,6 +23,7 @@ needs approval before edits begin, start with [Plan mode](./plan-mode.md).
 
 ```text
 /goal set Improve the docs site and verify the Docusaurus build.
+/goal explicit Improve the docs site and verify the Docusaurus build.
 /goal show
 /goal budget 200000
 /goal plan
@@ -37,14 +38,16 @@ needs approval before edits begin, start with [Plan mode](./plan-mode.md).
 ```mermaid
 flowchart TD
   Start["/goal set objective"]
-  Work["Work on the active frontier"]
+  Orient["Horizon 0 orientation"]
+  Work["Work on the active horizon"]
   Update["Update internal steps and evidence"]
   Reflect["Internal reflection"]
-  Expand["Expand substantive new frontier"]
+  Expand["Expand substantive new horizon"]
   Done["Record completion evidence"]
   Blocked["Pause with blocker"]
 
-  Start --> Work
+  Start --> Orient
+  Orient --> Work
   Work --> Update
   Update --> Reflect
   Reflect --> Expand
@@ -57,6 +60,9 @@ The active goal stores:
 
 - the original objective;
 - an internal goal plan and step status;
+- the current horizon, starting with visible Horizon 0 orientation;
+- an inferred or explicit strategy (`surgical`, `opportunistic`, or `campaign`);
+- a candidate ledger of open, completed, and rejected work;
 - notes and structured evidence;
 - token, tool, and time usage;
 - the latest internal reflection decision.
@@ -66,14 +72,18 @@ checklist is not enough to finish the goal.
 
 ## Reflection And Completion
 
-When the current frontier appears exhausted, Inferoa runs an internal
+When the current horizon appears exhausted, Inferoa runs an internal
 reflection. Reflection steps back from the current plan and asks whether more
 work is needed to satisfy the original objective.
 
-Reflection has a hard stop condition: it only expands the frontier when the new
+Reflection has a hard stop condition: it only expands the horizon when the new
 work has substantive impact on the original objective. Otherwise it records
 `decision=done` with verification evidence. If completion cannot proceed without
 user input or an external state change, it records `decision=blocked`.
+
+For broad goals, completion is also gated by the candidate ledger. If a
+reflection says `done` while high-value candidates remain open, Inferoa expands
+the next horizon instead of silently finishing.
 
 Goal completion is gated by reflection. A visible `/goal complete` cannot bypass
 unfinished internal steps or the latest reflection requirement.

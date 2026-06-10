@@ -539,7 +539,7 @@ test("runtime accounts active goal usage when a run is stopped by tool-round lim
   }
 });
 
-test("runtime yields after visible work exhausts the active goal frontier", async () => {
+test("runtime yields after visible work exhausts the active goal horizon", async () => {
   let chatCalls = 0;
   const modelServer = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
@@ -551,14 +551,14 @@ test("runtime yields after visible work exhausts the active goal frontier", asyn
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       if (chatCalls === 1) {
         writeSse(res, {
-          id: "resp_finish_frontier",
+          id: "resp_finish_horizon",
           model: "long-horizon-test",
           choices: [
             {
               delta: {
                 tool_calls: [
                   {
-                    id: "call_finish_frontier",
+                    id: "call_finish_horizon",
                     type: "function",
                     function: {
                       name: "goal",
@@ -586,18 +586,18 @@ test("runtime yields after visible work exhausts the active goal frontier", asyn
   await once(modelServer, "listening");
   const address = modelServer.address() as AddressInfo;
 
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-frontier-yield-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-horizon-yield-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_goal_frontier_yield", root: dir, alias: "goal-frontier-yield" };
+    const workspace: WorkspaceIdentity = { id: "w_goal_horizon_yield", root: dir, alias: "goal-horizon-yield" };
     const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
-    const session = store.createSession(workspace, "frontier-yield");
-    const goal = replaceGoalPlanning(createGoalState({ objective: "Finish visible frontier then reflection" }), {
-      steps: [{ id: "final", title: "Final visible frontier", status: "in_progress" }],
+    const session = store.createSession(workspace, "horizon-yield");
+    const goal = replaceGoalPlanning(createGoalState({ objective: "Finish visible horizon then reflection" }), {
+      steps: [{ id: "final", title: "Final visible horizon", status: "in_progress" }],
     });
     writeGoalState(store, session.session_id, goal);
 
-    const result = await runtime.run({ prompt: "finish the visible frontier", session_id: session.session_id });
+    const result = await runtime.run({ prompt: "finish the visible horizon", session_id: session.session_id });
 
     assert.equal(chatCalls, 1);
     assert.equal(result.tool_rounds, 1);
@@ -608,7 +608,7 @@ test("runtime yields after visible work exhausts the active goal frontier", asyn
     assert.equal(current?.planning?.steps[0]?.status, "completed");
     const events = store.listEvents(session.session_id);
     assert.equal(events.filter((event) => event.type === "model.request.started").length, 1);
-    assert.ok(events.some((event) => event.type === "goal.frontier.exhausted" && event.run_id === result.run_id));
+    assert.ok(events.some((event) => event.type === "goal.horizon.exhausted" && event.run_id === result.run_id));
     assert.ok(events.some((event) => event.type === "run.completed" && event.run_id === result.run_id));
     assert.equal(events.some((event) => event.type === "run.stopped" && event.run_id === result.run_id), false);
     assert.equal(store.getSession(session.session_id)?.status, "idle");
@@ -647,7 +647,7 @@ test("runtime yields immediately after an internal reflection decision is record
                       arguments: JSON.stringify({
                         op: "reflect",
                         decision: "done",
-                        summary: "No remaining frontier.",
+                        summary: "No remaining horizon.",
                         verification_evidence: { checked: true },
                       }),
                     },
@@ -686,12 +686,12 @@ test("runtime yields immediately after an internal reflection decision is record
     const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
     const session = store.createSession(workspace, "reflection-yield");
     const goal = replaceGoalPlanning(createGoalState({ objective: "Reflect then let supervisor complete" }), {
-      steps: [{ id: "final", title: "Final frontier", status: "completed" }],
+      steps: [{ id: "final", title: "Final horizon", status: "completed" }],
     });
     writeGoalState(store, session.session_id, markGoalReflectionStarted(goal, reflectionRunId), reflectionRunId);
 
     const result = await runtime.run({
-      prompt: "reflect on the completed frontier",
+      prompt: "reflect on the completed horizon",
       session_id: session.session_id,
       request_class: "reflection",
       visibility: "internal",
@@ -738,7 +738,7 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
                   {
                     id: "call_goal_complete",
                     type: "function",
-                    function: { name: "goal", arguments: JSON.stringify({ op: "complete", summary: "Finished the goal.", force: true }) },
+                    function: { name: "goal", arguments: JSON.stringify({ op: "complete", summary: "Finished the goal." }) },
                   },
                 ],
               },
@@ -767,8 +767,10 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
       store,
       session.session_id,
       completeGoalReflection(
-        createGoalState({ objective: "Finish with a report" }),
-        { decision: "done", summary: "Pre-run reflection found no remaining frontier.", verification_evidence: { checked: true } },
+        replaceGoalPlanning(createGoalState({ objective: "Finish with a report" }), {
+          steps: [{ id: "done", title: "Validated completion evidence", status: "completed" }],
+        }),
+        { decision: "done", summary: "Pre-run reflection found no remaining horizon.", verification_evidence: { checked: true } },
         "run_pre_reflection",
       ),
     );
@@ -848,7 +850,7 @@ test("runtime preserves goal completion report when final response fails", async
                   {
                     id: "call_goal_complete_before_failure",
                     type: "function",
-                    function: { name: "goal", arguments: JSON.stringify({ op: "complete", summary: "Finished before final response.", force: true }) },
+                    function: { name: "goal", arguments: JSON.stringify({ op: "complete", summary: "Finished before final response." }) },
                   },
                 ],
               },
@@ -877,8 +879,10 @@ test("runtime preserves goal completion report when final response fails", async
       store,
       session.session_id,
       completeGoalReflection(
-        createGoalState({ objective: "Complete before provider failure" }),
-        { decision: "done", summary: "Pre-run reflection found no remaining frontier.", verification_evidence: { checked: true } },
+        replaceGoalPlanning(createGoalState({ objective: "Complete before provider failure" }), {
+          steps: [{ id: "done", title: "Validated completion evidence", status: "completed" }],
+        }),
+        { decision: "done", summary: "Pre-run reflection found no remaining horizon.", verification_evidence: { checked: true } },
         "run_pre_reflection",
       ),
     );
