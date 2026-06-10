@@ -78,16 +78,70 @@ test("Codex Responses requests send system prompt as instructions", async () => 
     assert.equal(requestPath, "/backend-api/codex/responses");
     assert.equal(requestBody?.instructions, "Be concise.");
     assert.equal(requestBody?.store, false);
-    assert.equal(
-      requestBody?.prompt_cache_key,
-      buildPromptCacheKey({ provider_id: "openai-codex", model: "gpt-5.4", session_id: "s", prompt_epoch_id: "pe_cache_epoch" }),
-    );
-    assert.equal(requestBody?.prompt_cache_retention, "24h");
+    assert.equal(Object.hasOwn(requestBody ?? {}, "prompt_cache_key"), false);
+    assert.equal(Object.hasOwn(requestBody ?? {}, "prompt_cache_retention"), false);
     assert.equal(Object.hasOwn(requestBody ?? {}, "temperature"), false);
     assert.equal(Object.hasOwn(requestBody ?? {}, "max_output_tokens"), false);
     const input = requestBody?.input as Array<Record<string, unknown>>;
     assert.equal(input.length, 1);
     assert.equal(input[0]?.role, "user");
+  } finally {
+    server.close();
+  }
+});
+
+test("first-party OpenAI Responses requests include extended prompt cache retention", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      requestBody = JSON.parse(body) as Record<string, unknown>;
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+      });
+      writeSse(res, {
+        type: "response.created",
+        response: { id: "resp_openai", model: "gpt-5.5", usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 } },
+      });
+      writeSse(res, { type: "response.output_text.delta", delta: "ok" });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "openai";
+    next.model_setup.profile = "openai_responses";
+    next.model_setup.api_key = "openai-token";
+    next.model_setup.model = "gpt-5.5";
+    const gateway = new ModelGateway(next);
+    const response = await gateway.stream({
+      session_id: "s",
+      run_id: "r",
+      mode: "direct",
+      provider_id: "openai",
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: "Be concise." },
+        { role: "user", content: "ping" },
+      ],
+      tools: [],
+      prompt_epoch_id: "pe_openai_cache_epoch",
+    });
+    assert.equal(response.content, "ok");
+    assert.equal(requestBody?.prompt_cache_retention, "24h");
+    assert.equal(
+      requestBody?.prompt_cache_key,
+      buildPromptCacheKey({ provider_id: "openai", model: "gpt-5.5", session_id: "s", prompt_epoch_id: "pe_openai_cache_epoch" }),
+    );
   } finally {
     server.close();
   }

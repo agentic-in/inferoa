@@ -21,7 +21,7 @@ export interface ModelSetup {
   cache_salt?: string;
 }
 
-export type PromptCacheRetention = "24h";
+export type PromptCacheRetention = "in_memory" | "24h";
 
 export interface OmniEndpointConfig {
   base_url?: string;

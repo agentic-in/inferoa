@@ -16,7 +16,9 @@ export function openAiResponsesPromptCacheControls(
   }
   return {
     prompt_cache_key: promptCacheKey,
-    prompt_cache_retention: request.prompt_cache_retention ?? DEFAULT_PROMPT_CACHE_RETENTION,
+    ...(supportsOpenAiPromptCacheRetention(setup)
+      ? { prompt_cache_retention: request.prompt_cache_retention ?? DEFAULT_PROMPT_CACHE_RETENTION }
+      : {}),
   };
 }
 
@@ -32,5 +34,9 @@ export function buildPromptCacheKey(request: Pick<ModelRequest, "provider_id" | 
 }
 
 function supportsOpenAiPromptCacheControls(setup: ModelSetup): boolean {
-  return setup.provider === "external" && (setup.provider_id === "openai" || setup.provider_id === "openai-codex");
+  return setup.provider === "external" && setup.provider_id === "openai";
+}
+
+function supportsOpenAiPromptCacheRetention(setup: ModelSetup): boolean {
+  return setup.provider === "external" && setup.provider_id === "openai";
 }
