@@ -33,6 +33,16 @@ test("cache footer shows cached-token hit rate when exposed", () => {
   assert.doesNotMatch(footer, /^cache hit/);
 });
 
+test("cache footer hides zero percent prefix cache hits", () => {
+  const footer = stripAnsi(renderCacheFooter({
+    usage: { prompt_tokens: 1000, cached_prompt_tokens: 0, completion_tokens: 20 },
+    latencyMs: 12_000,
+  }));
+
+  assert.doesNotMatch(footer, /prefix cache hit/);
+  assert.match(footer, /worked for 12s/);
+});
+
 test("cache footer labels first chat turn as prefix cache warmup", () => {
   const rawFooter = renderCacheFooter({
     usage: { prompt_tokens: 1000, cached_prompt_tokens: 50, completion_tokens: 20 },

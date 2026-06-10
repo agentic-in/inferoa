@@ -10,13 +10,13 @@ test("mode footer surfaces plan readiness, research state, and goal progress", (
   const rendered = renderModeMetadataRight({
     plan: planState({ body: "1. inspect\n2. verify" }),
     autoresearch: autoresearchState({ pendingRunId: 3 }),
-    goal: goalState(),
-  });
+    goal: goalState({ objective: "improve codebase quality", timeUsedMs: 65_000 }),
+  }, { nowMs: 10_000, activeRunStartedAtMs: 8_000 });
 
   const plain = stripAnsi(rendered ?? "");
   assert.match(plain, /Plan ready/);
   assert.match(plain, /Research pending 3/);
-  assert.match(plain, /Goal 1\/3/);
+  assert.match(plain, /Goal .*improve codebase quality .*horizon 1 .*1\/3 .*1m 7s/);
 });
 
 test("mode footer keeps draft plan and blocked goal details compact", () => {
@@ -27,7 +27,7 @@ test("mode footer keeps draft plan and blocked goal details compact", () => {
 
   const plain = stripAnsi(rendered ?? "");
   assert.match(plain, /Plan drafting/);
-  assert.match(plain, /Goal 1\/3 1 blocked/);
+  assert.match(plain, /Goal .*Improve long horizon flow .*horizon 1 .*1\/3 1 blocked/);
 });
 
 test("mode footer hides inactive or closed modes", () => {
@@ -54,16 +54,16 @@ function planState(input: { status?: PlanState["plan"]["status"]; enabled?: bool
   };
 }
 
-function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: boolean; blocked?: boolean } = {}): GoalState {
+function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: boolean; blocked?: boolean; objective?: string; timeUsedMs?: number } = {}): GoalState {
   return {
     enabled: input.enabled ?? true,
     goal: {
       id: "goal_1",
-      objective: "Improve long horizon flow",
+      objective: input.objective ?? "Improve long horizon flow",
       status: input.status ?? "active",
       tokens_used: 0,
-      time_used_ms: 0,
-      time_used_seconds: 0,
+      time_used_ms: input.timeUsedMs ?? 0,
+      time_used_seconds: Math.floor((input.timeUsedMs ?? 0) / 1000),
       tool_rounds_used: 0,
       tool_calls_used: 0,
       horizon_generation: 1,

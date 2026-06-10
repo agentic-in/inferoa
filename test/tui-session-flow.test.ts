@@ -199,6 +199,49 @@ test("goal continuation queues a hidden foreground prompt instead of a daemon jo
   }
 });
 
+test("composer metadata reuses mode state while session events are unchanged", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-composer-metadata-cache-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_composer_metadata_cache", root: stateDir, alias: "composer-metadata-cache" };
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      createModeSession: (title: string) => { session_id: string };
+      composerMetadataRight: () => string | undefined;
+    };
+    const session = view.createModeSession("goal metadata cache");
+    writeGoalState(store, session.session_id, createGoalState({ objective: "improve codebase quality" }), "run_goal");
+    const originalListEvents = store.listEvents.bind(store);
+    let listEventsCalls = 0;
+    (store as unknown as { listEvents: typeof store.listEvents }).listEvents = ((sessionId: string, limit?: number) => {
+      listEventsCalls += 1;
+      return originalListEvents(sessionId, limit);
+    }) as typeof store.listEvents;
+
+    const first = view.composerMetadataRight();
+    const callsAfterFirst = listEventsCalls;
+    const second = view.composerMetadataRight();
+    store.appendEvent({ session_id: session.session_id, type: "session.note", data: { note: "changed" } });
+    const third = view.composerMetadataRight();
+
+    assert.ok(first);
+    assert.equal(second, first);
+    assert.equal(listEventsCalls, callsAfterFirst + 3);
+    assert.equal(third, first);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("bare goal command chooses auto or explicit before asking for the objective", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-setup-order-"));
   const store = await SessionStore.open(stateDir);

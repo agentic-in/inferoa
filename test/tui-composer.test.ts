@@ -313,6 +313,31 @@ test("welcome composer centers Inferoa wordmark and keeps slash and skill afford
   assert.match(withSuggestions.lines.map((line) => stripAnsi(line)).join("\n"), /\/goal/);
 });
 
+test("welcome slash launcher keeps a compact portrait hint", () => {
+  const rendered = renderWelcomeComposerSurface({
+    buffer: "/",
+    cursor: 1,
+    items: Array.from({ length: 18 }, (_, index) => ({
+      label: index === 0 ? "/setup" : `/command-${index}`,
+      description: "Open endpoint, provider, and model setup with long details",
+      kind: "command" as const,
+    })),
+    selected: 0,
+    width: 116,
+    height: 44,
+    workspaceRoot: "/Users/bitliu/local-workbench/work/vllm/semantic-router",
+    mode: "direct",
+    model: "gpt-5.5",
+    contextWindow: 1_000_000,
+  });
+  const lines = rendered.lines.map((line) => stripAnsi(line));
+  const hint = lines.find((line) => line.includes("18 options")) ?? "";
+
+  assert.match(hint, /tab · enter · esc clear/);
+  assert.doesNotMatch(hint, /enter open\/submit/);
+  assert.equal(lines.every((line) => visibleWidth(line) <= 116), true);
+});
+
 test("welcome composer can surface compact context engine status", () => {
   const rendered = renderWelcomeComposerSurface({
     buffer: "",

@@ -27,7 +27,7 @@ export function renderCacheFooter(input: CacheFooterInput): string {
   const usage = input.usage;
   const hit = cacheHitRate(usage);
   const parts: string[] = [];
-  if (input.showCacheHit !== false && hit !== undefined) {
+  if (input.showCacheHit !== false && hit !== undefined && hit > 0) {
     parts.push(formatFooterHitRate(hit, input.cacheKind ?? "hit"));
   }
   if (input.latencyMs !== undefined) {

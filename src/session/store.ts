@@ -419,6 +419,13 @@ export class SessionStore {
     }));
   }
 
+  latestEventId(sessionId: string): number {
+    const row = this.db
+      .prepare("SELECT id FROM events WHERE session_id = ? ORDER BY id DESC LIMIT 1")
+      .get(sessionId) as { id?: number } | undefined;
+    return Number(row?.id ?? 0);
+  }
+
   acquireLock(sessionId: string, ownerClientId: string, ownerKind: "cli" | "daemon", staleMs = 60_000): SessionLock {
     const now = nowIso();
     const existing = this.db.prepare("SELECT * FROM locks WHERE session_id = ?").get(sessionId) as SessionLock | undefined;

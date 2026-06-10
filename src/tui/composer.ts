@@ -406,7 +406,7 @@ export function renderWelcomeComposerSurface(options: WelcomeComposerRenderOptio
   if (options.items.length) {
     const page = composerSuggestionWindow(options.items, options.selected, WELCOME_COMPOSER_SUGGESTION_PAGE_SIZE);
     lines.push(...page.items.map((item, offset) => `${" ".repeat(left + 1)}${renderComposerSuggestion(item, page.startIndex + offset === options.selected, boxWidth - 1)}`));
-    lines.push(`${" ".repeat(left + 1)}${renderComposerHintLine(composerSuggestionHint(options.items[0]?.kind, page), boxWidth - 1, "")}`);
+    lines.push(`${" ".repeat(left + 1)}${renderComposerHintLine(welcomeComposerSuggestionHint(options.items[0]?.kind, page, boxWidth - 1), boxWidth - 1, "")}`);
   } else if (options.notice) {
     lines.push(`${" ".repeat(left + 1)}${renderComposerNoticeLine(options.notice, boxWidth - 1)}`);
   } else {
@@ -452,6 +452,19 @@ function composerSuggestionHint(kind: ComposerSuggestion["kind"] | undefined, pa
   const action = kind === "skill" ? "tab insert skill" : "tab complete";
   const pagePart = page.totalPages > 1 ? `${page.pageIndex + 1}/${page.totalPages} · ${page.totalItems} options · ←/→ page · ` : "";
   return `${pagePart}${action} · enter open/submit · ↑/↓ choose · esc clear`;
+}
+
+function welcomeComposerSuggestionHint(kind: ComposerSuggestion["kind"] | undefined, page: ComposerSuggestionWindow<unknown>, width: number): string {
+  const action = kind === "skill" ? "tab skill" : "tab";
+  const pagePart = page.totalPages > 1 ? `${page.pageIndex + 1}/${page.totalPages} · ${page.totalItems} options · ` : "";
+  const variants = page.totalPages > 1
+    ? [
+        `${pagePart}←/→ page · ${action} · enter · esc clear`,
+        `${pagePart}${action} · enter · esc clear`,
+        `${action} · enter · esc clear`,
+      ]
+    : [`${action} · enter · esc clear`];
+  return variants.find((hint) => visibleWidth(hint) <= width) ?? variants.at(-1)!;
 }
 
 function renderComposerHintLine(hint: string, width: number, prefix = "  "): string {

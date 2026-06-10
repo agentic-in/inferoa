@@ -145,6 +145,14 @@ interface GoalStartOptions {
   strategy?: GoalStrategyInput;
 }
 
+interface ComposerMetadataRightCache {
+  sessionId: string;
+  latestEventId: number;
+  activeRunStartedAtMs?: number;
+  activeRunElapsedSecond: number;
+  value?: string;
+}
+
 interface EndpointProbeResult {
   models: string[];
   errors: string[];
@@ -270,6 +278,9 @@ export class TuiApp {
   #promptWorkerScheduled = false;
   #goalSupervisorActive = false;
   #activeAbort: AbortController | undefined;
+  #activeRunStartedAtMs: number | undefined;
+  #lastGoalMetadataRedrawAtMs = 0;
+  #composerMetadataRightCache: ComposerMetadataRightCache | undefined;
   #inputHistory = createComposerInputHistory();
   #welcomeCodeIntelligenceStarted = false;
   #welcomeCodeIntelligenceStop: (() => void) | undefined;
@@ -471,6 +482,17 @@ export class TuiApp {
     }
     this.#composerQueue = lines;
     this.#activeComposerRedraw?.();
+  }
+
+  private shouldRefreshGoalMetadata(nowMs: number): boolean {
+    if (!this.#goalSupervisorActive || this.#activeRunStartedAtMs === undefined) {
+      return false;
+    }
+    if (nowMs - this.#lastGoalMetadataRedrawAtMs < 1000) {
+      return false;
+    }
+    this.#lastGoalMetadataRedrawAtMs = nowMs;
+    return true;
   }
 
   private clearQueueFooter(): void {
@@ -1220,12 +1242,41 @@ export class TuiApp {
   private composerMetadataRight(): string | undefined {
     const session = this.optionalSession();
     if (!session) {
+      this.#composerMetadataRightCache = undefined;
       return undefined;
+    }
+    const nowMs = Date.now();
+    const latestEventId = this.app.store.latestEventId(session.session_id);
+    const activeRunElapsedSecond = this.activeRunElapsedSecond(nowMs);
+    const cached = this.#composerMetadataRightCache;
+    if (
+      cached &&
+      cached.sessionId === session.session_id &&
+      cached.latestEventId === latestEventId &&
+      cached.activeRunStartedAtMs === this.#activeRunStartedAtMs &&
+      cached.activeRunElapsedSecond === activeRunElapsedSecond
+    ) {
+      return cached.value;
     }
     const plan = readPlanState(this.app.store, session.session_id);
     const autoresearch = readAutoresearchState(this.app.store, session.session_id);
     const goal = readGoalState(this.app.store, session.session_id);
-    return renderModeMetadataRight({ plan, autoresearch, goal });
+    const value = renderModeMetadataRight({ plan, autoresearch, goal }, { nowMs, activeRunStartedAtMs: this.#activeRunStartedAtMs });
+    this.#composerMetadataRightCache = {
+      sessionId: session.session_id,
+      latestEventId,
+      activeRunStartedAtMs: this.#activeRunStartedAtMs,
+      activeRunElapsedSecond,
+      value,
+    };
+    return value;
+  }
+
+  private activeRunElapsedSecond(nowMs: number): number {
+    if (this.#activeRunStartedAtMs === undefined) {
+      return -1;
+    }
+    return Math.floor(Math.max(0, nowMs - this.#activeRunStartedAtMs) / 1000);
   }
 
   private inputPrompt(): string {
@@ -4122,6 +4173,8 @@ export class TuiApp {
       this.renderSubmittedPrompt(prompt);
     }
     const startedAt = Date.now();
+    this.#activeRunStartedAtMs = startedAt;
+    this.#lastGoalMetadataRedrawAtMs = startedAt;
     const markdown = new MarkdownStreamRenderer({ width: Math.max(40, terminalWidth() - 4) });
     const renderState: { lastSegment: "none" | "assistant" | "tool" } = {
       lastSegment: "none",
@@ -4257,6 +4310,9 @@ export class TuiApp {
       if (this.#activeAbort === abort) {
         this.#activeAbort = undefined;
       }
+      if (this.#activeRunStartedAtMs === startedAt) {
+        this.#activeRunStartedAtMs = undefined;
+      }
     }
   }
 
@@ -4276,6 +4332,10 @@ export class TuiApp {
       const width = safeTerminalWidth();
       this.#composerActivity = renderActivityLine(currentLabel, now - startedAt, frameIndex, width);
       frameIndex += 1;
+      if (this.shouldRefreshGoalMetadata(now)) {
+        this.#activeComposerRedraw?.();
+        return;
+      }
       if (!this.#activeComposerActivityRedraw?.()) {
         this.#activeComposerRedraw?.();
       }
