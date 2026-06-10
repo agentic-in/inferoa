@@ -147,6 +147,117 @@ test("first-party OpenAI Responses requests include extended prompt cache retent
   }
 });
 
+test("OpenAI Responses preserves debug diagnostics for empty successful streams", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "x-request-id": "req_empty_debug",
+    });
+    writeSse(res, {
+      type: "response.completed",
+      response: {
+        id: "resp_empty_debug",
+        model: "gpt-5.5",
+        status: "completed",
+        usage: { input_tokens: 270_000, output_tokens: 0, total_tokens: 270_000 },
+        output: [],
+      },
+    });
+    res.end("data: [DONE]\n\n");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "openai";
+    next.model_setup.profile = "openai_responses";
+    next.model_setup.api_key = "openai-token";
+    next.model_setup.model = "gpt-5.5";
+    const gateway = new ModelGateway(next);
+    const response = await gateway.stream({
+      session_id: "s",
+      run_id: "r",
+      mode: "direct",
+      provider_id: "openai",
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "ping" }],
+      tools: [],
+      prompt_epoch_id: "pe_empty_debug",
+    });
+
+    assert.equal(response.http_status, 200);
+    assert.equal(response.content, "");
+    assert.deepEqual(response.tool_calls, []);
+    assert.equal(response.diagnostics?.http_status, 200);
+    assert.equal(response.diagnostics?.response_status, "completed");
+    assert.deepEqual(response.diagnostics?.stream_event_types, { "response.completed": 1 });
+    assert.equal((response.diagnostics?.terminal_raw_event as Record<string, unknown> | undefined)?.type, "response.completed");
+    assert.equal((response.raw as Record<string, unknown> | undefined)?.type, "response.completed");
+  } finally {
+    server.close();
+  }
+});
+
+test("OpenAI Responses turns incomplete streams into diagnostic errors", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+    });
+    writeSse(res, {
+      type: "response.incomplete",
+      response: {
+        id: "resp_incomplete_debug",
+        model: "gpt-5.5",
+        status: "incomplete",
+        incomplete_details: { reason: "max_prompt_tokens" },
+        usage: { input_tokens: 274_000, output_tokens: 0, total_tokens: 274_000 },
+      },
+    });
+    res.end("data: [DONE]\n\n");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    const next = config(`http://127.0.0.1:${address!.port}`);
+    next.model_setup.provider = "external";
+    next.model_setup.provider_id = "openai";
+    next.model_setup.profile = "openai_responses";
+    next.model_setup.api_key = "openai-token";
+    next.model_setup.model = "gpt-5.5";
+    const gateway = new ModelGateway(next);
+    let caught: unknown;
+    try {
+      await gateway.stream({
+        session_id: "s",
+        run_id: "r",
+        mode: "direct",
+        provider_id: "openai",
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "ping" }],
+        tools: [],
+        prompt_epoch_id: "pe_incomplete_debug",
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    assert.ok(caught instanceof Error);
+    assert.match(caught.message, /Responses stream ended with response\.incomplete/);
+    const diagnostics = (caught as { diagnostics?: Record<string, unknown> }).diagnostics;
+    assert.equal(diagnostics?.http_status, 200);
+    assert.equal(diagnostics?.response_status, "incomplete");
+    assert.deepEqual(diagnostics?.incomplete_details, { reason: "max_prompt_tokens" });
+    assert.equal((diagnostics?.abnormal_raw_event as Record<string, unknown> | undefined)?.type, "response.incomplete");
+  } finally {
+    server.close();
+  }
+});
+
 test("Copilot Claude models use Anthropic Messages with Copilot bearer auth", async () => {
   let requestPath = "";
   let authorization = "";

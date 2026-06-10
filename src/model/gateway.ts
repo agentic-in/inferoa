@@ -23,6 +23,13 @@ interface OpenAiToolCallAccumulator {
   arguments: string;
 }
 
+class ModelGatewayError extends Error {
+  constructor(message: string, readonly diagnostics?: JsonObject) {
+    super(message);
+    this.name = "ModelGatewayError";
+  }
+}
+
 export class ModelGateway {
   constructor(private readonly config: VllmAgentConfig) {}
 
@@ -104,8 +111,7 @@ export class ModelGateway {
     });
     const headerSignals = signalHeaders(response.headers);
     if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Model request failed ${response.status}: ${text}`);
+      throw await modelGatewayHttpError("Model", response, headerSignals);
     }
 
     const decoder = new TextDecoder();
@@ -193,6 +199,7 @@ export class ModelGateway {
       content,
       tool_calls: parsedToolCalls,
       usage,
+      http_status: response.status,
       request_id: headerSignals["x-request-id"] ?? headerSignals["x-vllm-request-id"] ?? headerSignals["request-id"],
       response_id: responseId,
       model: responseModel ?? request.model,
@@ -211,6 +218,12 @@ export class ModelGateway {
     const base = modelBaseUrl(setup).replace(/\/v1$/, "");
     const headers = new Headers(authHeaders(setup, "messages"));
     headers.set("anthropic-version", "2023-06-01");
+    headers.set("x-session-id", request.session_id);
+    headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-run-id", request.run_id);
+    if (request.request_class) {
+      headers.set("x-inferoa-request-class", request.request_class);
+    }
     const system = request.messages.find((message) => message.role === "system")?.content;
     const body = {
       model: request.model || setup.model,
@@ -225,8 +238,9 @@ export class ModelGateway {
       body: JSON.stringify(body),
       signal,
     });
+    const headerSignals = signalHeaders(response.headers);
     if (!response.ok) {
-      throw new Error(`Anthropic request failed ${response.status}: ${await response.text()}`);
+      throw await modelGatewayHttpError("Anthropic", response, headerSignals);
     }
     const json = (await response.json()) as Record<string, unknown>;
     const contentBlocks = Array.isArray(json.content) ? (json.content as Record<string, unknown>[]) : [];
@@ -249,6 +263,8 @@ export class ModelGateway {
       content,
       tool_calls: toolCalls,
       usage: normalizeUsage(json.usage),
+      http_status: response.status,
+      request_id: headerSignals["x-request-id"] ?? headerSignals["request-id"],
       response_id: typeof json.id === "string" ? json.id : undefined,
       model: typeof json.model === "string" ? json.model : request.model,
       raw: json as JsonObject,
@@ -266,6 +282,13 @@ export class ModelGateway {
     const model = request.model || setup.model;
     const apiKey = endpointApiKey(setup);
     const url = `${base}/v1beta/models/${encodeURIComponent(model ?? "")}:generateContent${apiKey ? `?key=${encodeURIComponent(apiKey)}` : ""}`;
+    const headers = new Headers(authHeaders({ ...setup, api_key: undefined, api_key_ref: undefined }, "chat_completions"));
+    headers.set("x-session-id", request.session_id);
+    headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-run-id", request.run_id);
+    if (request.request_class) {
+      headers.set("x-inferoa-request-class", request.request_class);
+    }
     const body = {
       contents: request.messages
         .filter((message) => message.role !== "system")
@@ -281,12 +304,13 @@ export class ModelGateway {
     };
     const response = await fetch(url, {
       method: "POST",
-      headers: authHeaders({ ...setup, api_key: undefined, api_key_ref: undefined }, "chat_completions"),
+      headers,
       body: JSON.stringify(body),
       signal,
     });
+    const headerSignals = signalHeaders(response.headers);
     if (!response.ok) {
-      throw new Error(`Gemini request failed ${response.status}: ${await response.text()}`);
+      throw await modelGatewayHttpError("Gemini", response, headerSignals);
     }
     const json = (await response.json()) as Record<string, unknown>;
     const candidates = Array.isArray(json.candidates) ? (json.candidates as Record<string, unknown>[]) : [];
@@ -299,6 +323,8 @@ export class ModelGateway {
       content,
       tool_calls: [],
       usage: normalizeUsage(json.usageMetadata),
+      http_status: response.status,
+      request_id: headerSignals["x-request-id"] ?? headerSignals["request-id"],
       model,
       raw: json as JsonObject,
     };
@@ -337,20 +363,26 @@ export class ModelGateway {
     });
     const headerSignals = signalHeaders(response.headers);
     if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Responses request failed ${response.status}: ${text}`);
+      throw await modelGatewayHttpError("Responses", response, headerSignals);
     }
 
     const decoder = new TextDecoder();
     const reader = response.body.getReader();
     const streamWarnings: string[] = [];
     const toolCalls = new Map<number, OpenAiToolCallAccumulator>();
+    const streamEventTypes: Record<string, number> = {};
     let buffer = "";
     let content = "";
     let responseId: string | undefined;
     let responseModel: string | undefined;
+    let responseStatus: string | undefined;
+    let responseError: JsonValue | undefined;
+    let incompleteDetails: JsonValue | undefined;
     let usage: ReturnType<typeof normalizeUsage>;
     let lastRaw: JsonObject | undefined;
+    let terminalRaw: JsonObject | undefined;
+    let abnormalRaw: JsonObject | undefined;
+    let streamEventCount = 0;
 
     while (true) {
       throwIfAborted(signal);
@@ -377,10 +409,21 @@ export class ModelGateway {
         }
         lastRaw = json as JsonObject;
         const eventType = typeof json.type === "string" ? json.type : "";
+        streamEventCount += 1;
+        streamEventTypes[eventType || "unknown"] = (streamEventTypes[eventType || "unknown"] ?? 0) + 1;
         const responsePayload = json.response as Record<string, unknown> | undefined;
         responseId = typeof responsePayload?.id === "string" ? responsePayload.id : responseId;
         responseModel = typeof responsePayload?.model === "string" ? responsePayload.model : responseModel;
+        responseStatus = typeof responsePayload?.status === "string" ? responsePayload.status : responseStatus;
+        responseError = responsePayload?.error !== undefined ? jsonValue(responsePayload.error) : responseError;
+        incompleteDetails = responsePayload?.incomplete_details !== undefined ? jsonValue(responsePayload.incomplete_details) : incompleteDetails;
         usage = normalizeUsage(responsePayload?.usage) ?? usage;
+        if (eventType === "response.completed" || eventType === "response.failed" || eventType === "response.incomplete") {
+          terminalRaw = json as JsonObject;
+        }
+        if (eventType.includes("failed") || eventType.includes("incomplete") || json.error !== undefined || responsePayload?.error !== undefined || responsePayload?.incomplete_details !== undefined) {
+          abnormalRaw = json as JsonObject;
+        }
         if (eventType === "response.output_text.delta" && typeof json.delta === "string") {
           content += json.delta;
           onDelta?.(json.delta);
@@ -411,6 +454,24 @@ export class ModelGateway {
       }
     }
 
+    const diagnostics = openAiResponsesDiagnostics({
+      httpStatus: response.status,
+      headerSignals,
+      streamEventCount,
+      streamEventTypes,
+      responseStatus,
+      responseError,
+      incompleteDetails,
+      lastRaw,
+      terminalRaw,
+      abnormalRaw,
+      streamWarnings,
+    });
+    const failureType = responsesFailureType(responseStatus, abnormalRaw);
+    if (failureType) {
+      throw new ModelGatewayError(`Responses stream ended with ${failureType}`, diagnostics);
+    }
+
     const parsedToolCalls = [...toolCalls.entries()]
       .sort(([a], [b]) => a - b)
       .map(([, call], index) => parseToolCall(call, index))
@@ -420,11 +481,13 @@ export class ModelGateway {
       content,
       tool_calls: parsedToolCalls,
       usage,
+      http_status: response.status,
       request_id: headerSignals["x-request-id"] ?? headerSignals["request-id"],
       response_id: responseId,
       model: responseModel ?? request.model,
       route: routeFromHeaders(headerSignals),
       raw: streamWarnings.length ? { ...(lastRaw ?? {}), stream_warnings: streamWarnings as never } : lastRaw,
+      diagnostics,
     };
   }
 
@@ -436,8 +499,10 @@ export class ModelGateway {
       base_url: this.config.model_setup.base_url,
       model: response.model ?? request.model,
       usage: response.usage,
+      http_status: response.http_status,
       request_id: response.request_id,
       response_id: response.response_id,
+      response_status: typeof response.diagnostics?.response_status === "string" ? response.diagnostics.response_status : undefined,
       request_class: request.request_class,
       prompt_hash: request.prompt_hash,
       tool_schema_hash: request.tool_schema_hash,
@@ -445,8 +510,137 @@ export class ModelGateway {
       prompt_cache_key: promptCache.prompt_cache_key,
       prompt_cache_retention: promptCache.prompt_cache_retention,
       router: response.route,
+      response_diagnostics: response.diagnostics,
     };
   }
+}
+
+async function modelGatewayHttpError(label: string, response: Response, headerSignals: Record<string, string>): Promise<ModelGatewayError> {
+  const text = await response.text().catch(() => "");
+  return new ModelGatewayError(`${label} request failed ${response.status}: ${text}`, httpErrorDiagnostics(response.status, headerSignals, text));
+}
+
+function httpErrorDiagnostics(httpStatus: number, headerSignals: Record<string, string>, text: string): JsonObject {
+  const parsed = parseJsonValue(text);
+  return {
+    http_status: httpStatus,
+    headers: headerSignals,
+    response_status: "http_error",
+    response_error: responseErrorFromBody(parsed, text),
+    raw_error_body: rawErrorBody(parsed, text),
+  };
+}
+
+function openAiResponsesDiagnostics(input: {
+  httpStatus: number;
+  headerSignals: Record<string, string>;
+  streamEventCount: number;
+  streamEventTypes: Record<string, number>;
+  responseStatus?: string;
+  responseError?: JsonValue;
+  incompleteDetails?: JsonValue;
+  lastRaw?: JsonObject;
+  terminalRaw?: JsonObject;
+  abnormalRaw?: JsonObject;
+  streamWarnings: string[];
+}): JsonObject {
+  return {
+    http_status: input.httpStatus,
+    headers: input.headerSignals,
+    stream_event_count: input.streamEventCount,
+    stream_event_types: input.streamEventTypes,
+    response_status: input.responseStatus,
+    response_error: input.responseError,
+    incomplete_details: input.incompleteDetails,
+    last_raw_event: boundedJsonObject(input.lastRaw),
+    terminal_raw_event: boundedJsonObject(input.terminalRaw),
+    abnormal_raw_event: boundedJsonObject(input.abnormalRaw),
+    stream_warnings: input.streamWarnings,
+  };
+}
+
+function parseJsonValue(text: string): JsonValue | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed) as JsonValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function responseErrorFromBody(parsed: JsonValue | undefined, text: string): JsonValue {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const body = parsed as JsonObject;
+    if (body.error !== undefined) {
+      return jsonValue(body.error);
+    }
+    const errorFields = pickStringFields(body, ["code", "type", "status", "message"]);
+    if (Object.keys(errorFields).length > 0) {
+      return errorFields;
+    }
+  }
+  return { message: truncateDiagnosticText(text) };
+}
+
+function rawErrorBody(parsed: JsonValue | undefined, text: string): JsonObject {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return boundedJsonObject(parsed as JsonObject) ?? {};
+  }
+  return { text: truncateDiagnosticText(text) };
+}
+
+function pickStringFields(body: JsonObject, keys: string[]): JsonObject {
+  const out: JsonObject = {};
+  for (const key of keys) {
+    const value = body[key];
+    if (typeof value === "string") {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function responsesFailureType(responseStatus: string | undefined, abnormalRaw: JsonObject | undefined): string | undefined {
+  const eventType = typeof abnormalRaw?.type === "string" ? abnormalRaw.type : undefined;
+  if (eventType === "response.failed" || eventType === "response.incomplete") {
+    return eventType;
+  }
+  if (responseStatus === "failed" || responseStatus === "incomplete") {
+    return `response.${responseStatus}`;
+  }
+  if (abnormalRaw?.error !== undefined) {
+    return eventType ? `${eventType} error` : "response.error";
+  }
+  return undefined;
+}
+
+function truncateDiagnosticText(value: string, limit = 20_000): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}...[truncated ${value.length - limit} chars]`;
+}
+
+function boundedJsonObject(value: JsonObject | undefined, limit = 20_000): JsonObject | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const text = JSON.stringify(value);
+  if (text.length <= limit) {
+    return value;
+  }
+  return {
+    truncated: true,
+    chars: text.length,
+    preview: text.slice(0, limit),
+  };
+}
+
+function jsonValue(value: unknown): JsonValue {
+  if (value === undefined || value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
 function sortedTools(tools: ToolDefinition[]): ToolDefinition[] {

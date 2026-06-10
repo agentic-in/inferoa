@@ -182,6 +182,296 @@ test("runtime surfaces context compression and continues after compacting", asyn
   }
 });
 
+test("runtime compacts and retries after provider context length failure", async () => {
+  const serverCalls: { request_class?: string; body: unknown }[] = [];
+  let interactiveAttempts = 0;
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url?.startsWith("/backend-api/codex/models")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ models: [{ slug: "gpt-5.5" }] }));
+      return;
+    }
+    if (req.method !== "POST" || req.url !== "/backend-api/codex/responses") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : undefined;
+      serverCalls.push({ request_class: requestClass, body: JSON.parse(body) as unknown });
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "x-request-id": `req_${serverCalls.length}`,
+      });
+      if (requestClass === "interactive") {
+        interactiveAttempts += 1;
+      }
+      if (requestClass === "interactive" && interactiveAttempts === 1) {
+        writeSse(res, {
+          type: "response.created",
+          response: { id: "resp_context_limit", model: "gpt-5.5", status: "in_progress" },
+        });
+        writeSse(res, {
+          type: "error",
+          error: {
+            code: "context_length_exceeded",
+            message: "Your input exceeds the context window of this model.",
+          },
+        });
+        writeSse(res, {
+          type: "response.failed",
+          response: {
+            id: "resp_context_limit",
+            model: "gpt-5.5",
+            status: "failed",
+            error: {
+              code: "context_length_exceeded",
+              message: "Your input exceeds the context window of this model.",
+            },
+            incomplete_details: null,
+          },
+        });
+        res.end("data: [DONE]\n\n");
+        return;
+      }
+      const content = requestClass === "compaction" ? "Goal\n- Compacted after provider context limit." : "continued after provider context compaction";
+      writeSse(res, {
+        type: "response.created",
+        response: { id: `resp_${serverCalls.length}`, model: "gpt-5.5", status: "in_progress" },
+      });
+      writeSse(res, { type: "response.output_text.delta", delta: content });
+      writeSse(res, {
+        type: "response.completed",
+        response: {
+          id: `resp_${serverCalls.length}`,
+          model: "gpt-5.5",
+          status: "completed",
+          usage: { input_tokens: 512, output_tokens: 8, total_tokens: 520 },
+        },
+      });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-provider-limit-compress-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.model_setup.base_url = `http://127.0.0.1:${address.port}/backend-api/codex`;
+    config.model_setup.model = "gpt-5.5";
+    config.model_setup.provider = "external";
+    config.model_setup.provider_id = "openai-codex";
+    config.model_setup.profile = "openai_responses";
+    config.model_setup.api_key = "codex-token";
+    config.context.force_compression = false;
+    config.context.context_window = 1_024_000;
+    config.model_setup.context_window = 1_024_000;
+    const workspace: WorkspaceIdentity = { id: "w_provider_limit", root: dir, alias: "provider-limit" };
+    const session = store.createSession(workspace, "provider limit");
+
+    const statuses: RuntimeStatusEvent[] = [];
+    const runtime = new Runtime(config, workspace, store);
+    const result = await runtime.run({
+      session_id: session.session_id,
+      prompt: "continue after provider context failure",
+      onStatus: (event) => statuses.push(event),
+    });
+
+    assert.equal(result.content, "continued after provider context compaction");
+    assert.deepEqual(
+      serverCalls.map((call) => call.request_class),
+      ["interactive", "compaction", "interactive"],
+    );
+    assert.ok(statuses.some((event) => event.type === "compression_start" && event.reason === "provider-context-limit"));
+    const events = store.listEvents(session.session_id);
+    assert.equal(events.filter((event) => event.type === "model.request.failed").length, 1);
+    const compressionEvidence = events.find((event) => event.type === "evidence.context_compression" && event.run_id === result.run_id);
+    assert.equal(compressionEvidence?.data.reason, "provider-context-limit");
+    assert.equal((compressionEvidence?.data.provider_diagnostics as Record<string, unknown> | undefined)?.response_status, "failed");
+    assert.ok(events.some((event) => event.type === "run.completed"));
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("runtime treats OpenAI-compatible HTTP context errors as provider context limit", async () => {
+  const serverCalls: { request_class?: string; body: unknown }[] = [];
+  let interactiveAttempts = 0;
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "context-test" }] }));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/load") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ waiting: 0, running: 0 }));
+      return;
+    }
+    if (req.method === "GET" && req.url === "/metrics") {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("");
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : undefined;
+      serverCalls.push({ request_class: requestClass, body: JSON.parse(body) as unknown });
+      if (requestClass === "interactive") {
+        interactiveAttempts += 1;
+      }
+      if (requestClass === "interactive" && interactiveAttempts === 1) {
+        res.writeHead(400, { "content-type": "application/json", "x-request-id": "req_context_http" });
+        res.end(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+              message: "This model's maximum context length is 8192 tokens. However, you requested 9000 tokens.",
+            },
+          }),
+        );
+        return;
+      }
+      const content = requestClass === "compaction" ? "Goal\n- OpenAI-compatible context limit compacted." : "continued after OpenAI-compatible context compaction";
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      writeSse(res, { id: `resp_${serverCalls.length}`, model: "context-test", choices: [{ delta: { content } }] });
+      writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 128, completion_tokens: 8, total_tokens: 136 } });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-openai-compatible-limit-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const config = compressionConfig(`http://127.0.0.1:${address.port}/v1`);
+    config.context.force_compression = false;
+    config.context.context_window = 1_024_000;
+    config.model_setup.context_window = 1_024_000;
+    const workspace: WorkspaceIdentity = { id: "w_openai_compatible_limit", root: dir, alias: "openai-compatible-limit" };
+    const session = store.createSession(workspace, "openai compatible limit");
+    const runtime = new Runtime(config, workspace, store);
+    const result = await runtime.run({
+      session_id: session.session_id,
+      prompt: "continue after HTTP context failure",
+    });
+
+    assert.equal(result.content, "continued after OpenAI-compatible context compaction");
+    assert.deepEqual(serverCalls.map((call) => call.request_class), ["interactive", "compaction", "interactive"]);
+    const events = store.listEvents(session.session_id);
+    const compressionEvidence = events.find((event) => event.type === "evidence.context_compression" && event.run_id === result.run_id);
+    assert.equal(compressionEvidence?.data.reason, "provider-context-limit");
+    const diagnostics = compressionEvidence?.data.provider_diagnostics as Record<string, unknown> | undefined;
+    assert.equal(diagnostics?.http_status, 400);
+    assert.equal((diagnostics?.response_error as Record<string, unknown> | undefined)?.code, "context_length_exceeded");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("runtime treats Anthropic prompt-too-long errors as provider context limit", async () => {
+  const serverCalls: { request_class?: string; body: unknown }[] = [];
+  let interactiveAttempts = 0;
+  const server = createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/messages") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : undefined;
+      serverCalls.push({ request_class: requestClass, body: JSON.parse(body) as unknown });
+      if (requestClass === "interactive") {
+        interactiveAttempts += 1;
+      }
+      if (requestClass === "interactive" && interactiveAttempts === 1) {
+        res.writeHead(400, { "content-type": "application/json", "request-id": "req_anthropic_context" });
+        res.end(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "prompt is too long: 250000 tokens > 200000 maximum",
+            },
+          }),
+        );
+        return;
+      }
+      const text = requestClass === "compaction" ? "Goal\n- Anthropic prompt limit compacted." : "continued after Anthropic context compaction";
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: `msg_${serverCalls.length}`,
+          model: "claude-sonnet-4-0",
+          content: [{ type: "text", text }],
+          usage: { input_tokens: 128, output_tokens: 8 },
+        }),
+      );
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-anthropic-limit-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.model_setup.base_url = `http://127.0.0.1:${address.port}`;
+    config.model_setup.model = "claude-sonnet-4-0";
+    config.model_setup.provider = "external";
+    config.model_setup.provider_id = "anthropic";
+    config.model_setup.profile = "anthropic";
+    config.model_setup.api_key = "anthropic-token";
+    config.context.force_compression = false;
+    config.context.context_window = 1_024_000;
+    config.model_setup.context_window = 1_024_000;
+    const workspace: WorkspaceIdentity = { id: "w_anthropic_limit", root: dir, alias: "anthropic-limit" };
+    const session = store.createSession(workspace, "anthropic limit");
+    const runtime = new Runtime(config, workspace, store);
+    const result = await runtime.run({
+      session_id: session.session_id,
+      prompt: "continue after Anthropic context failure",
+    });
+
+    assert.equal(result.content, "continued after Anthropic context compaction");
+    assert.deepEqual(serverCalls.map((call) => call.request_class), ["interactive", "compaction", "interactive"]);
+    const events = store.listEvents(session.session_id);
+    const compressionEvidence = events.find((event) => event.type === "evidence.context_compression" && event.run_id === result.run_id);
+    assert.equal(compressionEvidence?.data.reason, "provider-context-limit");
+    const diagnostics = compressionEvidence?.data.provider_diagnostics as Record<string, unknown> | undefined;
+    assert.equal(diagnostics?.http_status, 400);
+    assert.match(String((diagnostics?.response_error as Record<string, unknown> | undefined)?.message ?? ""), /prompt is too long/);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("runtime does not compact solely from large history length", async () => {
   const serverCalls: { request_class?: string; body: Record<string, unknown> }[] = [];
   const server = createServer((req, res) => {

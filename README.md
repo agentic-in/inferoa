@@ -68,7 +68,7 @@ first-class:
   engine optimization rules so high-throughput, memory-efficient vLLM serving
   is not treated like generic chat traffic.
 
-## Tokenmaxxing Across The Inference Stack
+## The Tokenmaxxing Stack
 
 Inferoa is built on top of the vLLM ecosystem and extends tokenmaxxing across
 the inference stack:
@@ -80,7 +80,6 @@ the inference stack:
 | Context Optimization | [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph), [RTK](https://github.com/rtk-ai/rtk) | Select evidence and shrink mutable context without losing task continuity | Spend fewer prompt and tool-output tokens |
 | Intelligent routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Choose model paths by cost, safety, privacy, capability, and session pressure | Avoid one expensive path for every turn |
 | Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use high-throughput, memory-efficient serving and multimodal endpoints while respecting inference-engine optimization rules | Control cost, safety, privacy, and data sovereignty when an external frontier model is unnecessary |
-
 
 <div align="center">
 

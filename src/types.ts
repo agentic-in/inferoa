@@ -263,11 +263,13 @@ export interface ModelResponse {
   content: string;
   tool_calls: ToolCall[];
   usage?: ModelUsage;
+  http_status?: number;
   request_id?: string;
   response_id?: string;
   model?: string;
   route?: JsonObject;
   raw?: JsonObject;
+  diagnostics?: JsonObject;
 }
 
 export interface EndpointSignalSnapshot {
@@ -280,6 +282,8 @@ export interface EndpointSignalSnapshot {
   load?: JsonObject;
   request_id?: string;
   response_id?: string;
+  http_status?: number;
+  response_status?: string;
   request_class?: ModelRequest["request_class"];
   prompt_hash?: string;
   tool_schema_hash?: string;
@@ -289,6 +293,7 @@ export interface EndpointSignalSnapshot {
   cache_hit_rate?: number;
   router?: JsonObject;
   usage?: ModelUsage;
+  response_diagnostics?: JsonObject;
   cache_metrics?: JsonObject;
   omni_capabilities?: OmniCapabilityStatus[];
   headers?: Record<string, string>;

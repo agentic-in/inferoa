@@ -255,7 +255,57 @@ export class Runtime {
           },
         });
         options.onStatus?.({ type: "model_start", model: request.model });
-        response = await this.streamModelWithRetry(request, options.onDelta, options.onStatus, options.signal);
+        try {
+          response = await this.streamModelWithRetry(request, options.onDelta, options.onStatus, options.signal);
+        } catch (error) {
+          if (isContextLengthExceededError(error) && !compressedThisRun) {
+            const reason = "provider-context-limit";
+            options.onStatus?.({
+              type: "compression_start",
+              reason,
+              estimated_tokens: rebuilt.estimated_tokens,
+              threshold_tokens: rebuilt.estimated_tokens,
+            });
+            const compacted = await this.compressor.compact(sessionNow, rebuilt, availableTools, reason, {
+              activeRunId: runId,
+              currentPrompt,
+              skills: discoveredSkills,
+              enabledSkillNames,
+            });
+            compressedThisRun = true;
+            this.store.appendEvent({
+              session_id: session.session_id,
+              run_id: runId,
+              type: "evidence.context_compression",
+              data: {
+                reason,
+                estimated_tokens: rebuilt.estimated_tokens,
+                threshold_tokens: rebuilt.estimated_tokens,
+                provider_error: errorMessage(error),
+                provider_diagnostics: modelErrorDiagnostics(error) as never,
+                epoch_id: compacted.epoch_id,
+                archive_resource_uri: compacted.resource_uri,
+                archived_events: compacted.archived_events,
+                protected_tail_events: compacted.protected_tail_events,
+                protected_prompt_count: compacted.protected_user_prompts.length,
+                protected_user_prompts: compacted.protected_user_prompts,
+              },
+            });
+            options.onStatus?.({
+              type: "compression_end",
+              reason,
+              estimated_tokens: rebuilt.estimated_tokens,
+              threshold_tokens: rebuilt.estimated_tokens,
+              archive_resource_uri: compacted.resource_uri,
+              archived_events: compacted.archived_events,
+              protected_tail_events: compacted.protected_tail_events,
+              summary: compacted.summary,
+              protected_user_prompts: compacted.protected_user_prompts,
+            });
+            continue;
+          }
+          throw error;
+        }
         throwIfAborted(options.signal);
         const endpointSnapshot: EndpointSignalSnapshot = await this.endpointSignals.snapshot().catch((error) => ({
           mode: request.mode,
@@ -280,11 +330,14 @@ export class Runtime {
             content: response.content,
             tool_calls: response.tool_calls as never,
             usage: response.usage as never,
+            http_status: response.http_status,
             request_id: response.request_id,
             response_id: response.response_id,
             model: response.model,
             request_class: requestClass,
             visibility,
+            raw: response.raw as never,
+            diagnostics: response.diagnostics as never,
           },
         });
         goalTokenUsage += modelUsageTokenCost(response.usage);
@@ -505,6 +558,7 @@ export class Runtime {
               retryable,
               streamed_delta: emittedDelta,
               error: errorMessage(error),
+              diagnostics: modelErrorDiagnostics(error) as never,
             },
           });
           throw error;
@@ -527,6 +581,7 @@ export class Runtime {
             delay_ms: delayMs,
             max_attempts: retry.max_attempts,
             error: errorMessage(error),
+            diagnostics: modelErrorDiagnostics(error) as never,
           },
         });
         onStatus?.({
@@ -900,6 +955,69 @@ function modelErrorStatus(message: string): number | undefined {
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > 600 ? `${message.slice(0, 597)}...` : message;
+}
+
+function modelErrorDiagnostics(error: unknown): JsonObject | undefined {
+  const diagnostics = error && typeof error === "object" ? (error as { diagnostics?: unknown }).diagnostics : undefined;
+  if (!diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)) {
+    return undefined;
+  }
+  return diagnostics as JsonObject;
+}
+
+function isContextLengthExceededError(error: unknown): boolean {
+  const diagnostics = modelErrorDiagnostics(error);
+  const httpStatus = typeof diagnostics?.http_status === "number" ? diagnostics.http_status : modelErrorStatus(errorMessage(error));
+  if (httpStatus === 413) {
+    return true;
+  }
+  const haystack = [errorMessage(error), ...diagnosticStrings(diagnostics)].join("\n").toLowerCase();
+  return hasContextLimitCode(haystack) || hasContextLimitMessage(haystack);
+}
+
+function diagnosticStrings(value: unknown, output: string[] = [], depth = 0): string[] {
+  if (output.length >= 80 || depth > 5) {
+    return output;
+  }
+  if (typeof value === "string") {
+    output.push(value);
+    return output;
+  }
+  if (!value || typeof value !== "object") {
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      diagnosticStrings(item, output, depth + 1);
+    }
+    return output;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string" && /code|type|status|reason|message|error|details/i.test(key)) {
+      output.push(item);
+    } else {
+      diagnosticStrings(item, output, depth + 1);
+    }
+  }
+  return output;
+}
+
+function hasContextLimitCode(text: string): boolean {
+  return /\b(context_length_exceeded|context_length_error|context_window_exceeded|context_window_error|prompt_too_long|input_too_long|model_context_window_exceeded|max_context_length_exceeded|tokens_limit_exceeded)\b/i.test(
+    text,
+  );
+}
+
+function hasContextLimitMessage(text: string): boolean {
+  return (
+    /\bmaximum context (?:length|window)\b/i.test(text) ||
+    /\bcontext (?:length|window)\b.{0,120}\b(?:exceed|exceeds|exceeded|limit|maximum|too long|too large)\b/i.test(text) ||
+    /\b(?:exceed|exceeds|exceeded|over|larger than)\b.{0,120}\b(?:context (?:length|window)|token limit|maximum number of tokens|input token count)\b/i.test(text) ||
+    /\b(?:prompt|input|message|messages)\b.{0,80}\b(?:too long|too large)\b/i.test(text) ||
+    /\btoo many input tokens\b/i.test(text) ||
+    /\binput token count\b.{0,120}\b(?:exceed|exceeds|exceeded|maximum)\b/i.test(text) ||
+    /\brequested\b.{0,80}\btokens\b.{0,80}\bmaximum\b/i.test(text)
+  );
 }
 
 function modelRequestTimeoutError(timeoutMs: number): Error {
