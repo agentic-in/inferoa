@@ -155,6 +155,7 @@ export class CodeGraphContextEngine {
   constructor(
     private readonly config: ContextEngineConfig,
     private readonly workspace: WorkspaceIdentity,
+    private readonly agentConfig?: VllmAgentConfig,
   ) {
     this.statusSnapshot = this.enabled()
       ? { provider: "codegraph", state: "idle", watcher: "inactive" }
@@ -247,7 +248,7 @@ export class CodeGraphContextEngine {
   private async runIndexLifecycle(reason: string, options: { force?: boolean; signal?: AbortSignal }): Promise<ContextEngineStatus> {
     this.update({ provider: "codegraph", state: "indexing", phase: "initializing", current: undefined, total: undefined, error: undefined, reason });
     try {
-      await ensureCodeGraphIgnored(this.workspace.root);
+      await ensureCodeGraphIgnored(this.workspace, this.agentConfig);
       const { CodeGraph } = loadCodeGraphModule();
       const initialized = CodeGraph.isInitialized(this.workspace.root);
       const cg = initialized ? await CodeGraph.open(this.workspace.root) : await CodeGraph.init(this.workspace.root, { index: false });
@@ -772,8 +773,12 @@ function languagesFromStats(stats: CodeGraphStats): string[] | undefined {
     .sort();
 }
 
-async function ensureCodeGraphIgnored(workspaceRoot: string): Promise<void> {
-  const result = await runSmallCommand("git", ["rev-parse", "--git-dir"], workspaceRoot, 2000);
+async function ensureCodeGraphIgnored(workspace: WorkspaceIdentity, config?: VllmAgentConfig): Promise<void> {
+  if (config?.sandbox.mode && config.sandbox.mode !== "off") {
+    return;
+  }
+  const workspaceRoot = workspace.root;
+  const result = await runSmallCommand("git", ["rev-parse", "--git-dir"], workspaceRoot, 2000, config ? { config, workspace } : undefined);
   if (result.code !== 0 || !result.stdout.trim()) {
     return;
   }

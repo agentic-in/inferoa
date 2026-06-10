@@ -21,6 +21,7 @@ export interface AutoresearchRun {
   parsed_metrics: Record<string, number>;
   parsed_primary: number | null;
   asi: JsonObject;
+  sandbox?: JsonObject;
   completed_at: string;
 }
 
@@ -34,6 +35,7 @@ export interface HarnessValidation {
   output_resource_uri?: string;
   timed_out?: boolean;
   output_truncated?: boolean;
+  sandbox?: JsonObject;
   message: string;
   validated_at: string;
 }
@@ -436,6 +438,7 @@ function cloneHarnessValidation(status: HarnessValidation): HarnessValidation {
   return {
     ...status,
     parsed_metrics: { ...status.parsed_metrics },
+    sandbox: status.sandbox ? { ...status.sandbox } : undefined,
   };
 }
 
@@ -460,6 +463,7 @@ function parseRun(value: unknown): AutoresearchRun | undefined {
     parsed_metrics: numericRecord(data.parsed_metrics),
     parsed_primary: typeof data.parsed_primary === "number" && Number.isFinite(data.parsed_primary) ? data.parsed_primary : null,
     asi: objectRecord(data.asi),
+    sandbox: objectRecordOrUndefined(data.sandbox),
     completed_at: typeof data.completed_at === "string" ? data.completed_at : "",
   };
 }
@@ -484,6 +488,7 @@ function parseHarnessValidation(value: unknown): HarnessValidation | undefined {
     output_resource_uri: typeof data.output_resource_uri === "string" ? data.output_resource_uri : undefined,
     timed_out: data.timed_out === true ? true : undefined,
     output_truncated: data.output_truncated === true ? true : undefined,
+    sandbox: objectRecordOrUndefined(data.sandbox),
     message,
     validated_at: typeof data.validated_at === "string" ? data.validated_at : "",
   };
@@ -601,6 +606,10 @@ function numericRecord(value: unknown): Record<string, number> {
 
 function objectRecord(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
+}
+
+function objectRecordOrUndefined(value: unknown): JsonObject | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : undefined;
 }
 
 function positiveIntOrUndefined(value: unknown): number | undefined {

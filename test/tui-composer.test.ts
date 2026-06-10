@@ -255,6 +255,18 @@ test("composer submits slash-looking text when slash validation is disabled", ()
   assert.deepEqual(decision, { action: "submit", text: "/docker" });
 });
 
+test("composer submits selected slash subcommand completions", () => {
+  const decision = resolveComposerSubmission({
+    buffer: "/sandbox ",
+    compactRanges: [],
+    items: [{ value: "/sandbox network on" }, { value: "/sandbox network off" }],
+    selected: 1,
+    selectionTouched: true,
+  });
+
+  assert.deepEqual(decision, { action: "submit", text: "/sandbox network off" });
+});
+
 function visiblePlainWidth(text: string): number {
   return [...text].reduce((width, char) => width + (char.codePointAt(0)! > 0xff ? 2 : 1), 0);
 }

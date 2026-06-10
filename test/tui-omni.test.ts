@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { stripAnsi, visibleWidth } from "../src/tui/ansi.js";
 import {
@@ -9,6 +11,7 @@ import {
   endpointStatusLinesForDisplay,
   normalizeContextWindowInput,
   PREFIX_CACHE_REPORT_TITLE,
+  sandboxStatusLines,
   setupReviewLinesForDisplay,
   TUI_OMNI_SETUP_CAPABILITIES,
   webSearchProviderSetupOptions,
@@ -118,6 +121,20 @@ test("system status renders Omni capability matrix details", () => {
   assert.match(lines, /http:\/\/omni\.example\/v1 · image-model/);
 });
 
+test("sandbox status shows effective writable roots instead of ambiguous tmp wording", () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.sandbox.mode = "workspace_write";
+  config.sandbox.extra_writable_roots = ["/opt/inferoa-extra"];
+  const workspace = { id: "w_sandbox", root: "/workspace/inferoa", alias: "inferoa" };
+  const lines = stripAnsi(sandboxStatusLines(config, workspace).join("\n"));
+
+  assert.match(lines, /Writable roots workspace: \/workspace\/inferoa, tmp: /);
+  assert.match(lines, new RegExp(`tmp: ${escapeRegExp(path.resolve(os.tmpdir()))}`));
+  assert.match(lines, /extra: \/opt\/inferoa-extra/);
+  assert.doesNotMatch(lines, /workspace\/tmp writes/);
+  assert.match(lines, /workspace\/effective tmp writes/);
+});
+
 test("TUI setup review uses full-width rows and does not truncate final summary", () => {
   const config = structuredClone(DEFAULT_CONFIG);
   config.model_setup.mode = "direct";
@@ -151,6 +168,10 @@ test("TUI setup review uses full-width rows and does not truncate final summary"
   assert.ok(compactPlain.includes(config.model_setup.base_url ?? ""));
   assert.match(plain, /local vault/);
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("prefix cache report excludes the warmup turn from aggregate hit rate", () => {
   const lines = stripAnsi(cacheEvidenceOverview([

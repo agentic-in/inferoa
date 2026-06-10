@@ -1,6 +1,5 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import type { ResourceRecord } from "../session/store.js";
 import type { JsonObject, ToolResult } from "../types.js";
 import { resolveInside, resolveReadablePath, resolveWritablePath, runSmallCommand, toPosixPath } from "../util/fs.js";
@@ -10,6 +9,8 @@ import { decodeEscapedTextArgument, textArgumentCandidates } from "./text-args.j
 import { workspaceExternalPathsAllowed } from "./permissions.js";
 import { runRtkAwareShellCommand, type RtkShellCommandResult } from "../rtk/command.js";
 import { extensionForContentType, listResourceSummaries, mediaFromResource, resolveResourceReference, resourceRecordSummary } from "./resource-resolver.js";
+import { runSandboxedProcess } from "../sandbox/runner.js";
+import { blockedSandboxInfoToJson, type SandboxExecutionInfo } from "../sandbox/types.js";
 
 export async function listDir(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   try {
@@ -190,7 +191,7 @@ export async function fileSearch(args: JsonObject, context: ToolExecutionContext
     rgArgs.push("--glob", options.glob);
   }
   rgArgs.push("--", query, cwd);
-  const rg = await runSmallCommand("rg", rgArgs, context.workspace.root, 15_000);
+  const rg = await runSmallCommand("rg", rgArgs, context.workspace.root, 15_000, { config: context.config, workspace: context.workspace });
   if (rg.code === 0 || rg.stdout.trim()) {
     const lines = rg.stdout.split(/\r?\n/).filter(Boolean).slice(0, limit);
     const matches = lines.map(parseRgLine).filter(Boolean);
@@ -207,7 +208,7 @@ export async function fileSearch(args: JsonObject, context: ToolExecutionContext
   if (rg.code !== 127 && rg.stderr.trim()) {
     return fail("file_search_failed", rg.stderr.trim());
   }
-  const grep = await grepSearch(cwd, context.workspace.root, query, options, limit);
+  const grep = await grepSearch(cwd, context.workspace.root, query, options, limit, context);
   if (grep.ok) {
     return ok(`Found ${grep.matches.length} matches for ${query}`, { query, matches: grep.matches });
   }
@@ -288,27 +289,27 @@ export async function editFile(args: JsonObject, context: ToolExecutionContext):
 
 export async function applyPatchTool(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const patch = String(args.patch);
-  return await new Promise((resolve) => {
-    const child = spawn("git", ["apply", "--whitespace=nowarn"], {
-      cwd: context.workspace.root,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(ok("Patch applied", { stdout, diff: patch }));
-      } else {
-        resolve(fail("patch_failed", stderr || `git apply exited ${code}`, { stdout, stderr, diff: patch }));
-      }
-    });
-    child.stdin.end(patch);
+  const result = await runSandboxedProcess({
+    config: context.config,
+    workspace: context.workspace,
+    command: "git",
+    args: ["apply", "--whitespace=nowarn"],
+    shell: false,
+    cwd: context.workspace.root,
+    env: process.env,
+    timeoutMs: 120_000,
+    stdin: patch,
+    capabilities: ["git_metadata_write"],
+  });
+  const sandbox = blockedSandboxInfoToJson(result.sandbox);
+  if (result.code === 0) {
+    return ok("Patch applied", { stdout: result.stdout, diff: patch, sandbox });
+  }
+  return fail(result.sandbox.blocked ? "sandbox_blocked" : "patch_failed", result.stderr || `git apply exited ${result.code}`, {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    diff: patch,
+    sandbox,
   });
 }
 
@@ -323,6 +324,7 @@ export async function gitStatus(args: JsonObject, context: ToolExecutionContext)
     tool_name: context.tool_name ?? "git_status",
     command: "git status --short --branch",
     cwd,
+    workspace: context.workspace,
     timeout_ms: 10_000,
   });
   return commandResult("git_status", result, context, "git.status");
@@ -341,6 +343,7 @@ export async function gitDiff(args: JsonObject, context: ToolExecutionContext): 
     tool_name: context.tool_name ?? "git_diff",
     command,
     cwd,
+    workspace: context.workspace,
     timeout_ms: 10_000,
   });
   return commandResult("git_diff", result, context, "git.diff");
@@ -359,6 +362,7 @@ export async function gitShow(args: JsonObject, context: ToolExecutionContext): 
     tool_name: context.tool_name ?? "git_show",
     command,
     cwd,
+    workspace: context.workspace,
     timeout_ms: 10_000,
   });
   return commandResult("git_show", result, context, "git.show");
@@ -397,7 +401,7 @@ export async function sessionNote(args: JsonObject, context: ToolExecutionContex
 
 async function commandResult(
   name: string,
-  result: { code: number | null; stdout: string; stderr: string; rtk?: RtkShellCommandResult["rtk"] },
+  result: { code: number | null; stdout: string; stderr: string; rtk?: RtkShellCommandResult["rtk"]; sandbox?: SandboxExecutionInfo },
   context: ToolExecutionContext,
   kind: string,
 ): Promise<ToolResult> {
@@ -410,9 +414,9 @@ async function commandResult(
   return {
     ok: result.code === 0,
     summary: `${name} exited ${result.code}`,
-    data: { code: result.code, output: truncated.text },
+    data: { code: result.code, output: truncated.text, sandbox: blockedSandboxInfoToJson(result.sandbox) },
     resource_uri: resource,
-    error: result.code === 0 ? undefined : { code: `${name}_failed`, message: result.stderr || result.stdout },
+    error: result.code === 0 ? undefined : { code: result.sandbox?.blocked ? "sandbox_blocked" : `${name}_failed`, message: result.stderr || result.stdout },
   };
 }
 
@@ -483,6 +487,7 @@ async function grepSearch(
   query: string,
   options: SearchOptions,
   limit: number,
+  context: ToolExecutionContext,
 ): Promise<{ ok: true; matches: JsonObject[] } | { ok: false; error?: string }> {
   const grepArgs = ["-R", "-n", "-I", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=dist"];
   grepArgs.push(options.regex ? "-E" : "-F");
@@ -493,7 +498,7 @@ async function grepSearch(
     grepArgs.push("--include", options.glob);
   }
   grepArgs.push("--", query, ".");
-  const result = await runSmallCommand("grep", grepArgs, cwd, 15_000);
+  const result = await runSmallCommand("grep", grepArgs, cwd, 15_000, { config: context.config, workspace: context.workspace });
   if (result.code === 0 || result.stdout.trim()) {
     const matches = result.stdout
       .split(/\r?\n/)

@@ -4,6 +4,9 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { singlePathInput } from "./path-input.js";
+import { runSandboxedProcess } from "../sandbox/runner.js";
+import type { SandboxCapability, SandboxExecutionInfo } from "../sandbox/types.js";
+import type { VllmAgentConfig, WorkspaceIdentity } from "../types.js";
 
 export function homeStateDir(): string {
   return path.join(os.homedir(), ".inferoa");
@@ -48,7 +51,23 @@ export async function runSmallCommand(
   args: string[],
   cwd: string,
   timeoutMs: number,
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  options: RunSmallCommandOptions = {},
+): Promise<{ code: number | null; stdout: string; stderr: string; sandbox?: SandboxExecutionInfo }> {
+  if (options.config && options.workspace) {
+    const useShell = command === "command";
+    const result = await runSandboxedProcess({
+      config: options.config,
+      workspace: options.workspace,
+      command: useShell ? [command, ...args.map(shellQuote)].join(" ") : command,
+      args: useShell ? undefined : args,
+      shell: useShell,
+      cwd,
+      env: options.env ?? process.env,
+      timeoutMs,
+      capabilities: options.capabilities,
+    });
+    return { code: result.code, stdout: result.stdout, stderr: result.stderr, sandbox: result.sandbox };
+  }
   return await new Promise((resolve) => {
     const child = spawn(command, args, { cwd, shell: command === "command" });
     let stdout = "";
@@ -71,6 +90,13 @@ export async function runSmallCommand(
       resolve({ code: 127, stdout, stderr: String(error) });
     });
   });
+}
+
+export interface RunSmallCommandOptions {
+  config?: VllmAgentConfig;
+  workspace?: WorkspaceIdentity;
+  env?: NodeJS.ProcessEnv;
+  capabilities?: SandboxCapability[];
 }
 
 export function toPosixPath(filePath: string): string {
@@ -130,4 +156,11 @@ export function normalizeLocalPathInput(requested: string): string {
     return path.join(os.homedir(), input.slice(2));
   }
   return input;
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

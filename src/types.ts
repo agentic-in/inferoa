@@ -5,6 +5,9 @@ export type JsonObject = { [key: string]: JsonValue };
 export type EndpointMode = "direct" | "auto";
 export type ProviderKind = "vllm" | "external";
 export type PermissionMode = "ask" | "auto_approve" | "full_access" | "custom";
+export type SandboxMode = "off" | "read_only" | "workspace_write";
+export type SandboxBackend = "auto" | "macos_seatbelt" | "linux_bubblewrap" | "none";
+export type SandboxNetworkMode = "restricted" | "enabled";
 
 export interface ModelSetup {
   mode: EndpointMode;
@@ -90,6 +93,14 @@ export interface VllmAgentConfig {
     mode: PermissionMode;
     custom?: JsonObject;
     workspaces?: Record<string, { mode: PermissionMode; custom?: JsonObject }>;
+  };
+  sandbox: {
+    mode: SandboxMode;
+    backend: SandboxBackend;
+    network: SandboxNetworkMode;
+    fail_if_unavailable: boolean;
+    extra_writable_roots: string[];
+    env_passthrough: string[];
   };
   context: {
     compression_threshold: number;
