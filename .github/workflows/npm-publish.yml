@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -79,3 +79,22 @@ jobs:
             echo "For the first release, configure the npm Trusted Publisher for this package or add an NPM_TOKEN repository secret."
             npm publish --access public --tag "${{ steps.package.outputs.dist_tag }}"
           fi
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.publish_version }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG_NAME already exists; skipping."
+            exit 0
+          fi
+
+          gh release create "$TAG_NAME" \
+            --verify-tag \
+            --latest \
+            --title "$PACKAGE_NAME $PACKAGE_VERSION" \
+            --generate-notes

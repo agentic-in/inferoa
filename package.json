@@ -1,6 +1,6 @@
 {
   "name": "inferoa",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Inference-native Tokenmaxxing agent harness for long-horizon tasks in the vLLM ecosystem.",
   "license": "Apache-2.0",
   "type": "module",

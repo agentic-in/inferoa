@@ -1,4 +1,4 @@
-.PHONY: build dev-bin dev-unlink test docs-preview docs-build docs-serve
+.PHONY: build dev-bin dev-unlink test release-prep docs-preview docs-build docs-serve
 
 build:
 	npm run build
@@ -13,6 +13,14 @@ dev-unlink:
 
 test:
 	npm test
+
+release-prep:
+	@test -n "$(VERSION)" || (echo "Usage: make release-prep VERSION=0.11.0" >&2; exit 2)
+	npm version "$(VERSION)" --no-git-tag-version --allow-same-version
+	npm test
+	GITHUB_EVENT_NAME=push GITHUB_REF=refs/tags/v$(VERSION) GITHUB_RUN_NUMBER=0 GITHUB_SHA=$$(git rev-parse HEAD) node dist/src/release/npm-publish-coordinates.js
+	GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_RUN_NUMBER=0 GITHUB_SHA=$$(git rev-parse HEAD) node dist/src/release/npm-publish-coordinates.js
+	npm pack --dry-run
 
 docs-preview:
 	npm run site:start

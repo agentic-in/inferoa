@@ -21,3 +21,14 @@ test("Makefile exposes docs preview targets for the website", async () => {
   assert.match(makefile, /^docs-serve:/m);
   assert.match(makefile, /\bnpm run site:serve\b/);
 });
+
+test("Makefile exposes a release prep target for npm releases", async () => {
+  const makefile = await readFile("Makefile", "utf8");
+
+  assert.match(makefile, /^release-prep:/m);
+  assert.match(makefile, /\$\(VERSION\)/);
+  assert.match(makefile, /\bnpm version "\$\(VERSION\)" --no-git-tag-version --allow-same-version\b/);
+  assert.match(makefile, /GITHUB_REF=refs\/tags\/v\$\(VERSION\)/);
+  assert.match(makefile, /GITHUB_REF=refs\/heads\/main/);
+  assert.match(makefile, /\bnpm pack --dry-run\b/);
+});
