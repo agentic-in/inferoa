@@ -27,7 +27,7 @@ export class CodeIntelligenceHub {
     private readonly config: VllmAgentConfig,
     private readonly workspace: WorkspaceIdentity,
   ) {
-    this.codegraph = new CodeGraphContextEngine(normalizeContextEngineConfig(config), workspace);
+    this.codegraph = new CodeGraphContextEngine(normalizeContextEngineConfig(config), workspace, config);
   }
 
   dispose(): void {

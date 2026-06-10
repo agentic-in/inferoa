@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { access } from "node:fs/promises";
 import type { JsonObject, ToolResult } from "../types.js";
 import { fail, ok, truncateText } from "../util/limit.js";
 import type { ToolExecutionContext } from "./context.js";
+import { spawnSandboxedShell } from "../sandbox/runner.js";
+import { blockedSandboxInfoToJson } from "../sandbox/types.js";
 import {
   createExperiment,
   type HarnessValidation,
@@ -33,6 +34,7 @@ interface HarnessRunResult {
   outputTruncated: boolean;
   parsedMetrics: Record<string, number>;
   asi: JsonObject;
+  sandbox?: JsonObject;
 }
 
 export async function initExperiment(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -106,7 +108,7 @@ export async function runExperiment(args: JsonObject, context: ToolExecutionCont
     return fail("autoresearch_timeout_invalid", error instanceof Error ? error.message : String(error), autoresearchFailureData(state));
   }
   const started = Date.now();
-  const result = await runHarness(context.workspace.root, timeoutMs);
+  const result = await runHarness(context, timeoutMs);
   const durationMs = Date.now() - started;
   const resource = context.store.putResource(context.session_id, "autoresearch.run.output", result.output, {
     command: HARNESS_COMMAND,
@@ -114,6 +116,7 @@ export async function runExperiment(args: JsonObject, context: ToolExecutionCont
     duration_ms: durationMs,
     timed_out: result.timedOut,
     output_truncated: result.outputTruncated,
+    sandbox: result.sandbox,
   });
   const parsedMetrics = result.parsedMetrics;
   const parsedPrimary = parsedMetrics[state.experiment.primary_metric] ?? null;
@@ -127,6 +130,7 @@ export async function runExperiment(args: JsonObject, context: ToolExecutionCont
     parsed_metrics: parsedMetrics,
     parsed_primary: parsedPrimary,
     asi: result.asi,
+    sandbox: result.sandbox,
     completed_at: new Date().toISOString(),
   });
   const next = writeAutoresearchState(
@@ -146,6 +150,7 @@ export async function runExperiment(args: JsonObject, context: ToolExecutionCont
     output_resource_uri: resource.uri,
     parsed_metrics: parsedMetrics,
     parsed_primary: parsedPrimary,
+    sandbox: result.sandbox,
     output_preview: preview,
     autoresearch: next as unknown as JsonObject,
     progress: summarizeAutoresearchProgress(nextExperiment) as unknown as JsonObject,
@@ -154,7 +159,7 @@ export async function runExperiment(args: JsonObject, context: ToolExecutionCont
 
 async function validateHarness(context: ToolExecutionContext, primaryMetric: string): Promise<HarnessValidation> {
   const started = Date.now();
-  const result = await runHarness(context.workspace.root, HARNESS_VALIDATION_TIMEOUT_MS);
+  const result = await runHarness(context, HARNESS_VALIDATION_TIMEOUT_MS);
   const durationMs = Date.now() - started;
   const parsedMetrics = result.parsedMetrics;
   const parsedPrimary = parsedMetrics[primaryMetric] ?? null;
@@ -165,6 +170,7 @@ async function validateHarness(context: ToolExecutionContext, primaryMetric: str
     primary_metric: primaryMetric,
     timed_out: result.timedOut,
     output_truncated: result.outputTruncated,
+    sandbox: result.sandbox,
   });
   const ok = result.exitCode === 0;
   const metricMessage = parsedPrimary === null ? `missing METRIC ${primaryMetric}=value` : `${primaryMetric}=${parsedPrimary}`;
@@ -178,6 +184,7 @@ async function validateHarness(context: ToolExecutionContext, primaryMetric: str
     output_resource_uri: resource.uri,
     timed_out: result.timedOut,
     output_truncated: result.outputTruncated,
+    sandbox: result.sandbox,
     message: result.timedOut ? `harness timed out; ${metricMessage}` : ok ? `validated ${metricMessage}` : `harness exited ${result.exitCode}; ${metricMessage}`,
     validated_at: new Date().toISOString(),
   };
@@ -256,9 +263,24 @@ function ensureAutoresearchEnabled(context: ToolExecutionContext): AutoresearchS
   return setAutoresearchMode(context.store, context.session_id, { mode: "on", goal: state.goal }, context.run_id);
 }
 
-function runHarness(cwd: string, timeoutMs: number): Promise<HarnessRunResult> {
+async function runHarness(context: ToolExecutionContext, timeoutMs: number): Promise<HarnessRunResult> {
+  const spawned = await spawnSandboxedShell({
+    config: context.config,
+    workspace: context.workspace,
+    command: "bash",
+    args: [HARNESS],
+    shell: false,
+    cwd: context.workspace.root,
+    env: process.env,
+    originalCommand: HARNESS_COMMAND,
+  });
+  const sandbox = blockedSandboxInfoToJson(spawned.sandbox);
+  const child = spawned.child;
+  if (!child) {
+    const output = spawned.error ?? "sandbox blocked autoresearch harness";
+    return { exitCode: 126, output, timedOut: false, outputTruncated: false, parsedMetrics: {}, asi: {}, sandbox };
+  }
   return new Promise((resolve) => {
-    const child = spawn("bash", [HARNESS], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     let outputBytes = 0;
     let outputTruncated = false;
@@ -336,7 +358,7 @@ function runHarness(cwd: string, timeoutMs: number): Promise<HarnessRunResult> {
         clearTimeout(hardKillTimer);
       }
       flushHarnessParser();
-      resolve({ exitCode, output, timedOut, outputTruncated, parsedMetrics, asi });
+      resolve({ exitCode, output, timedOut, outputTruncated, parsedMetrics, asi, sandbox });
     };
     const timeout = setTimeout(() => {
       timedOut = true;

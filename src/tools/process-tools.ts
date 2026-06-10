@@ -1,10 +1,12 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { JsonObject, ToolResult } from "../types.js";
 import { resolveInside } from "../util/fs.js";
 import { fail, ok, truncateText } from "../util/limit.js";
 import { randomId } from "../util/hash.js";
 import type { ToolExecutionContext } from "./context.js";
 import { runRtkAwareShellCommand } from "../rtk/command.js";
+import { sandboxBlockedJson, spawnSandboxedShell } from "../sandbox/runner.js";
+import { blockedSandboxInfoToJson, sandboxInfoToJson } from "../sandbox/types.js";
 
 interface LiveProcess {
   child: ChildProcessWithoutNullStreams;
@@ -27,12 +29,20 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
   };
   if (args.background) {
     const processId = randomId("p");
-    const child = spawn(command, {
+    const spawned = await spawnSandboxedShell({
+      config: context.config,
+      workspace: context.workspace,
+      command,
       cwd,
       env,
       shell: true,
-      detached: process.platform !== "win32",
     });
+    if (!spawned.child) {
+      return fail("sandbox_blocked", spawned.error ?? "Sandbox blocked background command", {
+        sandbox: sandboxBlockedJson(spawned.sandbox),
+      });
+    }
+    const child = spawned.child;
     context.store.upsertProcess({
       session_id: context.session_id,
       process_id: processId,
@@ -45,7 +55,7 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
       session_id: context.session_id,
       run_id: context.run_id,
       type: "process.started",
-      data: { process_id: processId, pid: child.pid, command, cwd },
+      data: { process_id: processId, pid: child.pid, command, cwd, sandbox: sandboxInfoToJson(spawned.sandbox) },
     });
     liveProcesses.set(key(context.session_id, processId), { child, session_id: context.session_id, process_id: processId });
     child.stdout.on("data", (chunk) => {
@@ -74,7 +84,7 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
       });
       liveProcesses.delete(key(context.session_id, processId));
     });
-    return ok(`Started background process ${processId}`, { process_id: processId, pid: child.pid ?? null, command, cwd });
+    return ok(`Started background process ${processId}`, { process_id: processId, pid: child.pid ?? null, command, cwd, sandbox: blockedSandboxInfoToJson(spawned.sandbox) });
   }
 
   const timeoutMs = typeof args.timeout_ms === "number" ? Math.max(100, Math.min(args.timeout_ms, 600_000)) : 120_000;
@@ -87,6 +97,7 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
     tool_name: context.tool_name ?? "run_command",
     command,
     cwd,
+    workspace: context.workspace,
     env,
     timeout_ms: timeoutMs,
   });
@@ -111,6 +122,7 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
       cwd,
       code: result.code,
       timed_out: result.timed_out,
+      sandbox: blockedSandboxInfoToJson(result.sandbox),
       resource_uri: resource,
     },
   });
@@ -123,9 +135,13 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
       code: result.code,
       timed_out: result.timed_out,
       output: truncated.text,
+      sandbox: blockedSandboxInfoToJson(result.sandbox),
     },
     resource_uri: resource,
-    error: result.code === 0 && !result.timed_out ? undefined : { code: result.timed_out ? "command_timeout" : "command_failed", message: result.stderr || result.stdout },
+    error:
+      result.code === 0 && !result.timed_out
+        ? undefined
+        : { code: result.timed_out ? "command_timeout" : result.sandbox?.blocked ? "sandbox_blocked" : "command_failed", message: result.stderr || result.stdout },
   };
 }
 

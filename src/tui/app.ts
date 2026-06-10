@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -59,6 +60,7 @@ import type {
   OmniEndpointName,
   OmniEndpointConfig,
   PermissionMode,
+  SandboxMode,
   SessionEvent,
   SessionRecord,
   VllmAgentConfig,
@@ -69,7 +71,7 @@ import { randomId } from "../util/hash.js";
 import { isAbortError } from "../util/abort.js";
 import type { loadApp } from "../app.js";
 import { ansi, bgLine, bg256, center, centerBlock, fg256, frame, padRight, terminalHeight, terminalWidth, truncateToWidth, visibleWidth } from "./ansi.js";
-import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands, SLASH_COMMANDS, type SlashCommandName } from "./slash.js";
+import { bareSlashCommandWithSubcommands, parseSlashCommand, slashCommandWithSubcommands, slashSubcommands, SLASH_COMMANDS, type SlashCommandName } from "./slash.js";
 import { inferoaActivityLabel, renderActivityLine, renderActivityRecordLine } from "./activity.js";
 import { cacheTurnKind, formatDuration, renderCacheFooter, renderCacheReportTurn } from "./cache-footer.js";
 import { renderCompactEventLine, renderSessionActivityLines } from "./event-view.js";
@@ -83,6 +85,7 @@ import { filterProviderPickerOptions, providerPickerPage } from "./provider-pick
 import { renderSessionTranscript } from "./session-transcript.js";
 import { renderUnknownSlashCommandNotice } from "./slash-notice.js";
 import { effectiveWorkspacePermission, setWorkspacePermissionMode } from "../tools/permissions.js";
+import { resolveSandboxPolicy, sandboxModeLabel } from "../sandbox/policy.js";
 import { renderToolCards } from "./tool-renderer.js";
 import { withConversationGap } from "./transcript-spacing.js";
 import { MarkdownStreamRenderer } from "./markdown.js";
@@ -929,8 +932,8 @@ export class TuiApp {
             cursor = moveComposerCursorEnd(buffer, cursor);
             render();
           } else if (key === "\t") {
-            const subcommandRoot = slashCommandWithSubcommands(buffer);
-            if (subcommandRoot && !buffer.trim().includes(" ")) {
+            const subcommandRoot = bareSlashCommandWithSubcommands(buffer);
+            if (subcommandRoot) {
               buffer = `/${subcommandRoot} `;
               cursor = buffer.length;
               compactRanges = [];
@@ -1220,6 +1223,9 @@ export class TuiApp {
           return;
         case "access":
           await this.renderAccessView(args);
+          return;
+        case "sandbox":
+          await this.renderSandboxView(args);
           return;
         case "skills":
           await this.renderSkillsView(args);
@@ -2408,6 +2414,30 @@ export class TuiApp {
       this.app.configFiles.push(target);
     }
     this.renderPanel("Access", accessStatusLines(this.app.config, this.app.workspace, target));
+  }
+
+  private async renderSandboxView(args: string): Promise<void> {
+    const action = parseSandboxAction(args);
+    if (action.kind === "unknown") {
+      this.renderNotice("Unknown sandbox command. Use /sandbox status, off, read-only, workspace-write, or network on|off.");
+      return;
+    }
+    if (action.kind === "status") {
+      this.renderPanel("Sandbox", sandboxStatusLines(this.app.config, this.app.workspace));
+      return;
+    }
+    const nextConfig = structuredClone(this.app.config);
+    if (action.kind === "mode") {
+      nextConfig.sandbox.mode = action.mode;
+    } else {
+      nextConfig.sandbox.network = action.network;
+    }
+    const target = await saveUserConfig(nextConfig);
+    Object.assign(this.app.config, nextConfig);
+    if (!this.app.configFiles.includes(target)) {
+      this.app.configFiles.push(target);
+    }
+    this.renderPanel("Sandbox", sandboxStatusLines(this.app.config, this.app.workspace, target));
   }
 
   private async chooseAccessMode(): Promise<PermissionMode> {
@@ -5769,6 +5799,88 @@ function parseAccessMode(args: string): PermissionMode | undefined {
     default:
       return undefined;
   }
+}
+
+type SandboxAction =
+  | { kind: "status" }
+  | { kind: "mode"; mode: SandboxMode }
+  | { kind: "network"; network: VllmAgentConfig["sandbox"]["network"] }
+  | { kind: "unknown" };
+
+function parseSandboxAction(args: string): SandboxAction {
+  const value = args.trim().toLowerCase().replaceAll("_", "-");
+  if (!value || value === "status" || value === "show") {
+    return { kind: "status" };
+  }
+  switch (value) {
+    case "off":
+      return { kind: "mode", mode: "off" };
+    case "read-only":
+    case "readonly":
+      return { kind: "mode", mode: "read_only" };
+    case "workspace-write":
+    case "workspace":
+      return { kind: "mode", mode: "workspace_write" };
+    case "network on":
+    case "network enabled":
+    case "network enable":
+      return { kind: "network", network: "enabled" };
+    case "network off":
+    case "network restricted":
+    case "network disable":
+      return { kind: "network", network: "restricted" };
+    default:
+      return { kind: "unknown" };
+  }
+}
+
+export function sandboxStatusLines(config: VllmAgentConfig, workspace: WorkspaceIdentity, target?: string): string[] {
+  const sandbox = config.sandbox;
+  const policy = resolveSandboxPolicy({ config, workspace, cwd: workspace.root });
+  const extraWritable = sandbox.extra_writable_roots.length ? sandbox.extra_writable_roots.join(", ") : "none";
+  const envPassthrough = sandbox.env_passthrough.length ? sandbox.env_passthrough.join(", ") : "none";
+  const network = sandbox.mode === "off"
+    ? `${sandbox.network === "enabled" ? "enabled" : "restricted"} ${fg256(244, "(applies when sandbox is enabled)")}`
+    : sandbox.network === "enabled" ? "enabled" : "restricted";
+  const agentWritable = policy.agentWritableRoots.length
+    ? policy.agentWritableRoots.map((root) => compactWorkspacePath(root)).join(", ")
+    : "none";
+  const writableRoots = sandboxWritableRootsForDisplay(config, workspace);
+  const lines = [
+    `${fg256(39, "Mode")} ${sandboxModeLabel(sandbox.mode)}`,
+    `${fg256(39, "Configured backend")} ${sandbox.backend}`,
+    `${fg256(39, "Effective backend")} ${policy.backend}`,
+    `${fg256(39, "Network")} ${network}`,
+    `${fg256(39, "Workspace")} ${compactWorkspacePath(workspace.root)}`,
+    `${fg256(39, "Fail closed")} ${sandbox.fail_if_unavailable ? "on" : "off"}${sandbox.mode === "off" ? fg256(244, " (applies when sandbox is enabled)") : ""}`,
+    `${fg256(39, "Writable roots")} ${writableRoots}`,
+    `${fg256(39, "Extra writable")} ${extraWritable}`,
+    `${fg256(39, "Agent writable metadata")} ${agentWritable}`,
+    `${fg256(39, "Env passthrough")} ${envPassthrough}`,
+    "",
+    fg256(244, "Approval prompts remain controlled by /access. Full access does not disable OS sandboxing."),
+  ];
+  if (target) {
+    lines.push("", `${fg256(39, "Config")} ${target}`);
+  }
+  lines.push("", `${fg256(39, "/sandbox off")} disable · ${fg256(39, "/sandbox read-only")} read-only · ${fg256(39, "/sandbox workspace-write")} workspace/effective tmp writes · ${fg256(39, "/sandbox network on|off")} network`);
+  return lines;
+}
+
+function sandboxWritableRootsForDisplay(config: VllmAgentConfig, workspace: WorkspaceIdentity): string {
+  if (config.sandbox.mode !== "workspace_write") {
+    return "none";
+  }
+  const roots = [
+    `workspace: ${compactWorkspacePath(path.resolve(workspace.root))}`,
+    `tmp: ${compactWorkspacePath(path.resolve(os.tmpdir()))}`,
+    ...config.sandbox.extra_writable_roots.map((root) => `extra: ${compactWorkspacePath(path.resolve(root))}`),
+  ];
+  return uniqueLabels(roots).join(", ");
+}
+
+function uniqueLabels(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function accessStatusLines(config: VllmAgentConfig, workspace: WorkspaceIdentity, target?: string): string[] {

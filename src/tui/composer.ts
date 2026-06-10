@@ -102,6 +102,9 @@ export function resolveComposerSubmission(input: ComposerSubmissionInput): Compo
   if (trimmed === "/" && item) {
     return { action: "submit", text: item.value };
   }
+  if (input.buffer.startsWith("/") && item && input.selectionTouched) {
+    return { action: "submit", text: item.value };
+  }
   if (trimmed === "$" && item && input.selectionTouched) {
     return { action: "submit", text: item.value };
   }
@@ -543,7 +546,9 @@ function centerLine(text: string, width: number): string {
 
 function renderComposerSuggestion(item: ComposerSuggestion, active: boolean, width: number): string {
   const marker = active ? fg256(75, "›") : " ";
-  const labelWidth = item.kind === "command" ? 18 : 28;
+  const preferredLabelWidth = visibleWidth(item.label);
+  const maxLabelWidth = item.kind === "command" ? Math.max(18, Math.min(32, Math.floor(width * 0.45))) : 28;
+  const labelWidth = Math.min(Math.max(item.kind === "command" ? 18 : 28, preferredLabelWidth), maxLabelWidth);
   const label = padRight(truncateToWidth(item.label, labelWidth), labelWidth);
   const descriptionWidth = Math.max(8, width - labelWidth - 6);
   const text = `${marker} ${active ? fg256(87, label) : fg256(250, label)} ${fg256(244, truncateToWidth(item.description, descriptionWidth))}`;

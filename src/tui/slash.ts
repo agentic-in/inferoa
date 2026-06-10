@@ -6,6 +6,7 @@ export type SlashCommandName =
   | "model"
   | "system"
   | "access"
+  | "sandbox"
   | "skills"
   | "goal"
   | "plan"
@@ -39,6 +40,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "model", description: "Open model/provider selector" },
   { name: "system", description: "Show model, web search, Omni, and runtime status" },
   { name: "access", description: "Change this workspace's file and tool access" },
+  { name: "sandbox", description: "Change OS sandbox mode and network boundary" },
   { name: "skills", description: "List skills or manage enabled skills" },
   { name: "goal", description: "Run /goal to start a long-horizon recursive goal" },
   { name: "plan", description: "Start or manage plan mode" },
@@ -80,6 +82,12 @@ export const SLASH_SUBCOMMANDS: SlashSubcommandSpec[] = [
   { command: "access", name: "auto", value: "/access auto", description: "Auto-approve routine tools for this workspace" },
   { command: "access", name: "ask", value: "/access ask", description: "Ask before risky access in this workspace" },
   { command: "access", name: "custom", value: "/access custom", description: "Use custom config rules for this workspace" },
+  { command: "sandbox", name: "status", value: "/sandbox status", description: "Show OS sandbox mode" },
+  { command: "sandbox", name: "off", value: "/sandbox off", description: "Disable OS sandboxing" },
+  { command: "sandbox", name: "read-only", value: "/sandbox read-only", description: "Enable read-only OS sandboxing" },
+  { command: "sandbox", name: "workspace-write", value: "/sandbox workspace-write", description: "Allow workspace and tmp writes" },
+  { command: "sandbox", name: "network on", value: "/sandbox network on", description: "Allow network inside sandbox" },
+  { command: "sandbox", name: "network off", value: "/sandbox network off", description: "Restrict network inside sandbox" },
   { command: "context", name: "status", value: "/context", description: "Show context and code intelligence state" },
   { command: "context", name: "reindex", value: "/context reindex", description: "Rebuild the context index" },
   { command: "tools", name: "list", value: "/tools", description: "Show fixed tool schemas" },
@@ -144,6 +152,19 @@ export function slashCommandWithSubcommands(input: string): SlashCommandName | u
     return undefined;
   }
   const rawName = trimmed.slice(1).split(/\s+/)[0];
+  const name = rawName ? COMMAND_ALIASES.get(rawName) ?? (rawName as SlashCommandName) : undefined;
+  if (!name || !COMMANDS.has(name)) {
+    return undefined;
+  }
+  return slashSubcommands(name).length ? name : undefined;
+}
+
+export function bareSlashCommandWithSubcommands(input: string): SlashCommandName | undefined {
+  const value = input.toLowerCase();
+  if (!value.startsWith("/") || /\s/.test(value)) {
+    return undefined;
+  }
+  const rawName = value.slice(1);
   const name = rawName ? COMMAND_ALIASES.get(rawName) ?? (rawName as SlashCommandName) : undefined;
   if (!name || !COMMANDS.has(name)) {
     return undefined;

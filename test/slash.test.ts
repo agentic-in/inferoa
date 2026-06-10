@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { stripAnsi } from "../src/tui/ansi.js";
-import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands } from "../src/tui/slash.js";
+import { renderComposerSurface } from "../src/tui/composer.js";
+import { bareSlashCommandWithSubcommands, parseSlashCommand, slashCommandWithSubcommands, slashSubcommands } from "../src/tui/slash.js";
 import { renderUnknownSlashCommandNotice } from "../src/tui/slash-notice.js";
 
 test("slash parser uses clear as the fresh-session command", () => {
@@ -76,6 +77,11 @@ test("slash parser exposes tokenmaxxing and keeps old savings aliases", () => {
   assert.equal(access.command?.name, "access");
   assert.equal(access.args, "full");
   assert.equal(access.error, undefined);
+
+  const sandbox = parseSlashCommand("/sandbox workspace-write");
+  assert.equal(sandbox.command?.name, "sandbox");
+  assert.equal(sandbox.args, "workspace-write");
+  assert.equal(sandbox.error, undefined);
 });
 
 test("slash parser leaves dragged absolute paths as chat input", () => {
@@ -111,6 +117,7 @@ test("slash registry exposes chat subcommands for completion", () => {
   assert.equal(slashCommandWithSubcommands("/goal"), "goal");
   assert.equal(slashCommandWithSubcommands("/plan"), "plan");
   assert.equal(slashCommandWithSubcommands("/autoresearch"), "autoresearch");
+  assert.equal(slashCommandWithSubcommands("/sandbox"), "sandbox");
   assert.equal(slashCommandWithSubcommands("/sessions"), "sessions");
   assert.equal(slashCommandWithSubcommands("/clear"), undefined);
   assert.equal(parseSlashCommand("/jobs").error, "Unrecognized command '/jobs'. Type '/' for commands.");
@@ -145,7 +152,27 @@ test("slash registry exposes chat subcommands for completion", () => {
     ["/access status", "/access full", "/access auto", "/access ask", "/access custom"],
   );
   assert.deepEqual(
+    slashSubcommands("sandbox").map((item) => item.value),
+    ["/sandbox status", "/sandbox off", "/sandbox read-only", "/sandbox workspace-write", "/sandbox network on", "/sandbox network off"],
+  );
+  assert.deepEqual(
     slashSubcommands("sessions").map((item) => item.value),
     ["/sessions resume", "/sessions new", "/sessions all"],
   );
+});
+
+test("bare slash subcommand expansion does not consume trailing-space subcommand completion", () => {
+  assert.equal(bareSlashCommandWithSubcommands("/sandbox"), "sandbox");
+  assert.equal(bareSlashCommandWithSubcommands("/sandbox "), undefined);
+  assert.equal(bareSlashCommandWithSubcommands("/sandbox network"), undefined);
+});
+
+test("composer renders sandbox network subcommands distinctly", () => {
+  const items = slashSubcommands("sandbox")
+    .filter((item) => item.value.startsWith("/sandbox network"))
+    .map((item) => ({ label: item.value, description: item.description, kind: "command" as const }));
+  const rendered = stripAnsi(renderComposerSurface({ buffer: "/sandbox ", cursor: "/sandbox ".length, items, selected: 0, width: 90 }).lines.join("\n"));
+
+  assert.match(rendered, /\/sandbox network on\s+Allow network inside sandbox/);
+  assert.match(rendered, /\/sandbox network off\s+Restrict network inside sandbox/);
 });

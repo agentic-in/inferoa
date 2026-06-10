@@ -1,0 +1,26 @@
+export function macosSeatbeltPlatformBaseline(): string[] {
+  return [
+    "(allow file-read* file-test-existence file-write-data",
+    '  (literal "/dev/null")',
+    '  (literal "/dev/zero"))',
+    "(allow file-read* file-test-existence",
+    '  (literal "/dev/random")',
+    '  (literal "/dev/urandom"))',
+    '(allow file-read-data file-test-existence file-write-data (subpath "/dev/fd"))',
+    '(allow file-read* file-write* (literal "/dev/tty"))',
+    '(allow file-read-metadata (literal "/dev"))',
+    '(allow file-read-metadata (regex "^/dev/.*$"))',
+    '(allow file-read* file-write* (regex "^/dev/ttys[0-9]+$"))',
+    '(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))',
+    '(allow file-ioctl (regex "^/dev/ttys[0-9]+$"))',
+    "(allow pseudo-tty)",
+    '(allow file-read* (subpath "/etc"))',
+    '(allow file-read* (subpath "/private/etc"))',
+    '(allow file-read* (subpath "/System/Library"))',
+    '(allow file-read* (subpath "/Library/Preferences"))',
+    '(allow file-read* (subpath "/usr/lib"))',
+    '(allow file-read* (subpath "/usr/libexec"))',
+    '(allow file-read* (subpath "/opt/homebrew/lib"))',
+    '(allow file-read* (subpath "/usr/local/lib"))',
+  ];
+}

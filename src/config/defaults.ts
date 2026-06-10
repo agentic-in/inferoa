@@ -21,6 +21,14 @@ export const DEFAULT_CONFIG: VllmAgentConfig = {
   permissions: {
     mode: "full_access",
   },
+  sandbox: {
+    mode: "off",
+    backend: "auto",
+    network: "restricted",
+    fail_if_unavailable: true,
+    extra_writable_roots: [],
+    env_passthrough: [],
+  },
   context: {
     compression_threshold: 0.8,
     context_window: 32_768,

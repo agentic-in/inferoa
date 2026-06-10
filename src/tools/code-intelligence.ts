@@ -1,13 +1,14 @@
 import { promises as fs } from "node:fs";
-import { spawn } from "node:child_process";
 import path from "node:path";
 import ts from "typescript";
 import type { JsonObject, ToolResult } from "../types.js";
-import { resolveInside, runSmallCommand, toPosixPath } from "../util/fs.js";
+import { resolveInside, toPosixPath } from "../util/fs.js";
 import { fail, ok } from "../util/limit.js";
 import type { ToolExecutionContext } from "./context.js";
 import { editFile, simpleUnifiedDiff } from "./workspace-tools.js";
 import { decodeEscapedTextArgument } from "./text-args.js";
+import { runSandboxedProcess } from "../sandbox/runner.js";
+import { blockedSandboxInfoToJson } from "../sandbox/types.js";
 
 interface LanguageSpec {
   id: string;
@@ -55,7 +56,7 @@ export async function lspTool(args: JsonObject, context: ToolExecutionContext): 
   if (action === "status") {
     const specs = await Promise.all(
       LSP_REGISTRY.map(async (spec) => {
-        const availableCommand = await firstAvailable(spec.commands);
+        const availableCommand = await firstAvailable(spec.commands, context);
         return {
           id: spec.id,
           extensions: spec.extensions,
@@ -76,7 +77,7 @@ export async function lspTool(args: JsonObject, context: ToolExecutionContext): 
   }
   const file = resolveInside(context.workspace.root, rel);
   if (action === "diagnostics") {
-    return await diagnostics(file, rel);
+    return await diagnostics(file, rel, context);
   }
   if (action === "symbols") {
     return await symbols(file, rel);
@@ -125,7 +126,7 @@ export async function astEdit(args: JsonObject, context: ToolExecutionContext): 
   const operation = String(args.operation);
   const rawContent = typeof args.content === "string" ? args.content : "";
   const content = decodeEscapedTextArgument(rawContent);
-  const beforeOk = language.startsWith("python") ? await validatePython(text) : validateTypeScript(text, languageForFile(file)).ok;
+  const beforeOk = language.startsWith("python") ? await validatePython(text, context) : validateTypeScript(text, languageForFile(file)).ok;
   if (!beforeOk) {
     return fail("parse_failed_before", `File did not parse before AST edit: ${rel}`);
   }
@@ -148,7 +149,7 @@ export async function astEdit(args: JsonObject, context: ToolExecutionContext): 
   } else {
     return fail("unsupported_ast_operation", `Unsupported operation: ${operation}`);
   }
-  const afterOk = language.startsWith("python") ? await validatePython(updated) : validateTypeScript(updated, languageForFile(file)).ok;
+  const afterOk = language.startsWith("python") ? await validatePython(updated, context) : validateTypeScript(updated, languageForFile(file)).ok;
   if (!afterOk) {
     return fail("parse_failed_after", `AST edit would make file invalid: ${rel}`);
   }
@@ -281,12 +282,21 @@ function selectorNameMatches(name: string | undefined, value: string | undefined
   return name === value;
 }
 
-async function diagnostics(file: string, rel: string): Promise<ToolResult> {
+async function diagnostics(file: string, rel: string, context: ToolExecutionContext): Promise<ToolResult> {
   if (file.endsWith(".py")) {
-    const result = await runSmallCommand("python3", ["-m", "py_compile", file], path.dirname(file), 20_000);
+    const result = await runSandboxedProcess({
+      config: context.config,
+      workspace: context.workspace,
+      command: "python3",
+      args: ["-m", "py_compile", file],
+      cwd: path.dirname(file),
+      env: process.env,
+      timeoutMs: 20_000,
+    });
     return ok(`Python diagnostics for ${rel}`, {
       diagnostics: result.code === 0 ? [] : [{ severity: "error", message: result.stderr || result.stdout }],
       code: result.code,
+      sandbox: blockedSandboxInfoToJson(result.sandbox),
     });
   }
   if (/\.[cm]?[jt]sx?$/.test(file)) {
@@ -402,13 +412,18 @@ function validateTypeScript(text: string, scriptKind: ts.ScriptKind): { ok: bool
   return { ok: diagnostics.length === 0, diagnostics };
 }
 
-async function validatePython(text: string): Promise<boolean> {
-  return await new Promise((resolve) => {
-    const child = spawn("python3", ["-c", "import ast,sys; ast.parse(sys.stdin.read())"]);
-    child.on("close", (code) => resolve(code === 0));
-    child.on("error", () => resolve(false));
-    child.stdin.end(text);
+async function validatePython(text: string, context: ToolExecutionContext): Promise<boolean> {
+  const result = await runSandboxedProcess({
+    config: context.config,
+    workspace: context.workspace,
+    command: "python3",
+    args: ["-c", "import ast,sys; ast.parse(sys.stdin.read())"],
+    cwd: context.workspace.root,
+    env: process.env,
+    timeoutMs: 20_000,
+    stdin: text,
   });
+  return result.code === 0;
 }
 
 function languageForFile(file: string): ts.ScriptKind {
@@ -418,9 +433,17 @@ function languageForFile(file: string): ts.ScriptKind {
   return ts.ScriptKind.TS;
 }
 
-async function firstAvailable(commands: string[]): Promise<string | undefined> {
+async function firstAvailable(commands: string[], context: ToolExecutionContext): Promise<string | undefined> {
   for (const command of commands) {
-    const result = await runSmallCommand("command", ["-v", command], process.cwd(), 1000);
+    const result = await runSandboxedProcess({
+      config: context.config,
+      workspace: context.workspace,
+      command: `command -v ${shellQuote(command)}`,
+      shell: true,
+      cwd: context.workspace.root,
+      env: process.env,
+      timeoutMs: 1000,
+    });
     if (result.code === 0) {
       return result.stdout.trim();
     }
@@ -430,4 +453,11 @@ async function firstAvailable(commands: string[]): Promise<string | undefined> {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

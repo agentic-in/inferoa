@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { ensureDir } from "../util/fs.js";
-import type { VllmAgentConfig } from "../types.js";
+import type { VllmAgentConfig, WorkspaceIdentity } from "../types.js";
 import type { SessionStore } from "../session/store.js";
 import { resolveRtkStatus, rtkDbPath, rtkEnv, type RtkRuntime } from "./manager.js";
 import { readRtkCommandStats, type RtkCommandStats } from "./stats.js";
+import { runSandboxedProcess } from "../sandbox/runner.js";
+import type { SandboxExecutionInfo } from "../sandbox/types.js";
 
 export interface RtkShellCommandOptions {
   config: VllmAgentConfig;
@@ -15,6 +17,7 @@ export interface RtkShellCommandOptions {
   tool_name: string;
   command: string;
   cwd: string;
+  workspace: WorkspaceIdentity;
   env?: NodeJS.ProcessEnv;
   timeout_ms: number;
 }
@@ -27,6 +30,7 @@ export interface RtkShellCommandResult {
   command: string;
   rewritten_command?: string;
   rtk?: RtkCommandStats;
+  sandbox?: SandboxExecutionInfo;
 }
 
 interface PreparedRtkCommand {
@@ -40,7 +44,7 @@ interface PreparedRtkCommand {
 
 export async function runRtkAwareShellCommand(options: RtkShellCommandOptions): Promise<RtkShellCommandResult> {
   const prepared = await prepareCommand(options);
-  const result = await runShell(prepared.command, options.cwd, prepared.env, options.timeout_ms);
+  const result = await runShell(prepared.command, options.cwd, prepared.env, options.timeout_ms, options.config, options.workspace, prepared.original_command, prepared.rewritten_command);
   const rtk = await recordRtkSavings(options, prepared);
   return {
     ...result,
@@ -146,39 +150,26 @@ async function recordRtkSavings(options: RtkShellCommandOptions, prepared: Prepa
   return stats;
 }
 
-function runShell(command: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<Omit<RtkShellCommandResult, "command">> {
-  return new Promise((resolve) => {
-    const child = spawn(command, {
-      cwd,
-      env,
-      shell: true,
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!child.killed) {
-          child.kill("SIGKILL");
-        }
-      }, 2000).unref();
-    }, timeoutMs);
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      resolve({ code, stdout, stderr, timed_out: timedOut });
-    });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      resolve({ code: 127, stdout, stderr: error.message, timed_out: timedOut });
-    });
+async function runShell(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  config: VllmAgentConfig,
+  workspace: WorkspaceIdentity,
+  originalCommand: string,
+  rewrittenCommand?: string,
+): Promise<Omit<RtkShellCommandResult, "command">> {
+  return await runSandboxedProcess({
+    config,
+    workspace,
+    command,
+    shell: true,
+    cwd,
+    env,
+    timeoutMs,
+    originalCommand,
+    rewrittenCommand,
   });
 }
 
