@@ -18,46 +18,26 @@ const stackFlow = [
   ["vLLM Serving", "Engine + Omni"],
 ];
 
-const sessionScreens = [
+const sessionDemos = [
   {
     title: "Welcome",
     body: "A restrained entry point for the configured model, workspace, and core commands.",
-    image: "/img/screenshots/inferoa-welcome.png",
+    image: "/gif/welcome.gif",
   },
   {
     title: "Goal Mode",
     body: "Long-horizon work keeps objective, plan status, and evidence visible across turns.",
-    image: "/img/screenshots/inferoa-goal.png",
+    image: "/gif/goal.gif",
   },
   {
-    title: "Prefix Cache Status",
-    body: "Every response can surface prefix-cache health without making the chat noisy.",
-    image: "/img/screenshots/inferoa-prefix-cache-status.png",
+    title: "Plan Mode",
+    body: "Ambiguous scope becomes an inspectable plan before execution starts.",
+    image: "/gif/plan.gif",
   },
   {
-    title: "Tokenmaxxing",
-    body: "Prefix cache, tool-output savings, recent turn usage, and model-selection pressure stay visible together.",
-    image: "/img/screenshots/tokenmaxxing.png",
-  },
-  {
-    title: "Plan Scope",
-    body: "Plan mode captures user intent before execution and keeps the loop inspectable.",
-    image: "/img/screenshots/inferoa-plan-clarify.png",
-  },
-  {
-    title: "Plan Approval",
-    body: "Execution starts only after the concrete plan is ready and confirmed.",
-    image: "/img/screenshots/inferoa-plan-ready.png",
-  },
-  {
-    title: "Autoresearch Setup",
-    body: "Experiment goals become part of the same durable coding session.",
-    image: "/img/screenshots/inferoa-autoresearch-start.png",
-  },
-  {
-    title: "Autoresearch Iteration",
+    title: "Autoresearch",
     body: "Benchmark runs, failures, fixes, and metrics stay in one research loop.",
-    image: "/img/screenshots/inferoa-autoresearch-iteration.png",
+    image: "/gif/research.gif",
   },
 ];
 
@@ -381,27 +361,19 @@ export default function Home(): JSX.Element {
               <span className={styles.sectionKicker}>Quick Look</span>
               <h2>Inside a Session</h2>
             </div>
-            <div className={styles.sessionCarousel} aria-label="Inferoa session screenshots">
-              <div className={styles.sessionTrack}>
-                {[0, 1].map((copyIndex) =>
-                  sessionScreens.map((screen, index) => (
-                    <article
-                      className={styles.sessionCard}
-                      key={`${copyIndex}-${screen.title}`}
-                      aria-hidden={copyIndex === 1 ? "true" : undefined}
-                    >
-                      <div className={styles.sessionCardHeader}>
-                        <span>{String(index + 1).padStart(2, "0")}</span>
-                        <div>
-                          <h3>{screen.title}</h3>
-                          <p>{screen.body}</p>
-                        </div>
-                      </div>
-                      <img src={screen.image} alt={`Inferoa ${screen.title} screen`} loading="lazy" />
-                    </article>
-                  )),
-                )}
-              </div>
+            <div className={styles.sessionGrid} aria-label="Inferoa session GIF demos">
+              {sessionDemos.map((screen, index) => (
+                <article className={styles.sessionCard} key={screen.title}>
+                  <div className={styles.sessionCardHeader}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <div>
+                      <h3>{screen.title}</h3>
+                      <p>{screen.body}</p>
+                    </div>
+                  </div>
+                  <img src={screen.image} alt={`Inferoa ${screen.title} session demo`} loading="lazy" />
+                </article>
+              ))}
             </div>
           </div>
         </section>

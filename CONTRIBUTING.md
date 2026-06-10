@@ -21,6 +21,7 @@ you want to fall back to the published `inferoa` package.
 
 ```bash
 npm test            # TypeScript build and Node test suite
+npm run check       # TypeScript type-check without output files
 make dev-bin        # Build and link the local CLI
 make docs-preview   # Local Docusaurus dev server
 make docs-build     # Production docs build (validates links)
@@ -28,7 +29,8 @@ make dev-unlink     # Remove the local `inferoa` global link
 ```
 
 Run `npm test` before sending changes. It runs the TypeScript build and the
-Node test suite. Use `npm run check` to typecheck without producing output.
+Node test suite. Use `npm run check` for a quick type-check without producing
+output files.
 
 ## Project Layout
 

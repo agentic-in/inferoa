@@ -474,6 +474,10 @@
   background: #f0efea;
 }
 
+.sessions .sectionInner {
+  width: min(1680px, calc(100% - 3rem));
+}
+
 .sessions h2 {
   max-width: 780px;
   margin: 0;
@@ -484,39 +488,16 @@
   letter-spacing: 0;
 }
 
-.sessionCarousel {
-  --session-gap: 1.25rem;
-  --session-shift: calc(-50% - 0.625rem);
-  position: relative;
+.sessionGrid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
   margin-top: 1.75rem;
-  padding: 0.3rem 0.1rem 1.25rem;
-  overflow: hidden;
-}
-
-.sessionTrack {
-  width: max-content;
-  display: flex;
-  gap: var(--session-gap);
-  animation: sessionLoop 76s linear infinite;
-  will-change: transform;
-}
-
-.sessionCarousel:hover .sessionTrack {
-  animation-play-state: paused;
-}
-
-@keyframes sessionLoop {
-  from {
-    transform: translateX(0);
-  }
-
-  to {
-    transform: translateX(var(--session-shift));
-  }
 }
 
 .sessionCard {
-  flex: 0 0 min(860px, 82vw);
+  min-width: 0;
   overflow: hidden;
   border: 1px solid rgba(17, 17, 17, 0.14);
   border-radius: 4px;
@@ -559,7 +540,8 @@
 
 .sessionCard img {
   width: 100%;
-  height: min(54vw, 540px);
+  aspect-ratio: 31 / 18;
+  height: auto;
   display: block;
   object-fit: contain;
   object-position: center;
@@ -694,14 +676,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .sessionCard {
-    flex-basis: min(760px, 86vw);
-  }
-
-  .sessionCard img {
-    height: min(62vw, 460px);
-  }
-
   .mission .sectionInner {
     grid-template-columns: 1fr;
   }
@@ -769,16 +743,13 @@
     grid-template-columns: 1fr;
   }
 
-  .sessionCarousel {
-    --session-gap: 0.85rem;
-    --session-shift: calc(-50% - 0.425rem);
+  .sessionGrid {
+    grid-template-columns: 1fr;
     gap: 0.85rem;
-    margin-inline: -0.25rem;
-    padding-inline: 0.25rem;
   }
 
-  .sessionCard {
-    flex-basis: 88vw;
+  .sessions .sectionInner {
+    width: calc(100% - 2rem);
   }
 
   .sessionCardHeader {
@@ -789,11 +760,6 @@
 
   .sessionCardHeader p {
     font-size: 0.92rem;
-  }
-
-  .sessionCard img {
-    height: 52vw;
-    min-height: 210px;
   }
 
   .sectionInner {
@@ -812,23 +778,5 @@
   .stackFlow em,
   .stackFlow b {
     grid-column: 2;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sessionCarousel {
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scroll-padding-inline: 0.1rem;
-    scroll-snap-type: x mandatory;
-    scrollbar-color: rgba(17, 17, 17, 0.28) transparent;
-  }
-
-  .sessionTrack {
-    animation: none;
-  }
-
-  .sessionCard {
-    scroll-snap-align: start;
   }
 }

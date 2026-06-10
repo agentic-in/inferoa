@@ -75,7 +75,14 @@ the inference stack:
 | Intelligent routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Choose model paths by cost, safety, privacy, capability, and session pressure | Avoid one expensive path for every turn |
 | Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use high-throughput, memory-efficient serving and multimodal endpoints while respecting inference-engine optimization rules | Control cost, safety, privacy, and data sovereignty when an external frontier model is unnecessary |
 
-![tokenmaxxing](website/static/img/screenshots/tokenmaxxing.png)
+
+<div align="center">
+
+**/tokenmaxxing inside a session 📽️**
+
+  <img src="website/static/img/screenshots/tokenmaxxing.png" alt="Welcome" width="860" />
+
+</div>
 
 ## Core Design
 
@@ -102,8 +109,6 @@ npm install -g inferoa@dev
 The `@dev` dist-tag tracks the latest build published from `main`. The npm
 `latest` dist-tag is reserved for stable releases.
 
-Node.js 24 or newer is required. Use `node --version` to check.
-
 ## Quickstart
 
 ```bash
@@ -129,14 +134,14 @@ inferoa --print "Summarize the README in one paragraph."
 
 - [Quickstart](https://inferoa.agentic-in.ai/docs/quickstart) and
   [Architecture](https://inferoa.agentic-in.ai/docs/architecture) on the docs
-  site.
+  site for the full walk-through.
 - [CLI reference](https://inferoa.agentic-in.ai/docs/reference/cli),
   [Slash commands](https://inferoa.agentic-in.ai/docs/reference/slash-commands),
   and [Configuration reference](https://inferoa.agentic-in.ai/docs/reference/configuration).
 - The source tree under `docs/` holds internal design notes (roadmap, TUI
   product design, vLLM-Omni validation, public-source hygiene).
 
-### Core Commands
+### Core Slash Commands
 
 Use these commands as the task grows:
 
@@ -147,24 +152,6 @@ Use these commands as the task grows:
   evidence in the same session.
 - `/tokenmaxxing` shows token and cost pressure across prefix-cache reuse,
   context savings, recent turn usage, and model-selection pressure.
-
-## Repository Development
-
-From a source checkout, build the project and link the local `inferoa` binary
-for interactive development:
-
-```bash
-npm install
-npm run build
-make dev-bin
-inferoa setup
-inferoa
-```
-
-Useful development commands: `npm test`, `make docs-preview`, `make docs-build`,
-and `make dev-unlink` to remove the global link. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow, documentation
-conventions, and publishing details.
 
 ## Acknowledgements
 

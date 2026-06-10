@@ -3,12 +3,12 @@ slug: announcing-inferoa
 title: "Inferoa: Inference-native Tokenmaxxing Agent Harness"
 title_meta: "Inferoa: Inference-native Tokenmaxxing Agent Harness"
 description: "Inferoa is an Inference-native Tokenmaxxing Agent Harness for long-horizon coding work across prefix-cache discipline, context optimization, routing, and high-throughput model serving."
-image: /img/inferoa-line-hero.png
+image: /img/blog/inferoa-banner.png
 authors: []
 tags: [inferoa, tokenmaxxing, agents, inference, vllm]
 ---
 
-![Inferoa Agent Harness](/img/inferoa-line-hero.png)
+![Inferoa: Inference-native Tokenmaxxing Agent Harness](/img/blog/inferoa-banner.png)
 
 Most agents call models as if inference were a black box.
 
@@ -47,6 +47,8 @@ inspection, shell commands, edits, retries, compaction, cache warmup, route
 selection, and verification. If the harness treats every turn as generic chat
 traffic, it throws away the optimization surface underneath it.
 
+![What breaks when long-horizon agents treat inference as a black box](/img/blog/inferoa-what-breaks.png)
+
 The failure modes are familiar:
 
 - prompt shape drifts, so prefix cache cannot be reused reliably;
@@ -64,6 +66,8 @@ Inferoa makes inference behavior visible to the agent loop. The point is not to
 add another dashboard. The point is to let the runtime choose better prompts,
 better context, better routes, and better recovery behavior while the task is
 still running.
+
+![What changes when inference signals become native to the agent loop](/img/blog/inferoa-what-changes.png)
 
 | Surface | Substrate | What Inferoa Makes Native | Why It Matters |
 | --- | --- | --- | --- |
@@ -149,6 +153,8 @@ that protects stability, preserves continuity through compression, and uses
 every inference surface available.
 
 ## Built With The Inference Stack
+
+![Inferoa built with the inference stack](/img/blog/inferoa-stack.png)
 
 ### vLLM Ecosystem
 
