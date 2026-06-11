@@ -185,7 +185,7 @@ function renderToolBody(group: ToolEventGroup, store: SessionStore): string[] {
       lines.push(...renderClarifyTool(data));
       break;
     case "goal":
-      lines.push(...renderGoalTool(data, group.args));
+      lines.push(...renderGoalTool(data, group.args, result));
       break;
     case "plan":
       lines.push(...renderPlanTool(data));
@@ -556,9 +556,20 @@ function renderClarifyTool(data: JsonObject): string[] {
   return [`${fg256(39, "answer")} ${answer}`];
 }
 
-function renderGoalTool(data: JsonObject, args: JsonObject = {}): string[] {
+function renderGoalTool(data: JsonObject, args: JsonObject = {}, result?: ToolResult): string[] {
   const goal = objectField(data.goal);
   if (!Object.keys(goal).length) {
+    if (result?.ok === false) {
+      const error = objectField(result.error);
+      const code = stringField(error.code);
+      const message = stringField(error.message) ?? result.summary;
+      if (code === "invalid_tool_arguments") {
+        return [`${fg256(203, "argument error")} ${message}`];
+      }
+      if (code || message) {
+        return [`${fg256(203, code ?? "error")} ${message ?? ""}`.trim()];
+      }
+    }
     return [fg256(243, "No active loop.")];
   }
   const lines: string[] = [];

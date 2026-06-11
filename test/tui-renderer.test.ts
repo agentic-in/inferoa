@@ -434,6 +434,32 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
       {
         session_id: session.session_id,
         run_id: "run",
+        type: "tool.call",
+        data: { tool_call_id: "goal_bad_args", tool_name: "goal", arguments: { op: "set_strategy", approach: "surgical" } },
+      },
+      {
+        session_id: session.session_id,
+        run_id: "run",
+        type: "tool.result",
+        data: {
+          tool_call_id: "goal_bad_args",
+          tool_name: "goal",
+          result: {
+            ok: false,
+            summary: "Invalid goal arguments: arguments.approach must be one of \"focus\", \"explore\", \"timebox\"",
+            data: {
+              issues: [{ path: "arguments.approach", message: "must be one of \"focus\", \"explore\", \"timebox\"" }],
+            },
+            error: {
+              code: "invalid_tool_arguments",
+              message: "Invalid goal arguments: arguments.approach must be one of \"focus\", \"explore\", \"timebox\"",
+            },
+          },
+        },
+      },
+      {
+        session_id: session.session_id,
+        run_id: "run",
         type: "tool.result",
         data: {
           tool_call_id: "ar_init_failed",
@@ -643,6 +669,9 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
     assert.match(goalBlock, /step .*\* verify Run verification/);
     assert.match(goalBlock, /task plan 1 completed · 1 in progress/);
     assert.match(goalBlock, /active step \* verify Run verification/);
+    assert.match(goalBlock, /Set loop approach failed · focus/);
+    assert.match(goalBlock, /argument error Invalid goal arguments: arguments\.approach must be one of "focus", "explore", "timebox"/);
+    assert.doesNotMatch(goalBlock, /Set loop approach failed · surgical[\s\S]*No active loop\./);
     assert.match(plain, /Updated loop failed · Blocked goal · active/);
     assert.match(plain, /goal_incomplete_plan: Cannot complete goal with unfinished internal plan steps: verify/);
     assert.match(plain, /Initialized experiment failed · harness exited 2; missing METRIC latency_ms=value/);

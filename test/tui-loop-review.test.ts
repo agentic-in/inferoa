@@ -48,3 +48,23 @@ test("loop review prompt renders actions without slash commands", () => {
   assert.match(plain, /Add regression tests/);
   assert.doesNotMatch(plain, /\/loop review/);
 });
+
+test("loop review prompt only colors blocking decisions red", () => {
+  const goal = createGoalState({ objective: "Review decision colors" });
+  goal.goal.pending_review_decision = {
+    id: "review_color",
+    action: "expand",
+    summary: "Open another loop task.",
+    source_run_id: "run_review",
+    source_horizon_generation: 0,
+    created_at: "2026-06-11T00:00:00.000Z",
+  };
+
+  const expand = renderLoopReviewPromptLines(goal.goal, createLoopReviewInputState(), 100).join("\n");
+  assert.match(expand, /\x1b\[38;5;75mdecision/);
+  assert.doesNotMatch(expand, /\x1b\[38;5;203mdecision/);
+
+  goal.goal.pending_review_decision!.action = "blocked";
+  const blocked = renderLoopReviewPromptLines(goal.goal, createLoopReviewInputState(), 100).join("\n");
+  assert.match(blocked, /\x1b\[38;5;203mdecision/);
+});

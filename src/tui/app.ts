@@ -7034,7 +7034,7 @@ function loopReviewPanelLines(goal: GoalRecord, width = terminalWidth()): string
   }
   const lines: string[] = [];
   appendGoalPanelField(lines, "objective", goal.objective, width, 250, 39);
-  appendGoalPanelField(lines, "decision", `${pending.action} from loop task ${pending.source_horizon_generation}`, width, 250, 203);
+  appendGoalPanelField(lines, "decision", `${pending.action} from loop task ${pending.source_horizon_generation}`, width, 250, loopReviewDecisionColor(pending.action));
   if (pending.summary) {
     appendGoalPanelField(lines, "summary", pending.summary, width, 250, 39);
   }
@@ -7258,6 +7258,19 @@ function loopReviewApproveDescription(action: GoalReflectionDecision): string {
     case "blocked":
       return "apply the staged decision and pause with the recorded blocker";
   }
+}
+
+function loopReviewDecisionColor(action: string): number {
+  if (action === "blocked" || action === "block") {
+    return 203;
+  }
+  if (action === "done") {
+    return 48;
+  }
+  if (action === "expand") {
+    return 75;
+  }
+  return 244;
 }
 
 function parseGoalModeArgs(args: string): ParsedGoalModeOptions | undefined {

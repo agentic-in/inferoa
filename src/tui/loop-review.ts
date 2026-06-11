@@ -94,7 +94,7 @@ export function renderLoopReviewPromptLines(goal: GoalRecord, state: LoopReviewI
   push("");
   appendField(lines, "objective", goal.objective, contentWidth, safeWidth, 250, 39);
   if (pending) {
-    appendField(lines, "decision", `${pending.action} from loop task ${pending.source_horizon_generation}`, contentWidth, safeWidth, 250, 203);
+    appendField(lines, "decision", `${pending.action} from loop task ${pending.source_horizon_generation}`, contentWidth, safeWidth, 250, loopReviewDecisionColor(pending.action));
     if (pending.summary) {
       appendField(lines, "summary", pending.summary, contentWidth, safeWidth, 250, 39);
     }
@@ -191,6 +191,19 @@ function appendField(lines: string[], label: string, value: string, contentWidth
     const prefix = index === 0 ? `${fg256(labelColor, padRight(label, 9))} ` : `${" ".repeat(10)}`;
     lines.push(bgLine(236, `  ${prefix}${fg256(valueColor, chunk)}`, width));
   });
+}
+
+function loopReviewDecisionColor(action: string): number {
+  if (action === "blocked" || action === "block") {
+    return 203;
+  }
+  if (action === "done") {
+    return 48;
+  }
+  if (action === "expand") {
+    return 75;
+  }
+  return 244;
 }
 
 function appendWrapped(lines: string[], text: string, contentWidth: number, width: number, color: number, indent = "  "): void {
