@@ -71,16 +71,33 @@ test("self-improve proposes and adopts a workspace learned skill from verified l
     const proposal = await optLitePropose(store, workspace);
     assert.match(proposal.id, /^self_improve_/);
     assert.equal(proposal.status, "staged");
-    assert.match(proposal.staged_skill_path, /\.inferoa\/self-improve\/proposals\/self_improve_/);
+    assert.match(proposal.staged_skill_path, /\.inferoa\/self-improve\/proposals\/self_improve_[^/]+\/proposed\.loop\.SKILL\.md$/);
     assert.equal(proposal.evidence.goal_sessions, 1);
     assert.equal(proposal.evidence.learning_signal_records, 2);
-    assert.match(proposal.skill_body, /Workspace Learned Loop Policy/);
+    const skillTargets = (proposal as unknown as {
+      skill_targets?: Array<{ target?: string; skill_id?: string; staged_skill_path?: string; body?: string }>;
+    }).skill_targets ?? [];
+    assert.equal(skillTargets.length, 2);
+    const loopTarget = skillTargets.find((target) => target.target === "loop_skill");
+    const workspaceTarget = skillTargets.find((target) => target.target === "workspace_skill");
+    assert.equal(loopTarget?.skill_id, "inferoa-loop-skill");
+    assert.equal(workspaceTarget?.skill_id, "inferoa-workspace-skill");
+    assert.match(loopTarget?.body ?? "", /Inferoa Loop Skill/);
+    assert.match(loopTarget?.body ?? "", /soft-only completion/i);
+    assert.match(workspaceTarget?.body ?? "", /Inferoa Workspace Skill/);
+    assert.match(workspaceTarget?.body ?? "", /npm test/);
+    assert.match(loopTarget?.staged_skill_path ?? "", /proposed\.loop\.SKILL\.md$/);
+    assert.match(workspaceTarget?.staged_skill_path ?? "", /proposed\.workspace\.SKILL\.md$/);
+    assert.match(await readFile(loopTarget!.staged_skill_path!, "utf8"), /Inferoa Loop Skill/);
+    assert.match(await readFile(workspaceTarget!.staged_skill_path!, "utf8"), /npm test/);
+    assert.match(proposal.skill_body, /Inferoa Loop Skill/);
     assert.match(proposal.skill_body, /Ship verified loop policy/);
     assert.match(proposal.skill_body, /Learning signals: 2/);
     const stagedEvents = store.listEvents(session.session_id).filter((event) => event.type === "skill.proposal.staged");
     assert.equal(stagedEvents.length, 1);
     assert.equal(stagedEvents[0]?.data.proposal_id, proposal.id);
-    assert.equal(stagedEvents[0]?.data.skill_id, "workspace-learned-loop-policy");
+    assert.equal(stagedEvents[0]?.data.skill_id, "inferoa-loop-skill");
+    assert.deepEqual(stagedEvents[0]?.data.skill_target_ids, ["inferoa-loop-skill", "inferoa-workspace-skill"]);
     assert.deepEqual(stagedEvents[0]?.data.source_session_ids, [session.session_id]);
     const signalEvents = store.listEvents(session.session_id).filter((event) => event.type === "goal.learning_signal.recorded");
     assert.equal(signalEvents.length, 2);
@@ -96,13 +113,18 @@ test("self-improve proposes and adopts a workspace learned skill from verified l
     const config = structuredClone(DEFAULT_CONFIG);
     const adopted = await optLiteAdopt(store, workspace, config, proposal.id);
     assert.equal(adopted.status, "adopted");
-    assert.equal(config.skills.enabled.includes("workspace-learned-loop-policy"), true);
-    assert.match(await readFile(path.join(dir, ".inferoa", "skills", "workspace-learned-loop-policy", "SKILL.md"), "utf8"), /structured verification evidence/);
-    assert.match(await readFile(path.join(process.env.INFEROA_STATE_DIR!, "config.yaml"), "utf8"), /workspace-learned-loop-policy/);
+    assert.equal(config.skills.enabled.includes("inferoa-loop-skill"), true);
+    assert.equal(config.skills.enabled.includes("inferoa-workspace-skill"), true);
+    assert.match(await readFile(path.join(dir, ".inferoa", "skills", "inferoa-loop-skill", "SKILL.md"), "utf8"), /soft-only completion/i);
+    assert.match(await readFile(path.join(dir, ".inferoa", "skills", "inferoa-workspace-skill", "SKILL.md"), "utf8"), /npm test/);
+    const savedConfig = await readFile(path.join(process.env.INFEROA_STATE_DIR!, "config.yaml"), "utf8");
+    assert.match(savedConfig, /inferoa-loop-skill/);
+    assert.match(savedConfig, /inferoa-workspace-skill/);
     const adoptedEvents = store.listEvents(session.session_id).filter((event) => event.type === "skill.proposal.adopted");
     assert.equal(adoptedEvents.length, 1);
     assert.equal(adoptedEvents[0]?.data.proposal_id, proposal.id);
     assert.equal(adoptedEvents[0]?.data.skill_path, adopted.skill_path);
+    assert.deepEqual(adoptedEvents[0]?.data.skill_target_ids, ["inferoa-loop-skill", "inferoa-workspace-skill"]);
 
     const after = await optLiteStatus(store, workspace);
     assert.equal(after.proposal_count, 1);
@@ -204,10 +226,16 @@ test("self-improve run and report commands expose replay/gating flow as json", a
       "self-improve",
       "propose",
     ], { maxBuffer: 1024 * 1024 });
-    const parsedProposal = JSON.parse(proposeOutput.stdout) as { id?: string; status?: string; staged_skill_path?: string };
+    const parsedProposal = JSON.parse(proposeOutput.stdout) as {
+      id?: string;
+      status?: string;
+      staged_skill_path?: string;
+      skill_targets?: Array<{ target?: string; skill_id?: string; staged_skill_path?: string }>;
+    };
     assert.equal(parsedProposal.status, "staged");
     assert.match(parsedProposal.id ?? "", /^self_improve_/);
-    assert.match(parsedProposal.staged_skill_path ?? "", /\.inferoa\/self-improve\/proposals\/self_improve_/);
+    assert.match(parsedProposal.staged_skill_path ?? "", /\.inferoa\/self-improve\/proposals\/self_improve_[^/]+\/proposed\.loop\.SKILL\.md$/);
+    assert.deepEqual(parsedProposal.skill_targets?.map((target) => target.skill_id).sort(), ["inferoa-loop-skill", "inferoa-workspace-skill"]);
     const runOutput = await execFileAsync(process.execPath, [
       cliPath,
       "--workspace",
@@ -273,9 +301,12 @@ test("self-improve run and report commands expose replay/gating flow as json", a
     const parsedAdopt = JSON.parse(adoptOutput.stdout) as { id?: string; status?: string; skill_path?: string };
     assert.equal(parsedAdopt.id, parsedProposal.id);
     assert.equal(parsedAdopt.status, "adopted");
-    assert.match(parsedAdopt.skill_path ?? "", /\.inferoa\/skills\/workspace-learned-loop-policy\/SKILL\.md$/);
-    assert.match(await readFile(path.join(workspaceRoot, ".inferoa", "skills", "workspace-learned-loop-policy", "SKILL.md"), "utf8"), /Workspace Learned Loop Policy/);
-    assert.match(await readFile(path.join(stateDir, "config.yaml"), "utf8"), /workspace-learned-loop-policy/);
+    assert.match(parsedAdopt.skill_path ?? "", /\.inferoa\/skills\/inferoa-loop-skill\/SKILL\.md$/);
+    assert.match(await readFile(path.join(workspaceRoot, ".inferoa", "skills", "inferoa-loop-skill", "SKILL.md"), "utf8"), /Inferoa Loop Skill/);
+    assert.match(await readFile(path.join(workspaceRoot, ".inferoa", "skills", "inferoa-workspace-skill", "SKILL.md"), "utf8"), /Inferoa Workspace Skill/);
+    const savedConfig = await readFile(path.join(stateDir, "config.yaml"), "utf8");
+    assert.match(savedConfig, /inferoa-loop-skill/);
+    assert.match(savedConfig, /inferoa-workspace-skill/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -29,6 +29,7 @@ export interface OptLiteProposalSummary {
   adopted_at?: string;
   skill_id: string;
   skill_path?: string;
+  skill_targets?: OptSkillTargetSummary[];
   evidence: OptEvidenceSummary;
 }
 
@@ -37,8 +38,11 @@ export type OptLiteProposalStatus = "staged" | "adopted";
 export interface OptLiteProposal extends OptLiteProposalSummary {
   source_sessions: OptSourceSession[];
   source_events: OptSourceEvent[];
+  workspace_commands?: OptWorkspaceCommandEvidence[];
+  skill_targets?: OptSkillTarget[];
   skill_body: string;
   staged_skill_path: string;
+  skill_paths?: Record<string, string>;
 }
 
 export interface OptReplayReportSummary {
@@ -89,6 +93,7 @@ export interface OptReplaySample {
   partial_records: number;
   baseline_policy_score: number;
   candidate_policy_score: number;
+  target_scores?: OptReplayTargetScore[];
 }
 
 export interface OptEvidenceSummary {
@@ -97,6 +102,49 @@ export interface OptEvidenceSummary {
   human_feedback_records: number;
   learning_signal_records: number;
   skill_snapshots: number;
+  workspace_command_records?: number;
+}
+
+export type OptSkillTargetKind = "loop_skill" | "workspace_skill";
+
+export interface OptSkillTargetSummary {
+  target: OptSkillTargetKind;
+  skill_id: string;
+  staged_skill_path?: string;
+  skill_path?: string;
+  edit_count: number;
+}
+
+export interface OptSkillTarget extends OptSkillTargetSummary {
+  skill_name: string;
+  body: string;
+  edits: OptLearningEdit[];
+}
+
+export interface OptLearningEdit {
+  target: OptSkillTargetKind;
+  op: "add" | "replace" | "delete";
+  section: string;
+  content: string;
+  rationale: string;
+  source_event_indexes: number[];
+}
+
+export interface OptWorkspaceCommandEvidence {
+  command: string;
+  cwd?: string;
+  session_id: string;
+  run_id?: string;
+  verifier_role?: string;
+  verdict: string;
+  confidence: string;
+}
+
+export interface OptReplayTargetScore {
+  target: OptSkillTargetKind;
+  baseline_score: number;
+  candidate_score: number;
+  checks: string[];
 }
 
 interface OptSourceSession {
@@ -144,23 +192,36 @@ export async function optLitePropose(store: SessionStore, workspace: WorkspaceId
     throw new Error("No eligible loop evidence found. Complete or verify a loop before proposing a learned skill.");
   }
   const createdAt = new Date().toISOString();
-  const skillId = "workspace-learned-loop-policy";
-  const skillBody = renderSkillBody(evidence);
-  const id = `self_improve_${shortHash(stableJson({ evidence: evidence.source_events, skill_body: skillBody }), 12)}`;
-  const stagedSkillPath = path.join(optProposalDir(workspace.root), `${id}.SKILL.md`);
+  const targetDrafts = renderSkillTargets(evidence);
+  const skillBody = renderCombinedSkillBody(targetDrafts);
+  const id = `self_improve_${shortHash(stableJson({
+    evidence: evidence.source_events,
+    workspace_commands: evidence.workspace_commands,
+    skill_targets: targetDrafts.map((target) => ({ target: target.target, skill_id: target.skill_id, body: target.body, edits: target.edits })),
+  }), 12)}`;
+  const skillTargets = targetDrafts.map((target) => ({
+    ...target,
+    staged_skill_path: path.join(optProposalArtifactDir(workspace.root, id), stagedTargetFilename(target.target)),
+  }));
+  const primaryTarget = skillTargets[0]!;
   const proposal: OptLiteProposal = {
     id,
     status: "staged",
     created_at: createdAt,
-    skill_id: skillId,
+    skill_id: primaryTarget.skill_id,
     evidence: evidence.summary,
     source_sessions: evidence.sessions,
     source_events: evidence.source_events,
+    workspace_commands: evidence.workspace_commands,
+    skill_targets: skillTargets,
     skill_body: skillBody,
-    staged_skill_path: stagedSkillPath,
+    staged_skill_path: primaryTarget.staged_skill_path,
   };
   await writeProposal(workspace.root, proposal);
-  await fs.writeFile(stagedSkillPath, skillBody, "utf8");
+  for (const target of skillTargets) {
+    await ensureDir(path.dirname(target.staged_skill_path));
+    await fs.writeFile(target.staged_skill_path, target.body, "utf8");
+  }
   recordSkillProposalStaged(store, workspace, proposal);
   return proposal;
 }
@@ -178,25 +239,38 @@ export async function optLiteAdopt(
   if (!proposal) {
     throw new Error(proposalId ? `No proposal found: ${proposalId}` : "No staged self-improve proposal found.");
   }
-  const skillDir = path.join(workspace.root, ".inferoa", "skills", proposal.skill_id);
-  const skillPath = path.join(skillDir, "SKILL.md");
-  await ensureDir(skillDir);
-  await fs.writeFile(skillPath, proposal.skill_body, "utf8");
+  const targets = proposalSkillTargets(proposal);
+  const skillPaths: Record<string, string> = {};
   const enabled = new Set(config.skills.enabled);
-  enabled.add(proposal.skill_id);
+  for (const target of targets) {
+    const skillDir = path.join(workspace.root, ".inferoa", "skills", target.skill_id);
+    const skillPath = path.join(skillDir, "SKILL.md");
+    await ensureDir(skillDir);
+    await fs.writeFile(skillPath, target.body, "utf8");
+    skillPaths[target.skill_id] = skillPath;
+    enabled.add(target.skill_id);
+  }
   config.skills.enabled = [...enabled].sort();
   const config_path = await saveUserConfig(config);
+  const adoptedTargets = targets.map((target) => ({
+    ...target,
+    skill_path: skillPaths[target.skill_id],
+  }));
+  const primaryTarget = adoptedTargets[0]!;
   const adopted: OptLiteProposal = {
     ...proposal,
     status: "adopted",
     adopted_at: new Date().toISOString(),
-    skill_path: skillPath,
+    skill_id: primaryTarget.skill_id,
+    skill_path: primaryTarget.skill_path,
+    skill_paths: skillPaths,
+    skill_targets: adoptedTargets,
     source_events: [
       ...proposal.source_events,
       {
         session_id: "workspace",
         type: "self_improve.adopted",
-        summary: `adopted ${proposal.skill_id}; config ${config_path}`,
+        summary: `adopted ${adoptedTargets.map((target) => target.skill_id).join(", ")}; config ${config_path}`,
       },
     ],
   };
@@ -209,6 +283,8 @@ export async function optLiteAdopt(
       proposal_id: adopted.id,
       skill_id: adopted.skill_id,
       skill_path: adopted.skill_path,
+      skill_target_ids: adoptedTargets.map((target) => target.skill_id),
+      skill_paths: skillPaths,
       config_path,
     },
   });
@@ -281,10 +357,18 @@ export async function optLiteReport(workspace: WorkspaceIdentity, replayId?: str
 }
 
 function recordSkillProposalStaged(store: SessionStore, workspace: WorkspaceIdentity, proposal: OptLiteProposal): void {
+  const targets = proposalSkillTargets(proposal);
   appendOptEventOnce(store, workspace, proposal.source_sessions, "skill.proposal.staged", "proposal_id", proposal.id, {
     proposal_id: proposal.id,
     status: proposal.status,
     skill_id: proposal.skill_id,
+    skill_target_ids: targets.map((target) => target.skill_id),
+    skill_targets: targets.map((target) => ({
+      target: target.target,
+      skill_id: target.skill_id,
+      staged_skill_path: target.staged_skill_path,
+      edit_count: target.edit_count,
+    })),
     staged_skill_path: proposal.staged_skill_path,
     source_session_ids: proposal.source_sessions.map((session) => session.session_id),
     evidence: {
@@ -293,16 +377,20 @@ function recordSkillProposalStaged(store: SessionStore, workspace: WorkspaceIden
       human_feedback_records: proposal.evidence.human_feedback_records,
       learning_signal_records: proposal.evidence.learning_signal_records,
       skill_snapshots: proposal.evidence.skill_snapshots,
+      workspace_command_records: proposal.evidence.workspace_command_records,
     },
   });
 }
 
 function recordSkillProposalAdopted(store: SessionStore, workspace: WorkspaceIdentity, proposal: OptLiteProposal): void {
+  const targets = proposalSkillTargets(proposal);
   appendOptEventOnce(store, workspace, proposal.source_sessions, "skill.proposal.adopted", "proposal_id", proposal.id, {
     proposal_id: proposal.id,
     status: proposal.status,
     skill_id: proposal.skill_id,
     skill_path: proposal.skill_path,
+    skill_target_ids: targets.map((target) => target.skill_id),
+    skill_paths: proposal.skill_paths,
     source_session_ids: proposal.source_sessions.map((session) => session.session_id),
     adopted_at: proposal.adopted_at,
   });
@@ -356,10 +444,12 @@ function appendOptEventOnce(
 function collectOptEvidence(store: SessionStore, workspace: WorkspaceIdentity): {
   sessions: OptSourceSession[];
   source_events: OptSourceEvent[];
+  workspace_commands: OptWorkspaceCommandEvidence[];
   summary: OptEvidenceSummary;
 } {
   const sessions: OptSourceSession[] = [];
   const sourceEvents: OptSourceEvent[] = [];
+  const workspaceCommands = new Map<string, OptWorkspaceCommandEvidence>();
   let verificationRecords = 0;
   let humanFeedbackRecords = 0;
   let learningSignalRecords = 0;
@@ -387,6 +477,9 @@ function collectOptEvidence(store: SessionStore, workspace: WorkspaceIdentity): 
     verificationRecords += view.verifications.length;
     learningSignalRecords += view.learning_signals.length;
     skillSnapshots += view.skill_snapshots.length;
+    for (const command of workspaceCommandEvidence(view, session.session_id)) {
+      workspaceCommands.set(`${command.command}:${command.cwd ?? ""}:${command.session_id}:${command.run_id ?? ""}`, command);
+    }
     sourceEvents.push(...verificationEvents(view, session.session_id));
     sourceEvents.push(...learningSignalEvents(view, session.session_id));
     for (const event of reviewEvents) {
@@ -403,12 +496,16 @@ function collectOptEvidence(store: SessionStore, workspace: WorkspaceIdentity): 
   return {
     sessions,
     source_events: sourceEvents.slice(0, 60),
+    workspace_commands: [...workspaceCommands.values()].sort((left, right) =>
+      left.command.localeCompare(right.command) || (left.cwd ?? "").localeCompare(right.cwd ?? "") || left.session_id.localeCompare(right.session_id)
+    ).slice(0, 20),
     summary: {
       goal_sessions: sessions.length,
       verification_records: verificationRecords,
       human_feedback_records: humanFeedbackRecords,
       learning_signal_records: learningSignalRecords,
       skill_snapshots: skillSnapshots,
+      workspace_command_records: workspaceCommands.size,
     },
   };
 }
@@ -505,9 +602,28 @@ function verificationEvents(view: GoalLoopView, sessionId: string): OptSourceEve
       verification.confidence,
       verification.horizon_generation !== undefined ? `loop task ${verification.horizon_generation}` : undefined,
       metricSummary(verification.metrics),
+      verificationEvidenceSummary(verification.evidence),
       verification.failure_reason,
     ].filter((item): item is string => Boolean(item)).join(" · "),
   }));
+}
+
+function workspaceCommandEvidence(view: GoalLoopView, sessionId: string): OptWorkspaceCommandEvidence[] {
+  return view.verifications.flatMap((verification) => {
+    const command = cleanString(verification.evidence?.command);
+    if (!command) {
+      return [];
+    }
+    return [{
+      command,
+      cwd: cleanString(verification.evidence?.cwd),
+      session_id: sessionId,
+      run_id: verification.run_id,
+      verifier_role: verification.verifier_role,
+      verdict: verification.verdict,
+      confidence: verification.confidence,
+    }];
+  });
 }
 
 function learningSignalEvents(view: GoalLoopView, sessionId: string): OptSourceEvent[] {
@@ -529,16 +645,133 @@ function metricSummary(metrics: JsonObject | undefined): string | undefined {
   return primary && metric ? `${primary}=${metric}` : metric;
 }
 
-function renderSkillBody(evidence: { sessions: OptSourceSession[]; source_events: OptSourceEvent[]; summary: OptEvidenceSummary }): string {
+function verificationEvidenceSummary(evidence: JsonObject | undefined): string | undefined {
+  if (!evidence) {
+    return undefined;
+  }
+  const command = cleanString(evidence.command);
+  if (command) {
+    const cwd = cleanString(evidence.cwd);
+    const status = cleanString(evidence.status);
+    return ["command", command, cwd ? `cwd ${cwd}` : undefined, status ? `status ${status}` : undefined].filter((item): item is string => Boolean(item)).join(" ");
+  }
+  const verifier = cleanString(evidence.verifier) ?? cleanString(evidence.verifier_id);
+  return verifier ? `verifier ${verifier}` : undefined;
+}
+
+function cleanString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function renderSkillTargets(evidence: {
+  sessions: OptSourceSession[];
+  source_events: OptSourceEvent[];
+  workspace_commands: OptWorkspaceCommandEvidence[];
+  summary: OptEvidenceSummary;
+}): OptSkillTarget[] {
+  const loopEdits = loopSkillEdits(evidence);
+  const workspaceEdits = workspaceSkillEdits(evidence);
+  const loopBody = renderLoopSkillBody(evidence, loopEdits);
+  const workspaceBody = renderWorkspaceSkillBody(evidence, workspaceEdits);
+  return [
+    {
+      target: "loop_skill",
+      skill_id: "inferoa-loop-skill",
+      skill_name: "Inferoa Loop Skill",
+      staged_skill_path: "",
+      edit_count: loopEdits.length,
+      edits: loopEdits,
+      body: loopBody,
+    },
+    {
+      target: "workspace_skill",
+      skill_id: "inferoa-workspace-skill",
+      skill_name: "Inferoa Workspace Skill",
+      staged_skill_path: "",
+      edit_count: workspaceEdits.length,
+      edits: workspaceEdits,
+      body: workspaceBody,
+    },
+  ];
+}
+
+function loopSkillEdits(evidence: { source_events: OptSourceEvent[]; summary: OptEvidenceSummary }): OptLearningEdit[] {
+  const edits: OptLearningEdit[] = [
+    {
+      target: "loop_skill",
+      op: "add",
+      section: "completion",
+      content: "When completion evidence is reflection-only or otherwise soft-only, do not mark the loop complete until a command, checker, connector, research metric, or explicit human approval verifies the result.",
+      rationale: "Loop completion should be tied to verifier-backed evidence instead of the agent's own reflection.",
+      source_event_indexes: sourceIndexes(evidence.source_events, (event) => event.summary.includes("soft") || event.summary.includes("reflection")),
+    },
+    {
+      target: "loop_skill",
+      op: "add",
+      section: "verification",
+      content: "When a verifier returns fail, blocked, or partial, choose continue, pause, or expand instead of done, and preserve the verifier failure reason in the next loop state.",
+      rationale: "Failed and blocked verifier outcomes are control signals, not completion evidence.",
+      source_event_indexes: sourceIndexes(evidence.source_events, (event) => /\b(fail|blocked|partial)\b/.test(event.summary)),
+    },
+  ];
+  if (evidence.summary.human_feedback_records > 0) {
+    edits.push({
+      target: "loop_skill",
+      op: "add",
+      section: "review",
+      content: "When human feedback revises, rejects, or blocks a loop decision, carry that feedback as a constraint for the next horizon and cite it before claiming completion.",
+      rationale: "Human review is the highest-quality correction signal for future loop control.",
+      source_event_indexes: sourceIndexes(evidence.source_events, (event) => event.type === "goal.review.resolved" || event.summary.includes("human feedback")),
+    });
+  }
+  return edits.map((edit) => ({
+    ...edit,
+    source_event_indexes: edit.source_event_indexes.length ? edit.source_event_indexes : [0].filter((index) => evidence.source_events[index]),
+  }));
+}
+
+function workspaceSkillEdits(evidence: {
+  source_events: OptSourceEvent[];
+  workspace_commands: OptWorkspaceCommandEvidence[];
+}): OptLearningEdit[] {
+  const commands = uniqueCommands(evidence.workspace_commands);
+  if (!commands.length) {
+    return [{
+      target: "workspace_skill",
+      op: "add",
+      section: "repo_conventions",
+      content: "When a loop touches this workspace, inspect verifier history and project scripts before inventing a new validation command.",
+      rationale: "No stable command verifier has enough evidence yet, so the workspace skill should avoid pretending a command rule is proven.",
+      source_event_indexes: sourceIndexes(evidence.source_events, (event) => event.type.includes("verification")),
+    }];
+  }
+  return commands.slice(0, 5).map((command) => ({
+    target: "workspace_skill",
+    op: "add",
+    section: "testing",
+    content: `When code or documentation changes need repo validation, prefer the observed verifier command \`${command.command}\`${command.cwd ? ` from \`${command.cwd}\`` : ""} before claiming completion.`,
+    rationale: `This command appeared in verifier evidence with ${command.confidence} confidence and ${command.verdict} verdict.`,
+    source_event_indexes: sourceIndexes(evidence.source_events, (event) => event.summary.includes(command.command)),
+  }));
+}
+
+function renderCombinedSkillBody(targets: OptSkillTarget[]): string {
+  return targets.map((target) => target.body).join("\n\n---\n\n");
+}
+
+function renderLoopSkillBody(
+  evidence: { sessions: OptSourceSession[]; source_events: OptSourceEvent[]; summary: OptEvidenceSummary },
+  edits: OptLearningEdit[],
+): string {
   return [
     "---",
-    "name: Workspace Learned Loop Policy",
-    "description: Adopted policy from verified Inferoa loop evidence in this workspace.",
+    "name: Inferoa Loop Skill",
+    "description: Per-workspace loop-control policy learned from verified Inferoa loop evidence.",
     "---",
     "",
-    "# Workspace Learned Loop Policy",
+    "# Inferoa Loop Skill",
     "",
-    "Use this skill when working on loop tasks in this workspace.",
+    "Use this skill when making `/loop` control decisions in this workspace.",
     "",
     "## Evidence Summary",
     "",
@@ -548,13 +781,56 @@ function renderSkillBody(evidence: { sessions: OptSourceSession[]; source_events
     `- Learning signals: ${evidence.summary.learning_signal_records}`,
     `- Skill snapshots: ${evidence.summary.skill_snapshots}`,
     "",
-    "## Policy",
+    "## Controller Rules",
     "",
-    "- Keep loop completion tied to structured verification evidence.",
-    "- Review recorded learning signals before updating recurring workspace policy.",
-    "- Preserve human review feedback as a constraint on the next loop task.",
-    "- For research loops, cite the primary metric and result status before claiming progress.",
-    "- Prefer explicit workspace skills over ad hoc hidden prompt changes.",
+    ...edits.map((edit) => `- ${edit.content}`),
+    "",
+    "## Source Sessions",
+    "",
+    ...evidence.sessions.map((session) => `- ${session.session_id}: ${session.objective} (${session.kind}, ${session.verification_count} verification records)`),
+    "",
+    "## Citations",
+    "",
+    ...evidence.source_events.map((event) => `- ${event.session_id}${event.event_id ? `#${event.event_id}` : ""}${event.run_id ? ` run ${event.run_id}` : ""}: ${event.summary}`),
+    "",
+  ].join("\n");
+}
+
+function renderWorkspaceSkillBody(
+  evidence: {
+    sessions: OptSourceSession[];
+    source_events: OptSourceEvent[];
+    workspace_commands: OptWorkspaceCommandEvidence[];
+    summary: OptEvidenceSummary;
+  },
+  edits: OptLearningEdit[],
+): string {
+  const commands = uniqueCommands(evidence.workspace_commands);
+  return [
+    "---",
+    "name: Inferoa Workspace Skill",
+    "description: Per-workspace development workflow learned from verified Inferoa loop evidence.",
+    "---",
+    "",
+    "# Inferoa Workspace Skill",
+    "",
+    "Use this skill when code, documentation, release, test, or review work touches this workspace.",
+    "",
+    "## Evidence Summary",
+    "",
+    `- Loop sessions: ${evidence.summary.goal_sessions}`,
+    `- Verification records: ${evidence.summary.verification_records}`,
+    `- Workspace command records: ${evidence.summary.workspace_command_records ?? commands.length}`,
+    "",
+    "## Workspace Rules",
+    "",
+    ...edits.map((edit) => `- ${edit.content}`),
+    "",
+    "## Observed Verifier Commands",
+    "",
+    ...(commands.length
+      ? commands.map((command) => `- \`${command.command}\`${command.cwd ? ` in \`${command.cwd}\`` : ""} (${command.verdict}, ${command.confidence})`)
+      : ["- No stable command verifier has been observed yet."]),
     "",
     "## Source Sessions",
     "",
