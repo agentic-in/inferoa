@@ -9,6 +9,7 @@ import type {
   GoalLoopLearningSignalPolarity,
   GoalLoopRunStatus,
   GoalLoopSkillBodyLoad,
+  GoalLoopSkillRuleApplication,
   GoalLoopSkillSnapshot,
   GoalLoopSkillSnapshotItem,
   GoalLoopVerification,
@@ -42,9 +43,41 @@ export function readGoalLoopView(store: SessionStore, sessionId: string): GoalLo
     verifications,
     skill_snapshots: goal ? skillSnapshots(events, goal.id) : [],
     skill_body_loads: goal ? skillBodyLoads(events, goal.id) : [],
+    skill_rule_applications: goal ? skillRuleApplications(events, goal.id) : [],
     learning_signals: goal ? learningSignals(events, goal.id) : [],
     pending_review_decision: goal?.pending_review_decision,
     blocker: goal?.blocker,
+  };
+}
+
+function skillRuleApplications(events: SessionEvent[], goalId: string): GoalLoopSkillRuleApplication[] {
+  return events
+    .filter((event) => event.type === "skill.rule.applied" && stringValue(event.data.goal_id) === goalId)
+    .map(parseSkillRuleApplicationEvent)
+    .filter((application): application is GoalLoopSkillRuleApplication => Boolean(application))
+    .sort(compareSkillRuleApplications);
+}
+
+function parseSkillRuleApplicationEvent(event: SessionEvent): GoalLoopSkillRuleApplication | undefined {
+  const skillId = stringValue(event.data.skill_id);
+  const ruleId = stringValue(event.data.rule_id);
+  if (!skillId || !ruleId) {
+    return undefined;
+  }
+  const target = skillRuleTarget(event.data.target);
+  return {
+    run_id: event.run_id,
+    goal_id: stringValue(event.data.goal_id),
+    horizon_generation: numberValue(event.data.horizon_generation),
+    skill_id: skillId,
+    target,
+    body_hash: stringValue(event.data.body_hash),
+    body_load_run_id: stringValue(event.data.body_load_run_id),
+    rule_id: ruleId,
+    rule_summary: stringValue(event.data.rule_summary),
+    decision: stringValue(event.data.decision),
+    evidence: objectValue(event.data.evidence),
+    created_at: event.created_at,
   };
 }
 
@@ -308,6 +341,13 @@ function compareSkillBodyLoads(a: GoalLoopSkillBodyLoad, b: GoalLoopSkillBodyLoa
     || a.skill_id.localeCompare(b.skill_id);
 }
 
+function compareSkillRuleApplications(a: GoalLoopSkillRuleApplication, b: GoalLoopSkillRuleApplication): number {
+  return (a.created_at ?? "").localeCompare(b.created_at ?? "")
+    || (a.run_id ?? "").localeCompare(b.run_id ?? "")
+    || a.skill_id.localeCompare(b.skill_id)
+    || a.rule_id.localeCompare(b.rule_id);
+}
+
 function compareLearningSignals(a: GoalLoopLearningSignal, b: GoalLoopLearningSignal): number {
   return (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.signal_id.localeCompare(b.signal_id);
 }
@@ -318,6 +358,10 @@ function learningSignalCategory(value: unknown): GoalLoopLearningSignalCategory 
 
 function learningSignalPolarity(value: unknown): GoalLoopLearningSignalPolarity | undefined {
   return value === "positive" || value === "negative" || value === "constraint" ? value : undefined;
+}
+
+function skillRuleTarget(value: unknown): GoalLoopSkillRuleApplication["target"] | undefined {
+  return value === "loop_skill" || value === "workspace_skill" ? value : undefined;
 }
 
 function cleanString(value: unknown): string | undefined {

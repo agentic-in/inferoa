@@ -74,6 +74,22 @@ test("self-improve proposes and adopts a workspace learned skill from verified l
         returned_lines: 12,
       },
     });
+    store.appendEvent({
+      session_id: session.session_id,
+      run_id: "run_reflect",
+      type: "skill.rule.applied",
+      data: {
+        goal_id: goal.goal.id,
+        horizon_generation: goal.goal.horizon_generation,
+        skill_id: "inferoa-loop-skill",
+        target: "loop_skill",
+        body_hash: "a".repeat(64),
+        body_load_run_id: "run_skill",
+        rule_id: "loop-reflection-verification-used",
+        rule_summary: "Loop Skill guided reflection verification.",
+        decision: "done",
+      },
+    });
 
     const before = await optLiteStatus(store, workspace);
     assert.equal(before.eligible_goal_sessions, 1);
@@ -88,6 +104,7 @@ test("self-improve proposes and adopts a workspace learned skill from verified l
     assert.equal(proposal.evidence.goal_sessions, 1);
     assert.equal(proposal.evidence.learning_signal_records, 2);
     assert.equal((proposal.evidence as unknown as { skill_body_load_records?: number }).skill_body_load_records, 1);
+    assert.equal((proposal.evidence as unknown as { skill_rule_application_records?: number }).skill_rule_application_records, 1);
     const skillTargets = (proposal as unknown as {
       skill_targets?: Array<{ target?: string; skill_id?: string; staged_skill_path?: string; body?: string }>;
     }).skill_targets ?? [];

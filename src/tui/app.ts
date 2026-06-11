@@ -9603,7 +9603,7 @@ function selfImproveStatusLines(status: Awaited<ReturnType<typeof optLiteStatus>
   const latestTargets = status.latest_proposal?.skill_targets?.map((target) => target.skill_id).join(", ");
   return [
     `${fg256(39, "Purpose")} turn verified loop evidence into reviewable Loop/Workspace Skills.`,
-    `${fg256(39, "Evidence")} sessions ${status.eligible_goal_sessions} · verifications ${status.verified_records} · feedback ${status.human_feedback_records} · signals ${status.learning_signal_records} · body loads ${status.skill_body_load_records ?? 0}`,
+    `${fg256(39, "Evidence")} sessions ${status.eligible_goal_sessions} · verifications ${status.verified_records} · feedback ${status.human_feedback_records} · signals ${status.learning_signal_records} · body loads ${status.skill_body_load_records ?? 0} · applied ${status.skill_rule_application_records ?? 0}`,
     `${fg256(39, "Proposals")} total ${status.proposal_count} · staged ${status.staged_count} · adopted ${status.adopted_count}`,
     `${fg256(39, "Replay")} reports ${status.replay_count}`,
     status.latest_proposal

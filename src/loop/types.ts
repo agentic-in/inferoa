@@ -75,6 +75,21 @@ export interface GoalLoopSkillBodyLoad {
   created_at?: string;
 }
 
+export interface GoalLoopSkillRuleApplication {
+  run_id?: string;
+  goal_id?: string;
+  horizon_generation?: number;
+  skill_id: string;
+  target?: "loop_skill" | "workspace_skill";
+  body_hash?: string;
+  body_load_run_id?: string;
+  rule_id: string;
+  rule_summary?: string;
+  decision?: string;
+  evidence?: JsonObject;
+  created_at?: string;
+}
+
 export interface GoalLoopLearningSignal {
   signal_id: string;
   category: GoalLoopLearningSignalCategory;
@@ -100,6 +115,7 @@ export interface GoalLoopView {
   verifications: GoalLoopVerification[];
   skill_snapshots: GoalLoopSkillSnapshot[];
   skill_body_loads: GoalLoopSkillBodyLoad[];
+  skill_rule_applications: GoalLoopSkillRuleApplication[];
   learning_signals: GoalLoopLearningSignal[];
   pending_review_decision?: GoalPendingReviewDecision;
   blocker?: string;

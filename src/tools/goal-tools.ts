@@ -50,6 +50,8 @@ import {
 import type { GoalLoopVerificationConfidence, GoalLoopVerificationProvider, GoalLoopVerificationVerdict } from "../loop/types.js";
 
 const CONTROL_PLANE_GOAL_OPS = new Set(["create", "review_decision", "resume", "complete", "drop"]);
+const LOOP_SKILL_ID = "inferoa-loop-skill";
+const WORKSPACE_SKILL_ID = "inferoa-workspace-skill";
 
 export async function goalTool(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const op = stringArg(args.op) ?? "get";
@@ -455,6 +457,16 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
       },
     });
     appendReflectionVerificationRecord(context, state, saved, input);
+    appendSkillRuleApplied(context, saved.goal, LOOP_SKILL_ID, {
+      target: "loop_skill",
+      rule_id: "loop-reflection-verification-used",
+      rule_summary: "Loop Skill guided a reflection decision with explicit verification or blocker evidence.",
+      decision,
+      evidence: {
+        verification_evidence: input.verification_evidence,
+        blocker: input.blocker,
+      },
+    });
     if (decision === "expand") {
       context.store.appendEvent({
         session_id: context.session_id,
@@ -505,6 +517,20 @@ function recordGoalVerificationTool(args: JsonObject, context: ToolExecutionCont
     summary: stringArg(args.summary),
     failure_reason: stringArg(args.failure_reason) ?? stringArg(args.blocker),
   }, context.run_id);
+  if (provider === "command" || provider === "checker" || provider === "connector") {
+    appendSkillRuleApplied(context, state.goal, WORKSPACE_SKILL_ID, {
+      target: "workspace_skill",
+      rule_id: provider === "command" ? "workspace-command-verifier-used" : "workspace-verifier-used",
+      rule_summary: "Workspace Skill guided verifier selection for workspace validation.",
+      decision: verdict,
+      evidence: {
+        provider,
+        confidence,
+        verification_id: record.verification_id,
+        evidence: record.evidence,
+      },
+    });
+  }
   return ok(`Recorded ${provider} verification: ${verdict}`, { verification: record as unknown as JsonObject });
 }
 
@@ -565,6 +591,19 @@ function approveGoalReviewDecision(state: GoalState, context: ToolExecutionConte
     if (verifierMessage) {
       return failGoalWithState(state, "goal_verifier_policy_required", verifierMessage);
     }
+    const skillPolicyMessage = goalSkillPolicyCompletionBlockMessage(context, reflected.goal);
+    if (skillPolicyMessage) {
+      return failGoalWithState(state, "goal_skill_policy_required", skillPolicyMessage);
+    }
+    appendSkillRuleApplied(context, reflected.goal, LOOP_SKILL_ID, {
+      target: "loop_skill",
+      rule_id: "loop-completion-gate-satisfied",
+      rule_summary: "Loop Skill body was loaded before allowing goal completion.",
+      decision: "complete",
+      evidence: {
+        summary: reflected.goal.last_reflection_summary,
+      },
+    });
     const completed = completeGoalAfterReflection(reflected, reflected.goal.last_reflection_summary);
     const saved = writeGoalState(context.store, context.session_id, completed, context.run_id);
     appendApprovedReflectionEvents(context, state, saved, pending);
@@ -687,6 +726,69 @@ function appendReflectionVerificationRecord(
   }, context.run_id);
 }
 
+interface SkillRuleApplicationInput {
+  target: "loop_skill" | "workspace_skill";
+  rule_id: string;
+  rule_summary: string;
+  decision?: string;
+  evidence?: JsonObject;
+}
+
+function appendSkillRuleApplied(
+  context: ToolExecutionContext,
+  goal: GoalRecord,
+  skillId: string,
+  input: SkillRuleApplicationInput,
+): void {
+  const bodyLoad = latestSkillBodyLoadEvent(context, goal.id, skillId);
+  if (!bodyLoad) {
+    return;
+  }
+  const alreadyRecorded = context.store.listEvents(context.session_id).some((event) =>
+    event.type === "skill.rule.applied"
+    && event.run_id === context.run_id
+    && event.data.goal_id === goal.id
+    && event.data.skill_id === skillId
+    && event.data.rule_id === input.rule_id
+  );
+  if (alreadyRecorded) {
+    return;
+  }
+  context.store.appendEvent({
+    session_id: context.session_id,
+    run_id: context.run_id,
+    type: "skill.rule.applied",
+    data: {
+      goal_id: goal.id,
+      horizon_generation: goal.horizon_generation,
+      skill_id: skillId,
+      target: input.target,
+      body_hash: stringArg(bodyLoad.data.body_hash),
+      body_load_run_id: bodyLoad.run_id,
+      rule_id: input.rule_id,
+      rule_summary: input.rule_summary,
+      decision: input.decision,
+      evidence: input.evidence,
+    },
+  });
+}
+
+function latestSkillBodyLoadEvent(
+  context: ToolExecutionContext,
+  goalId: string,
+  skillId: string,
+): ReturnType<ToolExecutionContext["store"]["listEvents"]>[number] | undefined {
+  const loads = context.store
+    .listEvents(context.session_id)
+    .filter((event) =>
+      event.type === "skill.body.loaded"
+      && event.data.skill_id === skillId
+      && stringArg(event.data.body_hash)
+    );
+  return loads.filter((event) => event.data.goal_id === goalId).at(-1)
+    ?? loads.filter((event) => !event.data.goal_id).at(-1);
+}
+
 function resumeGoal(context: ToolExecutionContext): ToolResult {
   const state = readGoalState(context.store, context.session_id);
   if (!state) {
@@ -763,6 +865,19 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
     if (verifierMessage) {
       return failGoalWithState(state, "goal_verifier_policy_required", verifierMessage);
     }
+    const skillPolicyMessage = goalSkillPolicyCompletionBlockMessage(context, state.goal);
+    if (skillPolicyMessage) {
+      return failGoalWithState(state, "goal_skill_policy_required", skillPolicyMessage);
+    }
+    appendSkillRuleApplied(context, state.goal, LOOP_SKILL_ID, {
+      target: "loop_skill",
+      rule_id: "loop-completion-gate-satisfied",
+      rule_summary: "Loop Skill body was loaded before allowing goal completion.",
+      decision: "complete",
+      evidence: {
+        summary,
+      },
+    });
   }
   const next = cloneGoalState(state);
   if (summary) {
@@ -780,6 +895,22 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
 
 function isInternalReflectionContext(context: ToolExecutionContext): boolean {
   return context.request_class === "reflection" && context.visibility === "internal";
+}
+
+function goalSkillPolicyCompletionBlockMessage(context: ToolExecutionContext, goal: GoalRecord): string | undefined {
+  if (!isSkillEnabled(context, LOOP_SKILL_ID, "Inferoa Loop Skill")) {
+    return undefined;
+  }
+  const load = latestSkillBodyLoadEvent(context, goal.id, LOOP_SKILL_ID);
+  if (load) {
+    return undefined;
+  }
+  return "Cannot complete goal while Inferoa Loop Skill is enabled until the Loop Skill body has been read with skill_read for this goal.";
+}
+
+function isSkillEnabled(context: ToolExecutionContext, skillId: string, skillName: string): boolean {
+  const enabled = new Set(context.config.skills.enabled);
+  return enabled.has(skillId) || enabled.has(skillName);
 }
 
 function failGoalWithState(state: GoalState, code: string, message: string, extra: JsonObject = {}): ToolResult {

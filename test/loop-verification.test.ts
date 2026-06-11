@@ -457,6 +457,69 @@ test("unattended completion requires strong non-reflection verification", async 
   }
 });
 
+test("completion requires enabled Loop Skill body to be loaded before claiming done", async () => {
+  const fixture = await createFixture("inferoa-loop-verification-loop-skill-gate-");
+  try {
+    const loopSkillDir = path.join(fixture.workspace.root, ".inferoa", "skills", "inferoa-loop-skill");
+    await mkdir(loopSkillDir, { recursive: true });
+    await writeFile(
+      path.join(loopSkillDir, "SKILL.md"),
+      "---\nname: Inferoa Loop Skill\ndescription: Learned loop control policy.\n---\n\nRead this before completion.\n",
+      "utf8",
+    );
+    const nextConfig = config();
+    nextConfig.skills.enabled = ["inferoa-loop-skill"];
+    const registry = new ToolRegistry(nextConfig, fixture.workspace, fixture.store);
+    let state = replaceGoalPlanning(createGoalState({ objective: "Require learned loop policy before completion" }), {
+      steps: [{ id: "done", title: "Complete implementation", status: "completed" }],
+    });
+    state = writeGoalState(fixture.store, fixture.session.session_id, state, "run_seed");
+
+    const reflected = await registry.call(
+      {
+        id: "reflect_done",
+        name: "goal",
+        arguments: {
+          op: "reflect",
+          decision: "done",
+          summary: "Implementation is ready.",
+          verification_evidence: { command: "npm test", status: "pass" },
+        },
+      },
+      { session_id: fixture.session.session_id, run_id: "run_reflect", request_class: "reflection", visibility: "internal" },
+    );
+    assert.equal(reflected.ok, true, JSON.stringify(reflected));
+
+    const blocked = await registry.call(
+      { id: "complete_blocked_by_skill", name: "goal", arguments: { op: "complete", summary: "Done." } },
+      { session_id: fixture.session.session_id, run_id: "run_complete_blocked", control_plane: true },
+    );
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error?.code, "goal_skill_policy_required");
+    assert.match(blocked.error?.message ?? "", /Loop Skill body/);
+
+    const read = await registry.call(
+      { id: "read_loop_skill", name: "skill_read", arguments: { id: "inferoa-loop-skill" } },
+      { session_id: fixture.session.session_id, run_id: "run_skill_read" },
+    );
+    assert.equal(read.ok, true, JSON.stringify(read));
+
+    const completed = await registry.call(
+      { id: "complete_allowed_after_skill", name: "goal", arguments: { op: "complete", summary: "Done." } },
+      { session_id: fixture.session.session_id, run_id: "run_complete_allowed", control_plane: true },
+    );
+    assert.equal(completed.ok, true, JSON.stringify(completed));
+    const applications = readGoalLoopView(fixture.store, fixture.session.session_id).skill_rule_applications;
+    assert.ok(applications.some((application) =>
+      application.skill_id === "inferoa-loop-skill"
+      && application.rule_id === "loop-completion-gate-satisfied"
+      && application.body_hash
+    ));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("goal supervisor can orchestrate an independent checker before unattended completion", async () => {
   const fixture = await createFixture("inferoa-loop-verification-orchestrated-checker-");
   try {
