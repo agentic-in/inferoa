@@ -48,6 +48,18 @@ export interface ResourceRecord {
   created_at: string;
 }
 
+export interface ProcessRecord {
+  session_id: string;
+  process_id: string;
+  pid?: number;
+  command: string;
+  cwd: string;
+  status: string;
+  exit_code?: number | null;
+  started_at?: string;
+  updated_at?: string;
+}
+
 export interface SupervisorJob {
   job_id: string;
   session_id: string;
@@ -59,6 +71,72 @@ export interface SupervisorJob {
   iteration: number;
   metadata: JsonObject;
   run_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationSchedule {
+  schedule_id: string;
+  workspace_id: string;
+  workspace_root: string;
+  session_id: string;
+  prompt: string;
+  status: "enabled" | "paused";
+  interval_ms: number;
+  next_run_at: string;
+  kind: "run" | "goal";
+  goal_id?: string;
+  metadata: JsonObject;
+  last_job_id?: string;
+  last_run_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ManagedWorktree {
+  worktree_id: string;
+  workspace_id: string;
+  base_root: string;
+  path: string;
+  branch: string;
+  base_ref: string;
+  status: "active" | "adopted" | "removed" | "failed";
+  session_id?: string;
+  job_id?: string;
+  metadata: JsonObject;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoverySchedule {
+  schedule_id: string;
+  workspace_id: string;
+  workspace_root: string;
+  session_id: string;
+  command: string;
+  status: "enabled" | "paused";
+  interval_ms: number;
+  next_run_at: string;
+  timeout_ms: number;
+  metadata: JsonObject;
+  last_run_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoveryCandidate {
+  candidate_id: string;
+  schedule_id: string;
+  workspace_id: string;
+  session_id: string;
+  title: string;
+  prompt: string;
+  detail?: string;
+  priority: "high" | "medium" | "low";
+  status: "open" | "promoted" | "dismissed";
+  dedupe_key: string;
+  source: JsonObject;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +171,73 @@ function parseResource(row: ResourceRow): ResourceRecord {
     metadata: parseJsonObject(row.metadata_json),
     content: row.content,
     created_at: row.created_at,
+  };
+}
+
+function parseSessionEvent(row: Record<string, unknown>): SessionEvent {
+  return {
+    id: Number(row.id),
+    session_id: String(row.session_id),
+    run_id: row.run_id ? String(row.run_id) : undefined,
+    type: String(row.type),
+    data: parseJsonObject(String(row.data_json)),
+    created_at: String(row.created_at),
+  };
+}
+
+function parseManagedWorktree(row: Record<string, unknown>): ManagedWorktree {
+  return {
+    worktree_id: String(row.worktree_id),
+    workspace_id: String(row.workspace_id),
+    base_root: String(row.base_root),
+    path: String(row.worktree_path),
+    branch: String(row.branch),
+    base_ref: String(row.base_ref),
+    status: String(row.status) as ManagedWorktree["status"],
+    session_id: typeof row.session_id === "string" ? row.session_id : undefined,
+    job_id: typeof row.job_id === "string" ? row.job_id : undefined,
+    metadata: parseJsonObject(String(row.metadata_json ?? "{}")),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseDiscoverySchedule(row: Record<string, unknown>): DiscoverySchedule {
+  return {
+    schedule_id: String(row.schedule_id),
+    workspace_id: String(row.workspace_id),
+    workspace_root: String(row.workspace_root),
+    session_id: String(row.session_id),
+    command: String(row.command),
+    status: row.status === "paused" ? "paused" : "enabled",
+    interval_ms: typeof row.interval_ms === "number" && Number.isFinite(row.interval_ms) ? Math.max(1000, Math.trunc(row.interval_ms)) : 60_000,
+    next_run_at: String(row.next_run_at),
+    timeout_ms: typeof row.timeout_ms === "number" && Number.isFinite(row.timeout_ms) ? Math.max(1000, Math.trunc(row.timeout_ms)) : 30_000,
+    metadata: parseJsonObject(String(row.metadata_json ?? "{}")),
+    last_run_at: typeof row.last_run_at === "string" && row.last_run_at ? row.last_run_at : undefined,
+    last_error: typeof row.last_error === "string" && row.last_error ? row.last_error : undefined,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseDiscoveryCandidate(row: Record<string, unknown>): DiscoveryCandidate {
+  const priority = row.priority === "high" || row.priority === "low" ? row.priority : "medium";
+  const status = row.status === "promoted" || row.status === "dismissed" ? row.status : "open";
+  return {
+    candidate_id: String(row.candidate_id),
+    schedule_id: String(row.schedule_id),
+    workspace_id: String(row.workspace_id),
+    session_id: String(row.session_id),
+    title: String(row.title),
+    prompt: String(row.prompt),
+    detail: typeof row.detail === "string" && row.detail ? row.detail : undefined,
+    priority,
+    status,
+    dedupe_key: String(row.dedupe_key),
+    source: parseJsonObject(String(row.source_json ?? "{}")),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
   };
 }
 
@@ -159,6 +304,7 @@ export class SessionStore {
 
       CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+      CREATE INDEX IF NOT EXISTS idx_events_session_type_id ON events(session_id, type, id);
 
       CREATE TABLE IF NOT EXISTS locks (
         session_id TEXT PRIMARY KEY,
@@ -251,11 +397,97 @@ export class SessionStore {
         updated_at TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES sessions(session_id)
       );
+
+      CREATE TABLE IF NOT EXISTS automation_schedules (
+        schedule_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        status TEXT NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        next_run_at TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'run',
+        goal_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        last_job_id TEXT,
+        last_run_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS managed_worktrees (
+        worktree_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        base_root TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        base_ref TEXT NOT NULL,
+        status TEXT NOT NULL,
+        session_id TEXT,
+        job_id TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(job_id) REFERENCES supervisor_jobs(job_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS discovery_schedules (
+        schedule_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT NOT NULL,
+        interval_ms INTEGER NOT NULL,
+        next_run_at TEXT NOT NULL,
+        timeout_ms INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        last_run_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS discovery_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        detail TEXT,
+        priority TEXT NOT NULL,
+        status TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        source_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(schedule_id) REFERENCES discovery_schedules(schedule_id),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+      );
     `);
     this.ensureColumn("supervisor_jobs", "kind", "TEXT NOT NULL DEFAULT 'run'");
     this.ensureColumn("supervisor_jobs", "goal_id", "TEXT");
     this.ensureColumn("supervisor_jobs", "iteration", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("supervisor_jobs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("automation_schedules", "kind", "TEXT NOT NULL DEFAULT 'run'");
+    this.ensureColumn("automation_schedules", "goal_id", "TEXT");
+    this.ensureColumn("automation_schedules", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("automation_schedules", "last_job_id", "TEXT");
+    this.ensureColumn("automation_schedules", "last_run_at", "TEXT");
+    this.ensureColumn("managed_worktrees", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("managed_worktrees", "session_id", "TEXT");
+    this.ensureColumn("managed_worktrees", "job_id", "TEXT");
+    this.ensureColumn("discovery_schedules", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("discovery_schedules", "last_run_at", "TEXT");
+    this.ensureColumn("discovery_schedules", "last_error", "TEXT");
+    this.ensureColumn("discovery_candidates", "source_json", "TEXT NOT NULL DEFAULT '{}'");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -409,14 +641,35 @@ export class SessionStore {
       ? this.db.prepare(sql).all(sessionId)
       : this.db.prepare(sql).all(sessionId, limit)) as Record<string, unknown>[];
     const ordered = limit === undefined ? rows : rows.reverse();
-    return ordered.map((row) => ({
-      id: Number(row.id),
-      session_id: String(row.session_id),
-      run_id: row.run_id ? String(row.run_id) : undefined,
-      type: String(row.type),
-      data: parseJsonObject(String(row.data_json)),
-      created_at: String(row.created_at),
-    }));
+    return ordered.map(parseSessionEvent);
+  }
+
+  listEventsOfTypes(sessionId: string, types: readonly string[], limit?: number): SessionEvent[] {
+    const cleanTypes = [...new Set(types.filter((type) => type.trim()))];
+    if (!cleanTypes.length) {
+      return [];
+    }
+    const placeholders = cleanTypes.map(() => "?").join(", ");
+    const sql =
+      limit === undefined
+        ? `SELECT * FROM events WHERE session_id = ? AND type IN (${placeholders}) ORDER BY id ASC`
+        : `SELECT * FROM events WHERE session_id = ? AND type IN (${placeholders}) ORDER BY id DESC LIMIT ?`;
+    const params = limit === undefined ? [sessionId, ...cleanTypes] : [sessionId, ...cleanTypes, limit];
+    const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];
+    const ordered = limit === undefined ? rows : rows.reverse();
+    return ordered.map(parseSessionEvent);
+  }
+
+  latestEventOfTypes(sessionId: string, types: readonly string[]): SessionEvent | undefined {
+    const cleanTypes = [...new Set(types.filter((type) => type.trim()))];
+    if (!cleanTypes.length) {
+      return undefined;
+    }
+    const placeholders = cleanTypes.map(() => "?").join(", ");
+    const row = this.db
+      .prepare(`SELECT * FROM events WHERE session_id = ? AND type IN (${placeholders}) ORDER BY id DESC LIMIT 1`)
+      .get(sessionId, ...cleanTypes) as Record<string, unknown> | undefined;
+    return row ? parseSessionEvent(row) : undefined;
   }
 
   latestEventId(sessionId: string): number {
@@ -634,6 +887,8 @@ export class SessionStore {
       data: {
         provider_id: providerId,
         mode: evidence.mode,
+        step_id: evidence.step_id,
+        step_index: evidence.step_index,
         request_id: evidence.request_id,
         response_id: evidence.response_id,
         request_class: evidence.request_class,
@@ -689,6 +944,38 @@ export class SessionStore {
         now,
         now,
       );
+  }
+
+  getProcess(sessionId: string, processId: string): ProcessRecord | undefined {
+    const row = this.db
+      .prepare("SELECT session_id, process_id, pid, command, cwd, status, exit_code, started_at, updated_at FROM processes WHERE session_id = ? AND process_id = ?")
+      .get(sessionId, processId) as
+      | {
+          session_id: string;
+          process_id: string;
+          pid?: number | null;
+          command: string;
+          cwd: string;
+          status: string;
+          exit_code?: number | null;
+          started_at?: string;
+          updated_at?: string;
+        }
+      | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return {
+      session_id: row.session_id,
+      process_id: row.process_id,
+      pid: row.pid ?? undefined,
+      command: row.command,
+      cwd: row.cwd,
+      status: row.status,
+      exit_code: row.exit_code ?? undefined,
+      started_at: row.started_at,
+      updated_at: row.updated_at,
+    };
   }
 
   appendProcessOutput(sessionId: string, processId: string, stream: "stdout" | "stderr", chunk: string): number {
@@ -784,6 +1071,467 @@ export class SessionStore {
       : (this.db.prepare("SELECT * FROM supervisor_jobs ORDER BY updated_at DESC").all() as Record<string, unknown>[]);
     return rows.map(parseSupervisorJob);
   }
+
+  createManagedWorktree(record: {
+    worktree_id?: string;
+    workspace_id: string;
+    base_root: string;
+    path: string;
+    branch: string;
+    base_ref: string;
+    status?: ManagedWorktree["status"];
+    session_id?: string;
+    job_id?: string;
+    metadata?: JsonObject;
+  }): ManagedWorktree {
+    const now = nowIso();
+    const worktree: ManagedWorktree = {
+      worktree_id: record.worktree_id ?? randomId("wt"),
+      workspace_id: record.workspace_id,
+      base_root: record.base_root,
+      path: record.path,
+      branch: record.branch,
+      base_ref: record.base_ref,
+      status: record.status ?? "active",
+      session_id: record.session_id,
+      job_id: record.job_id,
+      metadata: record.metadata ?? {},
+      created_at: now,
+      updated_at: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO managed_worktrees(
+          worktree_id, workspace_id, base_root, worktree_path, branch, base_ref, status,
+          session_id, job_id, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        worktree.worktree_id,
+        worktree.workspace_id,
+        worktree.base_root,
+        worktree.path,
+        worktree.branch,
+        worktree.base_ref,
+        worktree.status,
+        worktree.session_id ?? null,
+        worktree.job_id ?? null,
+        JSON.stringify(worktree.metadata),
+        now,
+        now,
+      );
+    return worktree;
+  }
+
+  updateManagedWorktree(
+    worktreeId: string,
+    changes: Partial<Pick<ManagedWorktree, "status" | "session_id" | "job_id" | "metadata">>,
+  ): void {
+    const current = this.getManagedWorktree(worktreeId);
+    if (!current) {
+      throw new Error(`Unknown managed worktree: ${worktreeId}`);
+    }
+    this.db
+      .prepare("UPDATE managed_worktrees SET status = ?, session_id = ?, job_id = ?, metadata_json = ?, updated_at = ? WHERE worktree_id = ?")
+      .run(
+        changes.status ?? current.status,
+        changes.session_id ?? current.session_id ?? null,
+        changes.job_id ?? current.job_id ?? null,
+        JSON.stringify(changes.metadata ?? current.metadata ?? {}),
+        nowIso(),
+        worktreeId,
+      );
+  }
+
+  getManagedWorktree(worktreeId: string): ManagedWorktree | undefined {
+    const row = this.db.prepare("SELECT * FROM managed_worktrees WHERE worktree_id = ?").get(worktreeId) as Record<string, unknown> | undefined;
+    return row ? parseManagedWorktree(row) : undefined;
+  }
+
+  findManagedWorktreeByPrefix(workspaceId: string, prefix: string): ManagedWorktree | undefined {
+    const rows = this.db
+      .prepare("SELECT * FROM managed_worktrees WHERE workspace_id = ? AND worktree_id LIKE ? ORDER BY updated_at DESC")
+      .all(workspaceId, `${prefix}%`) as Record<string, unknown>[];
+    return rows.length === 1 ? parseManagedWorktree(rows[0]!) : undefined;
+  }
+
+  listManagedWorktrees(options: { workspaceId?: string; status?: ManagedWorktree["status"] } = {}): ManagedWorktree[] {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (options.workspaceId) {
+      clauses.push("workspace_id = ?");
+      values.push(options.workspaceId);
+    }
+    if (options.status) {
+      clauses.push("status = ?");
+      values.push(options.status);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db.prepare(`SELECT * FROM managed_worktrees${where} ORDER BY updated_at DESC`).all(...values) as Record<string, unknown>[];
+    return rows.map(parseManagedWorktree);
+  }
+
+  createAutomationSchedule(
+    workspace: WorkspaceIdentity,
+    sessionId: string,
+    prompt: string,
+    options: {
+      interval_ms: number;
+      next_run_at: string;
+      kind?: "run" | "goal";
+      goal_id?: string;
+      metadata?: JsonObject;
+      status?: "enabled" | "paused";
+    },
+  ): AutomationSchedule {
+    this.upsertWorkspace(workspace);
+    const session = this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    const intervalMs = Math.max(1000, Math.trunc(options.interval_ms));
+    const now = nowIso();
+    const schedule: AutomationSchedule = {
+      schedule_id: randomId("auto"),
+      workspace_id: workspace.id,
+      workspace_root: workspace.root,
+      session_id: session.session_id,
+      prompt,
+      status: options.status ?? "enabled",
+      interval_ms: intervalMs,
+      next_run_at: options.next_run_at,
+      kind: options.kind ?? "run",
+      goal_id: options.goal_id,
+      metadata: options.metadata ?? {},
+      created_at: now,
+      updated_at: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO automation_schedules(
+          schedule_id, workspace_id, workspace_root, session_id, prompt, status, interval_ms, next_run_at,
+          kind, goal_id, metadata_json, last_job_id, last_run_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        schedule.schedule_id,
+        schedule.workspace_id,
+        schedule.workspace_root,
+        schedule.session_id,
+        schedule.prompt,
+        schedule.status,
+        schedule.interval_ms,
+        schedule.next_run_at,
+        schedule.kind,
+        schedule.goal_id ?? null,
+        JSON.stringify(schedule.metadata),
+        null,
+        null,
+        now,
+        now,
+      );
+    this.appendEvent({
+      session_id: schedule.session_id,
+      type: "automation.schedule.created",
+      data: {
+        schedule_id: schedule.schedule_id,
+        prompt,
+        interval_ms: schedule.interval_ms,
+        next_run_at: schedule.next_run_at,
+        kind: schedule.kind,
+        goal_id: schedule.goal_id,
+      },
+    });
+    return schedule;
+  }
+
+  updateAutomationSchedule(
+    scheduleId: string,
+    changes: Partial<Pick<AutomationSchedule, "status" | "next_run_at" | "last_job_id" | "last_run_at" | "metadata">>,
+  ): void {
+    const current = this.getAutomationSchedule(scheduleId);
+    if (!current) {
+      throw new Error(`Unknown automation schedule: ${scheduleId}`);
+    }
+    this.db
+      .prepare(
+        `UPDATE automation_schedules
+         SET status = ?, next_run_at = ?, last_job_id = ?, last_run_at = ?, metadata_json = ?, updated_at = ?
+         WHERE schedule_id = ?`,
+      )
+      .run(
+        changes.status ?? current.status,
+        changes.next_run_at ?? current.next_run_at,
+        changes.last_job_id ?? current.last_job_id ?? null,
+        changes.last_run_at ?? current.last_run_at ?? null,
+        JSON.stringify(changes.metadata ?? current.metadata ?? {}),
+        nowIso(),
+        scheduleId,
+      );
+  }
+
+  deleteAutomationSchedule(scheduleId: string): AutomationSchedule | undefined {
+    const current = this.getAutomationSchedule(scheduleId);
+    if (!current) {
+      return undefined;
+    }
+    this.db.prepare("DELETE FROM automation_schedules WHERE schedule_id = ?").run(scheduleId);
+    this.appendEvent({
+      session_id: current.session_id,
+      type: "automation.schedule.deleted",
+      data: { schedule_id: scheduleId },
+    });
+    return current;
+  }
+
+  getAutomationSchedule(scheduleId: string): AutomationSchedule | undefined {
+    const row = this.db.prepare("SELECT * FROM automation_schedules WHERE schedule_id = ?").get(scheduleId) as Record<string, unknown> | undefined;
+    return row ? parseAutomationSchedule(row) : undefined;
+  }
+
+  listAutomationSchedules(options: { workspaceId?: string; status?: "enabled" | "paused"; dueAt?: string } = {}): AutomationSchedule[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.workspaceId) {
+      clauses.push("workspace_id = ?");
+      params.push(options.workspaceId);
+    }
+    if (options.status) {
+      clauses.push("status = ?");
+      params.push(options.status);
+    }
+    if (options.dueAt) {
+      clauses.push("next_run_at <= ?");
+      params.push(options.dueAt);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM automation_schedules ${where} ORDER BY next_run_at ASC, updated_at DESC`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map(parseAutomationSchedule);
+  }
+
+  createDiscoverySchedule(
+    workspace: WorkspaceIdentity,
+    sessionId: string,
+    command: string,
+    options: {
+      interval_ms: number;
+      next_run_at: string;
+      timeout_ms?: number;
+      metadata?: JsonObject;
+      status?: "enabled" | "paused";
+    },
+  ): DiscoverySchedule {
+    this.upsertWorkspace(workspace);
+    const session = this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    const now = nowIso();
+    const schedule: DiscoverySchedule = {
+      schedule_id: randomId("disc"),
+      workspace_id: workspace.id,
+      workspace_root: workspace.root,
+      session_id: session.session_id,
+      command,
+      status: options.status ?? "enabled",
+      interval_ms: Math.max(60_000, Math.trunc(options.interval_ms)),
+      next_run_at: options.next_run_at,
+      timeout_ms: Math.max(1000, Math.trunc(options.timeout_ms ?? 30_000)),
+      metadata: options.metadata ?? {},
+      created_at: now,
+      updated_at: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO discovery_schedules(
+          schedule_id, workspace_id, workspace_root, session_id, command, status, interval_ms,
+          next_run_at, timeout_ms, metadata_json, last_run_at, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        schedule.schedule_id,
+        schedule.workspace_id,
+        schedule.workspace_root,
+        schedule.session_id,
+        schedule.command,
+        schedule.status,
+        schedule.interval_ms,
+        schedule.next_run_at,
+        schedule.timeout_ms,
+        JSON.stringify(schedule.metadata),
+        null,
+        null,
+        now,
+        now,
+      );
+    this.appendEvent({
+      session_id: schedule.session_id,
+      type: "loop.discovery.schedule.created",
+      data: {
+        schedule_id: schedule.schedule_id,
+        command: schedule.command,
+        interval_ms: schedule.interval_ms,
+        next_run_at: schedule.next_run_at,
+        timeout_ms: schedule.timeout_ms,
+      },
+    });
+    return schedule;
+  }
+
+  updateDiscoverySchedule(
+    scheduleId: string,
+    changes: Partial<Pick<DiscoverySchedule, "status" | "next_run_at" | "timeout_ms" | "metadata" | "last_run_at" | "last_error">>,
+  ): void {
+    const current = this.getDiscoverySchedule(scheduleId);
+    if (!current) {
+      throw new Error(`Unknown discovery schedule: ${scheduleId}`);
+    }
+    this.db
+      .prepare(
+        `UPDATE discovery_schedules
+         SET status = ?, next_run_at = ?, timeout_ms = ?, metadata_json = ?, last_run_at = ?, last_error = ?, updated_at = ?
+         WHERE schedule_id = ?`,
+      )
+      .run(
+        changes.status ?? current.status,
+        changes.next_run_at ?? current.next_run_at,
+        changes.timeout_ms ?? current.timeout_ms,
+        JSON.stringify(changes.metadata ?? current.metadata ?? {}),
+        changes.last_run_at ?? current.last_run_at ?? null,
+        changes.last_error === undefined ? current.last_error ?? null : changes.last_error,
+        nowIso(),
+        scheduleId,
+      );
+  }
+
+  deleteDiscoverySchedule(scheduleId: string): DiscoverySchedule | undefined {
+    const current = this.getDiscoverySchedule(scheduleId);
+    if (!current) {
+      return undefined;
+    }
+    this.db.prepare("DELETE FROM discovery_schedules WHERE schedule_id = ?").run(scheduleId);
+    this.appendEvent({
+      session_id: current.session_id,
+      type: "loop.discovery.schedule.deleted",
+      data: { schedule_id: scheduleId },
+    });
+    return current;
+  }
+
+  getDiscoverySchedule(scheduleId: string): DiscoverySchedule | undefined {
+    const row = this.db.prepare("SELECT * FROM discovery_schedules WHERE schedule_id = ?").get(scheduleId) as Record<string, unknown> | undefined;
+    return row ? parseDiscoverySchedule(row) : undefined;
+  }
+
+  listDiscoverySchedules(options: { workspaceId?: string; status?: "enabled" | "paused"; dueAt?: string } = {}): DiscoverySchedule[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.workspaceId) {
+      clauses.push("workspace_id = ?");
+      params.push(options.workspaceId);
+    }
+    if (options.status) {
+      clauses.push("status = ?");
+      params.push(options.status);
+    }
+    if (options.dueAt) {
+      clauses.push("next_run_at <= ?");
+      params.push(options.dueAt);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM discovery_schedules ${where} ORDER BY next_run_at ASC, updated_at DESC`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map(parseDiscoverySchedule);
+  }
+
+  upsertDiscoveryCandidate(record: {
+    candidate_id: string;
+    schedule_id: string;
+    workspace_id: string;
+    session_id: string;
+    title: string;
+    prompt: string;
+    detail?: string;
+    priority: DiscoveryCandidate["priority"];
+    dedupe_key: string;
+    source?: JsonObject;
+  }): DiscoveryCandidate {
+    const now = nowIso();
+    const existing = this.getDiscoveryCandidate(record.candidate_id);
+    const status = existing?.status ?? "open";
+    const createdAt = existing?.created_at ?? now;
+    this.db
+      .prepare(
+        `INSERT INTO discovery_candidates(
+          candidate_id, schedule_id, workspace_id, session_id, title, prompt, detail, priority,
+          status, dedupe_key, source_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(candidate_id) DO UPDATE SET
+          title = excluded.title,
+          prompt = excluded.prompt,
+          detail = excluded.detail,
+          priority = excluded.priority,
+          source_json = excluded.source_json,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        record.candidate_id,
+        record.schedule_id,
+        record.workspace_id,
+        record.session_id,
+        record.title,
+        record.prompt,
+        record.detail ?? null,
+        record.priority,
+        status,
+        record.dedupe_key,
+        JSON.stringify(record.source ?? {}),
+        createdAt,
+        now,
+      );
+    return this.getDiscoveryCandidate(record.candidate_id)!;
+  }
+
+  updateDiscoveryCandidate(candidateId: string, changes: Partial<Pick<DiscoveryCandidate, "status" | "source">>): void {
+    const current = this.getDiscoveryCandidate(candidateId);
+    if (!current) {
+      throw new Error(`Unknown discovery candidate: ${candidateId}`);
+    }
+    this.db
+      .prepare("UPDATE discovery_candidates SET status = ?, source_json = ?, updated_at = ? WHERE candidate_id = ?")
+      .run(
+        changes.status ?? current.status,
+        JSON.stringify(changes.source ?? current.source ?? {}),
+        nowIso(),
+        candidateId,
+      );
+  }
+
+  getDiscoveryCandidate(candidateId: string): DiscoveryCandidate | undefined {
+    const row = this.db.prepare("SELECT * FROM discovery_candidates WHERE candidate_id = ?").get(candidateId) as Record<string, unknown> | undefined;
+    return row ? parseDiscoveryCandidate(row) : undefined;
+  }
+
+  listDiscoveryCandidates(options: { workspaceId?: string; status?: DiscoveryCandidate["status"] } = {}): DiscoveryCandidate[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.workspaceId) {
+      clauses.push("workspace_id = ?");
+      params.push(options.workspaceId);
+    }
+    if (options.status) {
+      clauses.push("status = ?");
+      params.push(options.status);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM discovery_candidates ${where} ORDER BY updated_at DESC`)
+      .all(...params) as Record<string, unknown>[];
+    return rows.map(parseDiscoveryCandidate);
+  }
 }
 
 function parseSupervisorJob(row: Record<string, unknown>): SupervisorJob {
@@ -798,6 +1546,26 @@ function parseSupervisorJob(row: Record<string, unknown>): SupervisorJob {
     iteration: typeof row.iteration === "number" && Number.isFinite(row.iteration) ? Math.max(0, Math.trunc(row.iteration)) : 0,
     metadata: parseJsonObject(String(row.metadata_json ?? "{}")),
     run_id: typeof row.run_id === "string" && row.run_id ? row.run_id : undefined,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
+}
+
+function parseAutomationSchedule(row: Record<string, unknown>): AutomationSchedule {
+  return {
+    schedule_id: String(row.schedule_id),
+    workspace_id: String(row.workspace_id),
+    workspace_root: String(row.workspace_root),
+    session_id: String(row.session_id),
+    prompt: String(row.prompt),
+    status: row.status === "paused" ? "paused" : "enabled",
+    interval_ms: typeof row.interval_ms === "number" && Number.isFinite(row.interval_ms) ? Math.max(1000, Math.trunc(row.interval_ms)) : 1000,
+    next_run_at: String(row.next_run_at),
+    kind: row.kind === "goal" ? "goal" : "run",
+    goal_id: typeof row.goal_id === "string" && row.goal_id ? row.goal_id : undefined,
+    metadata: parseJsonObject(String(row.metadata_json ?? "{}")),
+    last_job_id: typeof row.last_job_id === "string" && row.last_job_id ? row.last_job_id : undefined,
+    last_run_at: typeof row.last_run_at === "string" && row.last_run_at ? row.last_run_at : undefined,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
   };

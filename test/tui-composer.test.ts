@@ -230,16 +230,16 @@ test("composer suggestions page around the selected command", () => {
   assert.ok(plain.some((line) => line.includes("2/2") && line.includes("←/→ page")));
 });
 
-test("composer shows full goal research subcommand label", () => {
-  const items = slashSubcommands("goal").map((item) => ({
+test("composer shows full loop research subcommand label", () => {
+  const items = slashSubcommands("loop").map((item) => ({
     label: item.value,
     description: item.description,
     kind: "command" as const,
     value: item.value,
   }));
-  const selected = items.findIndex((item) => item.value === "/goal mode research");
+  const selected = items.findIndex((item) => item.value === "/loop mode research");
   const rendered = renderComposerSurface({
-    buffer: "/goal",
+    buffer: "/loop",
     cursor: 5,
     items,
     selected,
@@ -247,8 +247,8 @@ test("composer shows full goal research subcommand label", () => {
   });
   const plain = rendered.lines.map((line) => stripAnsi(line)).join("\n");
 
-  assert.match(plain, /\/goal mode research\s+Start an auto research goal/);
-  assert.doesNotMatch(plain, /\/goal mode resear…/);
+  assert.match(plain, /\/loop mode research\s+Start a research loop/);
+  assert.doesNotMatch(plain, /\/loop mode resear…/);
 });
 
 test("composer keeps unknown slash commands in the input instead of submitting", () => {
@@ -266,17 +266,17 @@ test("composer keeps unknown slash commands in the input instead of submitting",
 
 test("composer enter selects the highlighted slash suggestion", () => {
   const decision = resolveComposerSubmission({
-    buffer: "/goal m",
+    buffer: "/loop m",
     compactRanges: [],
     items: [
-      { value: "/goal mode auto" },
-      { value: "/goal mode research" },
+      { value: "/loop mode auto" },
+      { value: "/loop mode research" },
     ],
     selected: 1,
     selectionTouched: true,
   });
 
-  assert.deepEqual(decision, { action: "submit", text: "/goal mode research" });
+  assert.deepEqual(decision, { action: "submit", text: "/loop mode research" });
 });
 
 test("composer submits slash-looking text when slash validation is disabled", () => {
@@ -316,7 +316,7 @@ test("welcome composer centers Inferoa wordmark and keeps slash and skill afford
   assert.doesNotMatch(plain, /Loop Engineering Agent Harness/);
   assert.doesNotMatch(plain, /vLLM agent/);
   assert.doesNotMatch(plain, /▟▙/);
-  assert.match(plain, /Start a long-horizon goal\.\.\./);
+  assert.match(plain, /Start a long-horizon loop\.\.\./);
   assert.match(plain, /\/ commands/);
   assert.match(plain, /\$ skills/);
   assert.match(plain, /deepseek-v4-pro-tokenhub · 1M/);
@@ -336,7 +336,7 @@ test("welcome composer centers Inferoa wordmark and keeps slash and skill afford
     buffer: "/",
     cursor: 1,
     items: [
-      { label: "/goal", description: "Run /goal to start a long-horizon recursive goal", kind: "command" },
+      { label: "/loop", description: "Run /loop to start a long-horizon recursive loop", kind: "command" },
       { label: "frontend-design", description: "enabled · UI skill", kind: "skill" },
     ],
     selected: 0,
@@ -347,7 +347,7 @@ test("welcome composer centers Inferoa wordmark and keeps slash and skill afford
     model: "qwen3-coder",
     contextWindow: 128_000,
   });
-  assert.match(withSuggestions.lines.map((line) => stripAnsi(line)).join("\n"), /\/goal/);
+  assert.match(withSuggestions.lines.map((line) => stripAnsi(line)).join("\n"), /\/loop/);
 });
 
 test("welcome slash launcher keeps a compact portrait hint", () => {
@@ -391,7 +391,7 @@ test("welcome composer can surface compact context engine status", () => {
   });
   const lines = rendered.lines.map((line) => stripAnsi(line));
   const plain = lines.join("\n");
-  const inputLine = lines.find((line) => line.includes("Start a long-horizon goal..."));
+  const inputLine = lines.find((line) => line.includes("Start a long-horizon loop..."));
   const statusLine = lines.find((line) => line.includes("/ commands") && line.includes("index parsing"));
   assert.ok(inputLine);
   assert.ok(statusLine);
@@ -421,7 +421,7 @@ test("welcome composer keeps code intelligence status inside input box edge", ()
     codeIntelligence: "index parsing 531/4942 with very long status text",
   });
   const lines = rendered.lines.map((line) => stripAnsi(line));
-  const inputLine = lines.find((line) => line.includes("Start a long-horizon goal..."));
+  const inputLine = lines.find((line) => line.includes("Start a long-horizon loop..."));
   const statusLine = lines.find((line) => line.includes("/ commands"));
   assert.ok(inputLine);
   assert.ok(statusLine);

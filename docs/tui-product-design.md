@@ -247,7 +247,7 @@ Initial command set:
 - `/tools`: show active fixed tool schemas and tool renderer status;
 - `/sessions`: open session picker;
 - `/daemon`: manage background daemon runs;
-- `/doctor`: check endpoint, tool, and optional Omni health;
+- `/doctor`: check endpoint, tool, optional Omni health, and trigger in-session tool regression;
 - `/help`: show keyboard shortcuts and command list;
 - `/exit`: exit the TUI.
 
@@ -262,7 +262,9 @@ health check. The user-facing `/doctor` view should show:
 - coding endpoint configuration and probe result;
 - optional Omni capabilities without requiring every endpoint;
 - daemon availability;
-- tool and context readiness hints.
+- tool and context readiness hints;
+- `/doctor tools` as a non-release in-session regression that returns a report
+  and improvement suggestions from the current agent.
 
 Release acceptance may call automation underneath and should remain inspectable
 for project maintainers:

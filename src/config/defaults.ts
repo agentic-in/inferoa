@@ -48,4 +48,7 @@ export const DEFAULT_CONFIG: VllmAgentConfig = {
   daemon: {
     poll_ms: 1000,
   },
+  loop: {
+    default_background_isolation: "active_checkout",
+  },
 };

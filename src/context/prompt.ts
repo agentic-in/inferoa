@@ -1,6 +1,7 @@
 import type {
   JsonObject,
   ModelMessage,
+  PermissionMode,
   PromptEpochRecord,
   SessionEvent,
   SessionRecord,
@@ -18,8 +19,6 @@ import { escapeXmlText, readGoalState, renderGoalModeSection } from "../goals/st
 import { readAutoresearchState, renderAutoresearchModeSection } from "../autoresearch/state.js";
 import { readPlanState, renderPlanModeSection } from "../plans/state.js";
 
-const EPOCH_MEMORY_SUMMARY_LIMIT = 12_000;
-const EPOCH_MEMORY_PROTECTED_PROMPT_LIMIT = 2_000;
 const USER_PROMPT_TAIL_LIMIT = 12_000;
 const TOOL_RESULT_PROMPT_LIMIT = 16_000;
 const TOOL_RESULT_SUMMARY_LIMIT = 500;
@@ -42,6 +41,75 @@ interface PromptSection {
   text: string;
 }
 
+export interface PromptSessionSnapshot {
+  tools: ToolDefinition[];
+  skills: SkillDescriptor[];
+  enabledSkillNames: string[];
+  permissionMode: PermissionMode;
+  toolSchemaHash: string;
+  snapshotHash: string;
+}
+
+export const PROMPT_SESSION_SNAPSHOT_EVENT = "prompt.session_snapshot.created";
+
+export function createPromptSessionSnapshot(
+  tools: ToolDefinition[],
+  skills: SkillDescriptor[],
+  enabledSkillNames: string[],
+  permissionMode: PermissionMode,
+): PromptSessionSnapshot {
+  const frozenTools = tools.slice().sort((a, b) => a.name.localeCompare(b.name)).map(freezeToolDefinition);
+  const frozenSkills = skills.slice().sort(compareSkillsForPrompt).map(freezeSkillDescriptor);
+  const frozenEnabled = enabledSkillNames.slice().sort();
+  const toolSchemaHash = hashJson(toModelTools(frozenTools));
+  const snapshotHash = hashJson({
+    tools: toModelTools(frozenTools),
+    skills: frozenSkills,
+    enabled_skill_names: frozenEnabled,
+    permission_mode: permissionMode,
+  });
+  return {
+    tools: frozenTools,
+    skills: frozenSkills,
+    enabledSkillNames: frozenEnabled,
+    permissionMode,
+    toolSchemaHash,
+    snapshotHash,
+  };
+}
+
+export function promptSessionSnapshotToJson(snapshot: PromptSessionSnapshot): JsonObject {
+  return {
+    tools: snapshot.tools as unknown as JsonObject[],
+    skills: snapshot.skills as unknown as JsonObject[],
+    enabled_skill_names: snapshot.enabledSkillNames,
+    permission_mode: snapshot.permissionMode,
+    tool_schema_hash: snapshot.toolSchemaHash,
+    snapshot_hash: snapshot.snapshotHash,
+  };
+}
+
+export function readPromptSessionSnapshot(store: SessionStore, sessionId: string): PromptSessionSnapshot | undefined {
+  return promptSessionSnapshotFromEvents(store.listEvents(sessionId));
+}
+
+function promptSessionSnapshotFromEvents(events: SessionEvent[]): PromptSessionSnapshot | undefined {
+  const event = events.find((item) => item.type === PROMPT_SESSION_SNAPSHOT_EVENT);
+  if (!event) {
+    return undefined;
+  }
+  const tools = Array.isArray(event.data.tools) ? event.data.tools.map(parseToolDefinition).filter((tool): tool is ToolDefinition => Boolean(tool)) : [];
+  const skills = Array.isArray(event.data.skills) ? event.data.skills.map(parseSkillDescriptor).filter((skill): skill is SkillDescriptor => Boolean(skill)) : [];
+  const enabledSkillNames = Array.isArray(event.data.enabled_skill_names)
+    ? event.data.enabled_skill_names.filter((name): name is string => typeof name === "string").sort()
+    : [];
+  const permissionMode = parsePermissionMode(event.data.permission_mode);
+  if (!tools.length || !permissionMode) {
+    return undefined;
+  }
+  return createPromptSessionSnapshot(tools, skills, enabledSkillNames, permissionMode);
+}
+
 export class PromptBuilder {
   constructor(
     private readonly config: VllmAgentConfig,
@@ -60,38 +128,50 @@ export class PromptBuilder {
     const events = this.store.listEvents(session.session_id);
     const latestCompaction = latestCompactionEvent(events);
     const recent = selectPromptEvents(events, latestCompaction);
-    const toolSchemaHash = hashJson(toModelTools(tools));
-    const sections = this.renderSections(session, recent, tools, skills, enabledSkillNames, latestCompaction);
+    const sessionSnapshot = promptSessionSnapshotFromEvents(events);
+    const promptTools = sessionSnapshot?.tools ?? tools;
+    const promptSkills = sessionSnapshot?.skills ?? skills;
+    const promptEnabledSkillNames = sessionSnapshot?.enabledSkillNames ?? enabledSkillNames;
+    const toolSchemaHash = hashJson(toModelTools(promptTools));
+    const sections = this.renderSections(session, recent, promptTools, promptSkills, promptEnabledSkillNames, latestCompaction);
     const sectionHashes = Object.fromEntries(sections.map((section) => [section.id, sha256Hex(section.text)]));
     const systemText = sections
       .filter((section) => section.placement === "system")
       .map((section) => `<${section.id}>\n${section.text}\n</${section.id}>`)
       .join("\n\n");
+    const tailMessages = this.tailMessages(recent, activeRunId);
+    const currentPromptInTail = activeRunId ? recent.some((event) => isCurrentRunUserPrompt(event, userPrompt, activeRunId)) : false;
     const messages: ModelMessage[] = [
       { role: "system", content: systemText },
-      ...this.tailMessages(recent, userPrompt, activeRunId),
-      ...this.currentTurnContextMessages(session, recent, activeRunId),
-      { role: "user", content: userPrompt },
+      ...tailMessages,
+      ...(currentPromptInTail ? [] : currentTurnContextMessagesForSession(this.store, session)),
+      ...(currentPromptInTail ? [] : [{ role: "user" as const, content: userPrompt }]),
     ];
     const promptHash = hashJson({ messages, tool_schema_hash: toolSchemaHash });
-    const epoch = this.ensureEpoch(session, sectionHashes, toolSchemaHash, "session-or-layout");
+    const epoch = this.ensureEpoch(session, sectionHashes, toolSchemaHash, "session-or-layout", sessionSnapshot?.permissionMode);
     return {
       messages,
       prompt_hash: promptHash,
       tool_schema_hash: toolSchemaHash,
       section_hashes: sectionHashes,
-      estimated_tokens: estimateTokens(JSON.stringify(messages) + stableJson(toModelTools(tools))),
+      estimated_tokens: estimateTokens(JSON.stringify(messages) + stableJson(toModelTools(promptTools))),
       recent_event_count: recent.length,
       compactable_event_count: activeRunId ? recent.filter((event) => event.run_id !== activeRunId).length : recent.length,
       epoch,
     };
   }
 
-  startNewEpoch(session: SessionRecord, sectionHashes: Record<string, string>, toolSchemaHash: string, reason: string): PromptEpochRecord {
+  startNewEpoch(
+    session: SessionRecord,
+    sectionHashes: Record<string, string>,
+    toolSchemaHash: string,
+    reason: string,
+    frozenPermissionMode?: PermissionMode,
+  ): PromptEpochRecord {
     const setup = this.config.model_setup;
     const provider = providerId(this.config);
     const model = setup.model ?? "unconfigured";
-    const permissionMode = effectiveWorkspacePermission(this.config, this.workspace).mode;
+    const permissionMode = frozenPermissionMode ?? effectiveWorkspacePermission(this.config, this.workspace).mode;
     const cacheSalt =
       setup.cache_salt ??
       `cs_${sha256Hex(`inferoa:cache-salt:v1\0${this.workspace.id}\0${session.session_id}\0${provider}\0${permissionMode}`).slice(0, 32)}`;
@@ -116,12 +196,13 @@ export class PromptBuilder {
     sectionHashes: Record<string, string>,
     toolSchemaHash: string,
     reason: string,
+    frozenPermissionMode?: PermissionMode,
   ): PromptEpochRecord {
     const current = this.store.getCurrentPromptEpoch(session.session_id);
     const setup = this.config.model_setup;
     const provider = providerId(this.config);
     const model = setup.model ?? "unconfigured";
-    const permissionMode = effectiveWorkspacePermission(this.config, this.workspace).mode;
+    const permissionMode = frozenPermissionMode ?? effectiveWorkspacePermission(this.config, this.workspace).mode;
     const layoutHash = promptLayoutHashFor(sectionHashes, provider, model, permissionMode);
     if (
       !current ||
@@ -131,7 +212,7 @@ export class PromptBuilder {
       current.prompt_layout_hash !== layoutHash ||
       !sameSectionHashes(current.section_hashes, sectionHashes)
     ) {
-      return this.startNewEpoch(session, sectionHashes, toolSchemaHash, current ? reason : "session-created");
+      return this.startNewEpoch(session, sectionHashes, toolSchemaHash, current ? reason : "session-created", frozenPermissionMode);
     }
     return current;
   }
@@ -197,18 +278,16 @@ export class PromptBuilder {
     return sections;
   }
 
-  private tailMessages(events: SessionEvent[], currentUserPrompt: string, activeRunId?: string): ModelMessage[] {
+  private tailMessages(events: SessionEvent[], activeRunId?: string): ModelMessage[] {
     const messages: ModelMessage[] = [];
-    const history = events.filter((event) => !isInternalPromptReplayEvent(event));
-    const currentPromptIndex = history.findLastIndex((event) => isCurrentRunUserPrompt(event, currentUserPrompt, activeRunId));
-    if (currentPromptIndex >= 0) {
-      history.splice(currentPromptIndex, 1);
-    }
+    const history = events.filter((event) => !isInternalPromptReplayEvent(event) || (activeRunId !== undefined && event.run_id === activeRunId));
     const pendingToolResults = new Set<string>();
     for (let index = 0; index < history.length; index += 1) {
       const event = history[index]!;
       if (event.type === "user.prompt") {
         messages.push({ role: "user", content: renderTailUserPrompt(String(event.data.prompt ?? "")) });
+      } else if (event.type === "prompt.context") {
+        messages.push(...promptContextMessagesFromEvent(event));
       } else if (event.type === "model.response.settled") {
         const content = String(event.data.content ?? "");
         const toolCalls = Array.isArray(event.data.tool_calls)
@@ -247,43 +326,40 @@ export class PromptBuilder {
         if (report) {
           const summary = String(event.data.completion_summary ?? "").trim();
           const objective = String(event.data.goal_objective ?? "").trim();
-          const title = objective ? `Goal: ${objective}` : "Goal";
+          const title = objective ? `Loop: ${objective}` : "Loop";
           appendAssistantContent(messages, `${title}\n${summary ? `Summary: ${summary}\n` : ""}${report}`);
         }
-      } else if (event.type === "web.prefetch" && !sameRunScope(event.run_id, activeRunId)) {
-        messages.push({ role: "user", content: `<web.prefetch.history>\n${renderTailWebPrefetch(event)}\n</web.prefetch.history>` });
+      } else if (event.type === "web.prefetch") {
+        const activePrefetch = activeRunId ? sameRunScope(event.run_id, activeRunId) : false;
+        messages.push({
+          role: "user",
+          content: activePrefetch
+            ? `<web.prefetch.context>\n${renderWebPrefetchContext([event])}\n</web.prefetch.context>`
+            : `<web.prefetch.history>\n${renderTailWebPrefetch(event)}\n</web.prefetch.history>`,
+        });
       }
     }
     return messages;
   }
+}
 
-  private currentTurnContextMessages(session: SessionRecord, events: SessionEvent[], activeRunId?: string): ModelMessage[] {
-    const messages: ModelMessage[] = [];
-    const planMode = renderPlanModeSection(readPlanState(this.store, session.session_id));
-    if (planMode) {
-      messages.push({ role: "user", content: `<plan.mode>\n${planMode}\n</plan.mode>` });
-    }
-    const goalState = readGoalState(this.store, session.session_id);
-    const goalMode = renderGoalModeSection(goalState);
-    if (goalMode) {
-      messages.push({ role: "user", content: `<goal.mode>\n${goalMode}\n</goal.mode>` });
-    }
-    const autoresearchMode =
-      goalState?.enabled && goalState.goal.kind === "research" ? renderAutoresearchModeSection(readAutoresearchState(this.store, session.session_id)) : undefined;
-    if (autoresearchMode) {
-      messages.push({ role: "user", content: `<autoresearch.mode>\n${autoresearchMode}\n</autoresearch.mode>` });
-    }
-    const webPrefetches = events
-      .filter((event) => event.type === "web.prefetch" && !isInternalPromptReplayEvent(event) && (!activeRunId || event.run_id === activeRunId))
-      .slice(-5);
-    if (webPrefetches.length) {
-      messages.push({
-        role: "user",
-        content: `<web.prefetch.context>\n${renderWebPrefetchContext(webPrefetches)}\n</web.prefetch.context>`,
-      });
-    }
-    return messages;
+export function currentTurnContextMessagesForSession(store: SessionStore, session: SessionRecord): ModelMessage[] {
+  const messages: ModelMessage[] = [];
+  const planMode = renderPlanModeSection(readPlanState(store, session.session_id));
+  if (planMode) {
+    messages.push({ role: "user", content: `<plan.mode>\n${planMode}\n</plan.mode>` });
   }
+  const goalState = readGoalState(store, session.session_id);
+  const goalMode = renderGoalModeSection(goalState);
+  if (goalMode) {
+    messages.push({ role: "user", content: `<goal.mode>\n${goalMode}\n</goal.mode>` });
+  }
+  const autoresearchMode =
+    goalState?.enabled && goalState.goal.kind === "research" ? renderAutoresearchModeSection(readAutoresearchState(store, session.session_id)) : undefined;
+  if (autoresearchMode) {
+    messages.push({ role: "user", content: `<autoresearch.mode>\n${autoresearchMode}\n</autoresearch.mode>` });
+  }
+  return messages;
 }
 
 function hasFollowingToolResult(events: SessionEvent[], modelResponseIndex: number, runId: string | undefined, toolCallId: string): boolean {
@@ -306,10 +382,7 @@ function isCurrentRunUserPrompt(event: SessionEvent, currentUserPrompt: string, 
   if (event.type !== "user.prompt") {
     return false;
   }
-  if (activeRunId) {
-    return event.run_id === activeRunId && event.data.prompt === currentUserPrompt;
-  }
-  return event.data.prompt === currentUserPrompt;
+  return Boolean(activeRunId && event.run_id === activeRunId && event.data.prompt === currentUserPrompt);
 }
 
 function sameRunScope(eventRunId: string | undefined, responseRunId: string | undefined): boolean {
@@ -320,7 +393,7 @@ function isInternalPromptReplayEvent(event: SessionEvent): boolean {
   if (event.data.visibility !== "internal" && event.data.request_class !== "reflection") {
     return false;
   }
-  return event.type === "user.prompt" || event.type === "model.response.settled" || event.type === "tool.result" || event.type === "web.prefetch";
+  return event.type === "prompt.context" || event.type === "user.prompt" || event.type === "model.response.settled" || event.type === "tool.result" || event.type === "web.prefetch";
 }
 
 function toolCallId(value: unknown): string | undefined {
@@ -328,6 +401,17 @@ function toolCallId(value: unknown): string | undefined {
     return undefined;
   }
   return stringField((value as JsonObject).id);
+}
+
+function promptContextMessagesFromEvent(event: SessionEvent): ModelMessage[] {
+  if (!Array.isArray(event.data.messages)) {
+    return [];
+  }
+  return event.data.messages.flatMap((value) => {
+    const object = objectField(value);
+    const content = stringField(object.content);
+    return content ? [{ role: "user" as const, content }] : [];
+  });
 }
 
 function latestCompactionEvent(events: SessionEvent[]): SessionEvent | undefined {
@@ -342,111 +426,7 @@ function renderEpochMemory(event?: SessionEvent): string | undefined {
   if (!rawSummary) {
     return undefined;
   }
-  const summary = truncateText(rawSummary, EPOCH_MEMORY_SUMMARY_LIMIT).text;
-  const prompts = Array.isArray(event.data.protected_user_prompts)
-    ? event.data.protected_user_prompts.filter((prompt): prompt is string => typeof prompt === "string" && prompt.length > 0)
-    : [];
-  const retention = renderCompressionRetention(event, prompts.length);
-  const protectedLoops = renderProtectedLoopSummaries(event.data.protected_loops);
-  const archive = typeof event.data.archive_resource_uri === "string" ? event.data.archive_resource_uri : undefined;
-  return [
-    "Frozen compaction memory for this prompt epoch. Treat it as durable context; do not rewrite it inside the epoch.",
-    archive ? `Archive resource: ${escapeXmlText(archive)}` : undefined,
-    retention,
-    prompts.length ? `Protected user prompt excerpts:\n${prompts.map((prompt) => `- ${escapeXmlText(truncateInlineWithMarker(prompt, EPOCH_MEMORY_PROTECTED_PROMPT_LIMIT))}`).join("\n")}` : undefined,
-    protectedLoops.length ? `Protected recent loops:\n${protectedLoops.join("\n")}` : undefined,
-    `Summary:\n${escapeXmlText(summary)}`,
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n\n");
-}
-
-function renderCompressionRetention(event: SessionEvent, fallbackPromptCount: number): string | undefined {
-  const archived = numberField(event.data.archived_events);
-  const tail = numberField(event.data.protected_tail_events);
-  const prompts = numberField(event.data.protected_prompt_count) ?? (fallbackPromptCount > 0 ? fallbackPromptCount : undefined);
-  const parts = [
-    archived === undefined ? undefined : `${archived} archived events`,
-    tail === undefined ? undefined : `${tail} protected tail events`,
-    prompts === undefined ? undefined : `${prompts} protected prompts`,
-  ].filter((part): part is string => Boolean(part));
-  return parts.length ? `Compression retention: ${parts.join("; ")}.` : undefined;
-}
-
-function renderProtectedLoopSummaries(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const lines: string[] = [];
-  for (const rawLoop of value.slice(0, 8)) {
-    const loop = objectField(rawLoop);
-    if (!Object.keys(loop).length) {
-      continue;
-    }
-    const runId = stringField(loop.run_id);
-    const prompt = stringField(loop.user_prompt);
-    lines.push(`- ${runId ? `run ${escapeXmlText(runId)}` : "run"}${prompt ? `: ${escapeXmlText(truncateInline(prompt))}` : ""}`);
-    const tools = Array.isArray(loop.tool_results) ? loop.tool_results : [];
-    for (const rawTool of tools.slice(0, 12)) {
-      const tool = objectField(rawTool);
-      const name = stringField(tool.tool_name) ?? "tool";
-      const ok = tool.ok === true ? "ok" : tool.ok === false ? "failed" : "unknown";
-      const summary = stringField(tool.summary);
-      const resources = resourceUrisForTool(tool);
-      lines.push(
-        `  tool ${escapeXmlText(name)} ${ok}${summary ? `: ${escapeXmlText(truncateInline(summary))}` : ""}${resources.length ? ` (${resources.map(escapeXmlText).join(", ")})` : ""}`,
-      );
-    }
-    const final = stringField(loop.final_response);
-    if (final) {
-      lines.push(`  final ${escapeXmlText(truncateInline(final))}`);
-    }
-    const goalReport = stringField(loop.goal_report);
-    if (goalReport) {
-      lines.push(`  goal ${escapeXmlText(truncateInline(goalReport))}`);
-    }
-    const runStatus = renderProtectedRunStatus(loop.run_status);
-    if (runStatus) {
-      lines.push(`  ${runStatus}`);
-    }
-  }
-  return lines;
-}
-
-function renderProtectedRunStatus(value: unknown): string | undefined {
-  const status = objectField(value);
-  const type = stringField(status.type);
-  if (!type) {
-    return undefined;
-  }
-  const label =
-    type === "run.failed"
-      ? "run failed"
-      : type === "run.stopped"
-        ? "run stopped"
-        : type === "run.completed"
-          ? "run completed"
-          : undefined;
-  if (!label) {
-    return undefined;
-  }
-  const reason = stringField(status.error) ?? stringField(status.reason);
-  const metrics = [
-    numberField(status.tool_rounds) === undefined ? undefined : `${numberField(status.tool_rounds)} loops`,
-    numberField(status.tool_calls) === undefined ? undefined : `${numberField(status.tool_calls)} tools`,
-    numberField(status.tokens) === undefined ? undefined : `${numberField(status.tokens)} tokens`,
-  ].filter((part): part is string => Boolean(part));
-  return `${label}${reason ? `: ${escapeXmlText(truncateInline(reason))}` : ""}${metrics.length ? ` (${metrics.join(", ")})` : ""}`;
-}
-
-function resourceUrisForTool(tool: JsonObject): string[] {
-  const values = Array.isArray(tool.resource_uris) ? tool.resource_uris : [tool.resource_uri];
-  return values.filter((value): value is string => typeof value === "string" && value.startsWith("resource://")).slice(0, 5);
-}
-
-function truncateInline(value: string, max = 500): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return normalized.length > max ? `${normalized.slice(0, max - 3)}...` : normalized;
+  return escapeXmlText(rawSummary);
 }
 
 function truncateInlineWithMarker(value: string, max: number): string {
@@ -469,6 +449,84 @@ function sameSectionHashes(left: Record<string, string>, right: Record<string, s
     return false;
   }
   return leftKeys.every((key) => left[key] === right[key]);
+}
+
+function freezeToolDefinition(tool: ToolDefinition): ToolDefinition {
+  return {
+    name: tool.name,
+    description: tool.description,
+    permission: tool.permission,
+    parameters: cloneJsonObject(tool.parameters),
+  };
+}
+
+function parseToolDefinition(value: unknown): ToolDefinition | undefined {
+  const object = objectField(value);
+  const name = stringField(object.name);
+  const description = stringField(object.description);
+  const permission = parseToolPermission(object.permission);
+  const parameters = objectField(object.parameters);
+  if (!name || !description || !permission || !Object.keys(parameters).length) {
+    return undefined;
+  }
+  return { name, description, permission, parameters: cloneJsonObject(parameters) };
+}
+
+function freezeSkillDescriptor(skill: SkillDescriptor): SkillDescriptor {
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    source: skill.source,
+    path: skill.path,
+    trust: skill.trust,
+    required_tools: [...skill.required_tools].sort(),
+    activation: [...skill.activation].sort(),
+  };
+}
+
+function parseSkillDescriptor(value: unknown): SkillDescriptor | undefined {
+  const object = objectField(value);
+  const id = stringField(object.id);
+  const name = stringField(object.name);
+  const description = stringField(object.description) ?? "";
+  const source = stringField(object.source) ?? "";
+  const trust = parseSkillTrust(object.trust);
+  if (!id || !name || !trust) {
+    return undefined;
+  }
+  return {
+    id,
+    name,
+    description,
+    source,
+    path: stringField(object.path),
+    trust,
+    required_tools: arrayOfStrings(object.required_tools).sort(),
+    activation: arrayOfStrings(object.activation).sort(),
+  };
+}
+
+function parsePermissionMode(value: unknown): PermissionMode | undefined {
+  return value === "ask" || value === "auto_approve" || value === "full_access" || value === "custom" ? value : undefined;
+}
+
+function parseToolPermission(value: unknown): ToolDefinition["permission"] | undefined {
+  return value === "read" || value === "write" || value === "shell" || value === "network" || value === "external_path" || value === "destructive"
+    ? value
+    : undefined;
+}
+
+function parseSkillTrust(value: unknown): SkillDescriptor["trust"] | undefined {
+  return value === "package" || value === "user" || value === "workspace" || value === "imported" ? value : undefined;
+}
+
+function arrayOfStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function cloneJsonObject(value: JsonObject): JsonObject {
+  return JSON.parse(JSON.stringify(value)) as JsonObject;
 }
 
 function renderWebPrefetchContext(events: SessionEvent[]): string {
@@ -652,7 +710,8 @@ function renderSkillIndex(skills: SkillDescriptor[], enabledNames: string[]): st
     ].join(" | ");
   });
   return [
-    "Skill bodies are not embedded in the prompt. Use skill_list to inspect the discovered catalog and skill_read(id) to load details only when useful.",
+    "Skill bodies are not embedded in the prompt. Enabled skills are explicit workspace policy; use skill_read(id) to load relevant enabled skill details before relying on them for goal work.",
+    "Use skill_list to inspect the discovered catalog and skill_read(id) to load details only when useful.",
     `Enabled skills: ${enabledList.length ? enabledList.map(escapeXmlText).join(", ") : "none"}.`,
     lines.length ? lines.join("\n") : "- none discovered",
   ].join("\n");

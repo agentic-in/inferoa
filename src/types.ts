@@ -5,6 +5,7 @@ export type JsonObject = { [key: string]: JsonValue };
 export type EndpointMode = "direct" | "auto";
 export type ProviderKind = "vllm" | "external";
 export type PermissionMode = "ask" | "auto_approve" | "full_access" | "custom";
+export type LoopBackgroundIsolation = "active_checkout" | "worktree";
 
 export interface ModelSetup {
   mode: EndpointMode;
@@ -117,6 +118,9 @@ export interface VllmAgentConfig {
   daemon: {
     poll_ms: number;
   };
+  loop: {
+    default_background_isolation: LoopBackgroundIsolation;
+  };
 }
 
 export interface RtkConfig {
@@ -223,6 +227,8 @@ export interface ModelMessage {
 export interface ModelRequest {
   session_id: string;
   run_id: string;
+  step_id?: string;
+  step_index?: number;
   mode: EndpointMode;
   provider_id: string;
   model: string;
@@ -275,6 +281,8 @@ export interface ModelResponse {
 export interface EndpointSignalSnapshot {
   mode: EndpointMode;
   provider_id: string;
+  step_id?: string;
+  step_index?: number;
   base_url?: string;
   model?: string;
   models?: JsonObject[];

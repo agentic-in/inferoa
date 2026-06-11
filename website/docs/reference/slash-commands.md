@@ -16,7 +16,9 @@ subcommands.
 | `/system` | Show model, web search, Omni, and runtime status (also `/endpoint`, `/endpoints`) |
 | `/access` | Change this workspace's file and tool access |
 | `/skills` | List discovered skills or manage enabled skills |
-| [`/goal`](../workflows/goal-mode.md) | Start task and research goals |
+| [`/loop`](../workflows/loop-mode.md) | Start or manage task and research loops |
+| `/inbox` | Show loop review, blocker, automation, and self-improve items |
+| `/self-improve` | Manage loop learning proposals and replay reports |
 | [`/plan`](../workflows/plan-mode.md) | Start or manage plan mode |
 | `/tokenmaxxing` | Show token, cache, RTK, and routing savings (also `/cache`, `/rtk`, `/activity`, `/evidence`, `/history`) |
 | `/context` | Show context usage, compression state, and code intelligence |
@@ -32,18 +34,26 @@ subcommands.
 ## Common Subcommands
 
 ```text
-# Goal mode
-/goal show                   Show active goal state
-/goal                        Start a recursive long-horizon goal
-/goal mode auto              Start a default auto goal
-/goal mode focus             Start a focused goal
-/goal mode explore           Start an exploratory goal
-/goal mode timebox 2h        Start a timeboxed goal
-/goal mode research          Start an auto research goal
-/goal pause                  Pause the current goal
-/goal resume                 Resume a paused goal
-/goal complete               Mark the goal complete
-/goal drop                   Drop the current goal
+# Loop mode
+/loop status                 Show active loop state
+/loop                        Start a recursive long-horizon loop
+/loop mode auto              Start a default auto loop
+/loop mode focus             Start a focused loop
+/loop mode explore           Start an exploratory loop
+/loop mode timebox 2h        Start a timeboxed loop
+/loop mode research          Start a research loop
+/loop review                 Review a pending loop decision
+/loop verify                 Run an independent loop verification pass
+/loop pause                  Pause the current loop
+/loop resume                 Resume a paused loop
+/loop drop                   Drop the current loop
+
+# Self-improve
+/self-improve status         Show learning evidence and proposals
+/self-improve propose        Stage a learned workspace skill proposal
+/self-improve run --replay   Run structured replay/gating
+/self-improve report         Show the latest replay report
+/self-improve adopt          Adopt a staged learned workspace skill
 
 # Plan mode
 /plan show                   Show active plan state
@@ -89,6 +99,7 @@ subcommands.
 # Doctor
 /doctor status               Show configuration health
 /doctor run                  Probe configured endpoint and optional Omni routes
+/doctor tools                Ask the current agent to regress built-in tools
 ```
 
 ## Aliases

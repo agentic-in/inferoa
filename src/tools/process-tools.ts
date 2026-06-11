@@ -1,10 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import path from "node:path";
 import type { JsonObject, ToolResult } from "../types.js";
 import { resolveInside } from "../util/fs.js";
 import { fail, ok, truncateText } from "../util/limit.js";
 import { randomId } from "../util/hash.js";
 import type { ToolExecutionContext } from "./context.js";
 import { runRtkAwareShellCommand } from "../rtk/command.js";
+import { readGoalState } from "../goals/state.js";
+import { recordCommandVerificationFromPolicy } from "../loop/verification.js";
 
 interface LiveProcess {
   child: ChildProcessWithoutNullStreams;
@@ -83,6 +86,8 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
     store: context.store,
     session_id: context.session_id,
     run_id: context.run_id,
+    step_id: context.step_id,
+    step_index: context.step_index,
     tool_call_id: context.tool_call_id,
     tool_name: context.tool_name ?? "run_command",
     command,
@@ -108,12 +113,27 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
     data: {
       command,
       rewritten_command: result.rewritten_command,
+      step_id: context.step_id,
+      step_index: context.step_index,
       cwd,
       code: result.code,
       timed_out: result.timed_out,
       resource_uri: resource,
     },
   });
+  const goal = readGoalState(context.store, context.session_id)?.goal;
+  if (goal && goal.status !== "complete" && goal.status !== "dropped") {
+    recordCommandVerificationFromPolicy(context.store, context.session_id, goal, {
+      command,
+      cwd: workspaceRelativeCwd(context.workspace.root, cwd),
+      code: result.code,
+      timed_out: result.timed_out,
+      run_id: context.run_id,
+      tool_call_id: context.tool_call_id,
+      resource_uri: resource,
+      output_excerpt: truncateText(combined, 1000).text,
+    });
+  }
   return {
     ok: result.code === 0 && !result.timed_out,
     summary: `Command exited ${result.code}${result.timed_out ? " after timeout" : ""}`,
@@ -127,6 +147,14 @@ export async function runCommand(args: JsonObject, context: ToolExecutionContext
     resource_uri: resource,
     error: result.code === 0 && !result.timed_out ? undefined : { code: result.timed_out ? "command_timeout" : "command_failed", message: result.stderr || result.stdout },
   };
+}
+
+function workspaceRelativeCwd(workspaceRoot: string, cwd: string): string | undefined {
+  const relative = path.relative(workspaceRoot, cwd);
+  if (!relative) {
+    return undefined;
+  }
+  return relative.split(path.sep).join("/");
 }
 
 export async function readProcess(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -147,7 +175,15 @@ export async function writeProcess(args: JsonObject, context: ToolExecutionConte
   const processId = String(args.process_id);
   const live = liveProcesses.get(key(context.session_id, processId));
   if (!live) {
-    return fail("process_not_live", `Process is not live in this runtime: ${processId}`);
+    const record = context.store.getProcess(context.session_id, processId);
+    if (record) {
+      return fail("process_already_exited", `Process already exited: ${processId}. Use read_process to inspect retained output.`, {
+        process_id: processId,
+        status: record.status,
+        exit_code: record.exit_code ?? null,
+      });
+    }
+    return fail("process_not_found", `Process not found in this session: ${processId}`);
   }
   live.child.stdin.write(String(args.input));
   if (args.close_stdin) {
@@ -166,7 +202,15 @@ export async function stopProcess(args: JsonObject, context: ToolExecutionContex
   const processId = String(args.process_id);
   const live = liveProcesses.get(key(context.session_id, processId));
   if (!live) {
-    return fail("process_not_live", `Process is not live in this runtime: ${processId}`);
+    const record = context.store.getProcess(context.session_id, processId);
+    if (record) {
+      return ok(`Process ${processId} already stopped`, {
+        process_id: processId,
+        status: record.status,
+        exit_code: record.exit_code ?? null,
+      });
+    }
+    return fail("process_not_found", `Process not found in this session: ${processId}`);
   }
   const signal = String(args.signal ?? "SIGTERM") as NodeJS.Signals;
   killProcessTree(live.child, signal);

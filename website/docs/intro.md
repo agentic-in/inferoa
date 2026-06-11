@@ -5,7 +5,7 @@ sidebar_label: Overview
 ---
 
 Inferoa is an **Inference-native Tokenmaxxing Agent Harness for Loop
-Engineering**. It is built for recursive long-horizon goals in coding and
+Engineering**. It is built for recursive long-horizon loops in coding and
 research work across the vLLM ecosystem.
 
 That is what **inference-native** means here: Inferoa starts from the inference
@@ -39,9 +39,9 @@ flowchart LR
   Harness --> Evidence
 ```
 
-- **Goal-driven loop engineering** keeps recursive long-horizon goals,
-  horizons, completion reflection, and evidence attached to a durable session.
-- **Plan mode and research goals** support approved scope and repeated
+- **Loop-driven engineering** keeps recursive long-horizon loops, loop tasks,
+  completion decisions, and evidence attached to a durable session.
+- **Plan mode and research loops** support approved scope and repeated
   measurement inside the same long-running loop.
 - **Prefix-cache discipline** keeps the stable parts of the prompt stable, so
   reusable prefixes are not invalidated by avoidable churn.
@@ -72,7 +72,7 @@ behavior with inference behavior.
 - [Model endpoints](./configuration/model-endpoints.md),
   [vLLM Omni](./configuration/omni.md), and
   [Context and RTK](./configuration/context-and-rtk.md) for configuration.
-- [Goal mode](./workflows/goal-mode.md),
+- [Loop mode](./workflows/loop-mode.md),
   [Plan mode](./workflows/plan-mode.md),
   [Coding workflow](./workflows/coding-workflow.md), and
   [Daemon runs](./workflows/daemon-jobs.md) for long-horizon workflows.

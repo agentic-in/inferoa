@@ -4,6 +4,7 @@ import { randomId } from "../util/hash.js";
 import {
   cloneGoalState,
   completeGoalAfterReflection,
+  goalCompletionCandidateBlockMessage,
   goalDurationMs,
   incompleteGoalPlanningSteps,
   isGoalHorizonExhausted,
@@ -16,7 +17,9 @@ import {
   type GoalState,
 } from "./state.js";
 import { buildGoalReflectionPrompt, buildGoalWorkPrompt } from "./supervisor-prompts.js";
+import { buildGoalVerificationPrompt } from "./verifier.js";
 import { readAutoresearchState, researchCompletionBlockMessage, setAutoresearchMode } from "../autoresearch/state.js";
+import { goalVerifierPolicyCompletionBlockMessage } from "../loop/verification.js";
 
 export const DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS = 1000;
 
@@ -52,6 +55,7 @@ export interface GoalSupervisorOptions {
   supervisor: string;
   maxIterations?: number;
   workRequestClass?: ModelRequest["request_class"];
+  autoVerifyCompletion?: boolean;
   shouldContinue?: () => boolean;
   runTurn: (request: GoalSupervisorTurnRequest) => Promise<GoalSupervisorTurnResult | undefined>;
   onIteration?: (iteration: number) => void;
@@ -83,7 +87,7 @@ export async function runGoalSupervisor(options: GoalSupervisorOptions): Promise
     const workRun = await options.runTurn({
       prompt: buildGoalWorkPrompt(state.goal),
       requestClass: options.workRequestClass ?? "background",
-      activityLabel: goalHorizonActivityLabel("Continuing goal horizon", state.goal.horizon_generation),
+      activityLabel: goalHorizonActivityLabel("Continuing loop task", state.goal.horizon_generation),
     });
     if (!workRun || !goalProgressUpdatedDuringRun(options.store, options.sessionId, workRun.run_id, state)) {
       const reason = goalWorkNoProgressReason(workRun);
@@ -121,7 +125,7 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
     requestClass: "reflection",
     visibility: "internal",
     runId: reflectionRunId,
-    activityLabel: goalHorizonActivityLabel("Reflecting goal horizon", state.goal.horizon_generation),
+    activityLabel: goalHorizonActivityLabel("Reflecting loop task", state.goal.horizon_generation),
     suppressTranscript: true,
   });
   const reflected = readGoalState(options.store, options.sessionId);
@@ -132,6 +136,10 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
     const paused = pauseGoal(options, reflected, reflectionRunId, "reflection_missing_decision");
     return { status: "paused", iteration, reason: "reflection_missing_decision", run_id: reflectionRunId, goal_id: paused.goal.id };
   }
+  if (reflected.goal.pending_review_decision) {
+    options.onPaused?.(reflected, reflectionRunId, "goal_review_pending");
+    return { status: "paused", iteration, reason: "goal_review_pending", run_id: reflectionRunId, goal_id: reflected.goal.id };
+  }
   if (reflected.goal.last_reflection_decision === "expand") {
     options.onReflectionExpanded?.(reflected);
     return { status: "waiting", iteration, reason: "expanded", run_id: reflectionRunId, goal_id: reflected.goal.id };
@@ -140,12 +148,52 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
   // concrete and substantively tied to the original objective, otherwise done.
   if (reflected.goal.last_reflection_decision === "done") {
     try {
+      const candidateBlock = goalCompletionCandidateBlockMessage(reflected.goal);
+      if (candidateBlock) {
+        const expanded = expandGoalFromLedgerCandidates(reflected);
+        if (expanded) {
+          const saved = writeGoalState(options.store, options.sessionId, expanded, reflectionRunId);
+          appendLedgerExpansionEvent(options, saved, reflected, reflectionRunId, candidateBlock);
+          options.onReflectionExpanded?.(saved);
+          return { status: "waiting", iteration, reason: "expanded_from_ledger", run_id: reflectionRunId, goal_id: saved.goal.id };
+        }
+        const paused = pauseGoal(options, reflected, reflectionRunId, candidateBlock);
+        return { status: "paused", iteration, reason: candidateBlock, run_id: reflectionRunId, goal_id: paused.goal.id };
+      }
       if (reflected.goal.kind === "research") {
         const researchBlock = researchCompletionBlockMessage(readAutoresearchState(options.store, options.sessionId));
         if (researchBlock) {
           const paused = pauseGoal(options, reflected, reflectionRunId, researchBlock);
           return { status: "paused", iteration, reason: researchBlock, run_id: reflectionRunId, goal_id: paused.goal.id };
         }
+      }
+      const verifierBlock = goalVerifierPolicyCompletionBlockMessage(options.store, options.sessionId, reflected.goal, {
+        request_class: options.workRequestClass ?? "background",
+      });
+      if (verifierBlock) {
+        if (options.autoVerifyCompletion) {
+          const verificationRun = await runGoalCompletionVerifier(options, reflected, verifierBlock);
+          if (!verificationRun) {
+            return { status: "stopped", iteration, reason: "verification_cancelled", goal_id: reflected.goal.id };
+          }
+          const afterVerificationBlock = goalVerifierPolicyCompletionBlockMessage(options.store, options.sessionId, reflected.goal, {
+            request_class: options.workRequestClass ?? "background",
+          });
+          if (!afterVerificationBlock) {
+            const completed = completeGoalAfterReflection(reflected, reflected.goal.last_reflection_summary);
+            const saved = writeGoalState(options.store, options.sessionId, completed, reflectionRunId);
+            if (saved.goal.kind === "research") {
+              setAutoresearchMode(options.store, options.sessionId, { mode: "off", goal: saved.goal.objective }, reflectionRunId);
+            }
+            recordGoalCompletionReport(options.store, options.sessionId, reflectionRunId);
+            options.onCompleted?.(saved, reflectionRunId);
+            return { status: "complete", iteration, run_id: verificationRun.run_id, goal_id: saved.goal.id };
+          }
+          const paused = pauseGoal(options, reflected, verificationRun.run_id, afterVerificationBlock);
+          return { status: "paused", iteration, reason: afterVerificationBlock, run_id: verificationRun.run_id, goal_id: paused.goal.id };
+        }
+        const paused = pauseGoal(options, reflected, reflectionRunId, verifierBlock);
+        return { status: "paused", iteration, reason: verifierBlock, run_id: reflectionRunId, goal_id: paused.goal.id };
       }
       const completed = completeGoalAfterReflection(reflected, reflected.goal.last_reflection_summary);
       const saved = writeGoalState(options.store, options.sessionId, completed, reflectionRunId);
@@ -160,20 +208,7 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
       const expanded = expandGoalFromLedgerCandidates(reflected);
       if (expanded) {
         const saved = writeGoalState(options.store, options.sessionId, expanded, reflectionRunId);
-        options.store.appendEvent({
-          session_id: options.sessionId,
-          run_id: reflectionRunId,
-          type: "goal.horizon.expanded",
-          data: {
-            goal_id: saved.goal.id,
-            previous_horizon_generation: reflected.goal.horizon_generation,
-            horizon_generation: saved.goal.horizon_generation,
-            step_count: saved.goal.planning?.steps.length ?? 0,
-            active_step_id: saved.goal.planning?.active_step_id,
-            reason: "completion_gate",
-            blocked_completion: reason,
-          },
-        });
+        appendLedgerExpansionEvent(options, saved, reflected, reflectionRunId, reason);
         options.onReflectionExpanded?.(saved);
         return { status: "waiting", iteration, reason: "expanded_from_ledger", run_id: reflectionRunId, goal_id: saved.goal.id };
       }
@@ -192,6 +227,37 @@ async function runGoalReflection(options: GoalSupervisorOptions, state: GoalStat
   };
 }
 
+async function runGoalCompletionVerifier(
+  options: GoalSupervisorOptions,
+  state: GoalState,
+  reason: string,
+): Promise<GoalSupervisorTurnResult | undefined> {
+  if (options.shouldContinue && !options.shouldContinue()) {
+    return undefined;
+  }
+  const runId = randomId("verify");
+  options.store.appendEvent({
+    session_id: options.sessionId,
+    run_id: runId,
+    type: "goal.verification.requested",
+    data: {
+      goal_id: state.goal.id,
+      horizon_generation: state.goal.horizon_generation,
+      supervisor: options.supervisor,
+      reason,
+      role: "completion",
+    },
+  });
+  return await options.runTurn({
+    prompt: buildGoalVerificationPrompt(state.goal, { role: "completion", rubric: reason }),
+    requestClass: "verification",
+    visibility: "internal",
+    runId,
+    activityLabel: goalHorizonActivityLabel("Verifying loop task", state.goal.horizon_generation),
+    suppressTranscript: true,
+  });
+}
+
 function isRunnableGoal(state: GoalState | undefined): state is GoalState {
   return Boolean(state?.enabled && state.goal.status === "active");
 }
@@ -206,6 +272,29 @@ function goalHorizonActivityLabel(prefix: string, generation: number): string {
 
 function isCompletedReflectionForRun(state: GoalState, reflectionRunId: string): boolean {
   return state.goal.last_reflection_run_id === reflectionRunId && state.goal.reflection_status === "completed";
+}
+
+function appendLedgerExpansionEvent(
+  options: GoalSupervisorOptions,
+  saved: GoalState,
+  previous: GoalState,
+  runId: string,
+  blockedCompletion: string,
+): void {
+  options.store.appendEvent({
+    session_id: options.sessionId,
+    run_id: runId,
+    type: "goal.horizon.expanded",
+    data: {
+      goal_id: saved.goal.id,
+      previous_horizon_generation: previous.goal.horizon_generation,
+      horizon_generation: saved.goal.horizon_generation,
+      step_count: saved.goal.planning?.steps.length ?? 0,
+      active_step_id: saved.goal.planning?.active_step_id,
+      reason: "completion_gate",
+      blocked_completion: blockedCompletion,
+    },
+  });
 }
 
 function expandGoalFromLedgerCandidates(state: GoalState): GoalState | undefined {
@@ -224,7 +313,7 @@ function expandGoalFromLedgerCandidates(state: GoalState): GoalState | undefined
   const next = cloneGoalState(state);
   next.goal.horizon_generation += 1;
   const planned = replaceGoalPlanning(next, {
-    summary: `Horizon ${next.goal.horizon_generation} · Candidate work`,
+    summary: `Loop task ${next.goal.horizon_generation} · Candidate work`,
     active_step_id: candidates[0]?.id,
     steps: candidates.map((candidate) => ({
       id: candidate.id,
@@ -274,9 +363,9 @@ function goalWorkNoProgressReason(workRun: GoalSupervisorTurnResult | undefined)
   }
   const hasRuntimeResultShape = workRun.content !== undefined || workRun.tool_calls !== undefined || workRun.tool_rounds !== undefined;
   if (hasRuntimeResultShape && (workRun.content ?? "").trim() === "" && (workRun.tool_calls ?? 0) === 0 && (workRun.tool_rounds ?? 0) === 0) {
-    return "model returned an empty goal turn; no horizon progress was recorded";
+    return "model returned an empty loop turn; no loop task progress was recorded";
   }
-  return "last supervisor turn did not update the horizon";
+  return "last supervisor turn did not update the loop task";
 }
 
 function eventGoalState(data: unknown): GoalState | undefined {

@@ -29,6 +29,8 @@ import { skillDisable, skillEnable, skillList, skillRead } from "./skill-tools.j
 import { goalTool } from "./goal-tools.js";
 import { planTool } from "./plan-tools.js";
 import { clarifyTool } from "./clarify-tool.js";
+import { subagentTool } from "./subagent-tool.js";
+import { validateToolArguments } from "./schema-validation.js";
 import { initExperiment, logExperiment, runExperiment, updateExperiment, updateNotes } from "./autoresearch-tools.js";
 import {
   audioGeneration,
@@ -77,6 +79,7 @@ const HANDLERS: Record<string, ToolHandler> = {
   skill_list: skillList,
   skill_read: skillRead,
   stop_process: stopProcess,
+  subagent: subagentTool,
   speech_generation: speechGeneration,
   speech_voices: speechVoices,
   todo_write: todoWrite,
@@ -107,7 +110,19 @@ export class ToolRegistry {
     return [...configuredToolDefinitions(this.config), ...this.codeIntelligence.toolDefinitions()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  async call(call: ToolCall, context: { session_id: string; run_id?: string; request_class?: ToolExecutionContext["request_class"]; visibility?: ToolExecutionContext["visibility"]; clarify?: ToolExecutionContext["clarify"] }): Promise<ToolResult> {
+  async call(
+    call: ToolCall,
+    context: {
+      session_id: string;
+      run_id?: string;
+      step_id?: string;
+      step_index?: number;
+      request_class?: ToolExecutionContext["request_class"];
+      visibility?: ToolExecutionContext["visibility"];
+      control_plane?: boolean;
+      clarify?: ToolExecutionContext["clarify"];
+    },
+  ): Promise<ToolResult> {
     const definition = this.list().find((tool) => tool.name === call.name);
     if (!definition) {
       const result = fail("unknown_tool", `Unknown tool: ${call.name}`);
@@ -116,7 +131,14 @@ export class ToolRegistry {
       return result;
     }
     this.recordCall(context, call);
-    const decision = this.policy.decide(definition, call.arguments);
+    if (!context.control_plane) {
+      const invalidArguments = validateToolArguments(definition, call.arguments);
+      if (invalidArguments) {
+        this.recordResult(context, call, invalidArguments);
+        return invalidArguments;
+      }
+    }
+    const decision = this.policy.decide(definition, call.arguments, { request_class: context.request_class });
     if (decision.status !== "allow") {
       this.store.appendEvent({
         session_id: context.session_id,
@@ -125,9 +147,12 @@ export class ToolRegistry {
         data: {
           tool_call_id: call.id,
           tool_name: call.name,
+          step_id: context.step_id,
+          step_index: context.step_index,
           request_class: context.request_class,
           visibility: context.visibility,
           decision: decision as unknown as JsonObject,
+          arguments: call.arguments,
         },
       });
       const blocked = fail(
@@ -141,6 +166,8 @@ export class ToolRegistry {
         data: {
           tool_call_id: call.id,
           tool_name: call.name,
+          step_id: context.step_id,
+          step_index: context.step_index,
           request_class: context.request_class,
           visibility: context.visibility,
           result: blocked as unknown as JsonObject,
@@ -155,9 +182,12 @@ export class ToolRegistry {
       data: {
         tool_call_id: call.id,
         tool_name: call.name,
+        step_id: context.step_id,
+        step_index: context.step_index,
         request_class: context.request_class,
         visibility: context.visibility,
         decision: decision as unknown as JsonObject,
+        arguments: call.arguments,
       },
     });
     const execContext: ToolExecutionContext = {
@@ -165,8 +195,11 @@ export class ToolRegistry {
       workspace: this.workspace,
       session_id: context.session_id,
       run_id: context.run_id,
+      step_id: context.step_id,
+      step_index: context.step_index,
       request_class: context.request_class,
       visibility: context.visibility,
+      control_plane: context.control_plane,
       tool_call_id: call.id,
       tool_name: call.name,
       store: this.store,
@@ -206,7 +239,17 @@ export class ToolRegistry {
     return result;
   }
 
-  private recordCall(context: { session_id: string; run_id?: string; request_class?: ToolExecutionContext["request_class"]; visibility?: ToolExecutionContext["visibility"] }, call: ToolCall): void {
+  private recordCall(
+    context: {
+      session_id: string;
+      run_id?: string;
+      step_id?: string;
+      step_index?: number;
+      request_class?: ToolExecutionContext["request_class"];
+      visibility?: ToolExecutionContext["visibility"];
+    },
+    call: ToolCall,
+  ): void {
     this.store.appendEvent({
       session_id: context.session_id,
       run_id: context.run_id,
@@ -214,6 +257,8 @@ export class ToolRegistry {
       data: {
         tool_call_id: call.id,
         tool_name: call.name,
+        step_id: context.step_id,
+        step_index: context.step_index,
         request_class: context.request_class,
         visibility: context.visibility,
         arguments: call.arguments,
@@ -221,7 +266,18 @@ export class ToolRegistry {
     });
   }
 
-  private recordResult(context: { session_id: string; run_id?: string; request_class?: ToolExecutionContext["request_class"]; visibility?: ToolExecutionContext["visibility"] }, call: ToolCall, result: ToolResult): void {
+  private recordResult(
+    context: {
+      session_id: string;
+      run_id?: string;
+      step_id?: string;
+      step_index?: number;
+      request_class?: ToolExecutionContext["request_class"];
+      visibility?: ToolExecutionContext["visibility"];
+    },
+    call: ToolCall,
+    result: ToolResult,
+  ): void {
     this.store.appendEvent({
       session_id: context.session_id,
       run_id: context.run_id,
@@ -229,6 +285,8 @@ export class ToolRegistry {
       data: {
         tool_call_id: call.id,
         tool_name: call.name,
+        step_id: context.step_id,
+        step_index: context.step_index,
         request_class: context.request_class,
         visibility: context.visibility,
         result: result as unknown as JsonObject,

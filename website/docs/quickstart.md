@@ -61,9 +61,9 @@ Slash commands live inside the TUI. See
   configuration.
 - Use `/system` (also `/endpoints`) to inspect model, web search, Omni, and
   runtime status.
-- Run [`/goal`](./workflows/goal-mode.md) to start a recursive long-horizon
-  goal.
-- Run `/goal mode research` for experiment-shaped work that needs repeated
+- Run [`/loop`](./workflows/loop-mode.md) to start a recursive long-horizon
+  loop.
+- Run `/loop mode research` for experiment-shaped work that needs repeated
   measurement.
 - Use [`/plan set`](./workflows/plan-mode.md) for ambiguous work that needs an
   inspectable plan before execution.
@@ -105,11 +105,11 @@ Once Inferoa is running, explore the long-horizon workflows:
 - [First session](./getting-started/first-session.md) walks through a complete
   task loop — describing work, using modes, inspecting evidence, and resuming
   later.
-- [Goal mode](./workflows/goal-mode.md) is the loop-engineering surface for
-  recursive long-horizon goals.
+- [Loop mode](./workflows/loop-mode.md) is the loop-engineering surface for
+  recursive long-horizon loops.
 - [Plan mode](./workflows/plan-mode.md) turns ambiguous scope into an
   inspectable plan before execution.
-- Research goals under [Goal mode](./workflows/goal-mode.md) run
+- Research loops under [Loop mode](./workflows/loop-mode.md) run
   benchmark-style iteration with metrics and failure evidence.
 - [Architecture](./architecture.md) explains the system model and how the
   harness, context layer, and inference layer connect.

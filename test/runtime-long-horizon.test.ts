@@ -7,12 +7,85 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
-import { PromptBuilder } from "../src/context/prompt.js";
 import { Runtime, type RuntimeStatusEvent } from "../src/runtime.js";
 import { SessionStore } from "../src/session/store.js";
-import { completeGoalReflection, createGoalState, goalDurationMs, markGoalReflectionStarted, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
-import { CORE_TOOL_DEFINITIONS } from "../src/tools/schemas.js";
+import { completeGoalReflection, createGoalState, markGoalReflectionStarted, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { readGoalLoopView } from "../src/loop/projection.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
+
+test("runtime records first-class model step ids across model and tool events", async () => {
+  let chatCalls = 0;
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      chatCalls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (chatCalls === 1) {
+        writeSse(res, {
+          id: "resp_step_1",
+          model: "long-horizon-test",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    id: "call_step_1",
+                    type: "function",
+                    function: { name: "read_file", arguments: JSON.stringify({ path: "missing-step-file.txt" }) },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 11, completion_tokens: 2 } });
+      } else {
+        writeSse(res, { id: "resp_step_2", model: "long-horizon-test", choices: [{ delta: { content: "step trace complete" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 13, completion_tokens: 3 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-step-trace-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_step_trace", root: dir, alias: "step-trace" };
+    const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+
+    const result = await runtime.run({ prompt: "record model step boundaries" });
+
+    assert.equal(result.content, "step trace complete");
+    const events = store.listEvents(result.session.session_id);
+    const requests = events.filter((event) => event.type === "model.request.started");
+    const responses = events.filter((event) => event.type === "model.response.settled");
+    assert.equal(requests.length, 2);
+    assert.equal(responses.length, 2);
+    assert.equal(requests[0]?.data.step_index, 1);
+    assert.equal(requests[1]?.data.step_index, 2);
+    assert.equal(typeof requests[0]?.data.step_id, "string");
+    assert.equal(typeof requests[1]?.data.step_id, "string");
+    assert.notEqual(requests[0]?.data.step_id, requests[1]?.data.step_id);
+    assert.equal(responses[0]?.data.step_id, requests[0]?.data.step_id);
+    assert.equal(responses[1]?.data.step_id, requests[1]?.data.step_id);
+    const toolCall = events.find((event) => event.type === "tool.call" && event.data.tool_call_id === "call_step_1");
+    const toolResult = events.find((event) => event.type === "tool.result" && event.data.tool_call_id === "call_step_1");
+    assert.equal(toolCall?.data.step_id, requests[0]?.data.step_id);
+    assert.equal(toolCall?.data.step_index, 1);
+    assert.equal(toolResult?.data.step_id, requests[0]?.data.step_id);
+    assert.equal(toolResult?.data.step_index, 1);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
 
 test("runtime defaults to an unbounded tool loop for long horizon tasks", async () => {
   let chatCalls = 0;
@@ -148,6 +221,237 @@ test("runtime freezes available tool schemas for a run", async () => {
     assert.equal(namesByRequest[1]?.includes("image_generation"), false);
     const started = store.listEvents(result.session.session_id).filter((event) => event.type === "model.request.started");
     assert.equal(started[0]?.data.tool_schema_hash, started[1]?.data.tool_schema_hash);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
+test("runtime keeps tool schema stable across interactive and reflection request classes", async () => {
+  let chatCalls = 0;
+  const requestBodies: Array<{ tools?: Array<{ function?: { name?: string } }> }> = [];
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      chatCalls += 1;
+      requestBodies.push(JSON.parse(body) as { tools?: Array<{ function?: { name?: string } }> });
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      writeSse(res, {
+        id: `resp_schema_${chatCalls}`,
+        model: "long-horizon-test",
+        choices: [{ delta: { content: chatCalls === 1 ? "interactive" : "reflection" } }],
+      });
+      writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20 + chatCalls, completion_tokens: 1 } });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-request-class-schema-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_request_class_schema", root: dir, alias: "request-class-schema" };
+    const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+    const session = store.createSession(workspace, "request-class-schema");
+
+    await runtime.run({ prompt: "normal turn", session_id: session.session_id });
+    await runtime.run({
+      prompt: "internal reflection turn",
+      session_id: session.session_id,
+      request_class: "reflection",
+      visibility: "internal",
+    });
+
+    assert.equal(requestBodies.length, 2);
+    const namesByRequest = requestBodies.map((body) => ((body.tools ?? []).map((tool) => tool.function?.name).filter(Boolean)).sort());
+    assert.deepEqual(namesByRequest[1], namesByRequest[0]);
+    assert.ok(namesByRequest[0]?.includes("subagent"));
+
+    const started = store.listEvents(session.session_id).filter((event) => event.type === "model.request.started");
+    assert.equal(started.length, 2);
+    assert.equal(started[0]?.data.tool_schema_hash, started[1]?.data.tool_schema_hash);
+    assert.equal(started[0]?.data.prompt_epoch_id, started[1]?.data.prompt_epoch_id);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
+test("runtime freezes session prompt surface across mode and config changes until compaction", async () => {
+  let chatCalls = 0;
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      chatCalls += 1;
+      requestBodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      writeSse(res, { id: `resp_frozen_surface_${chatCalls}`, model: "long-horizon-test", choices: [{ delta: { content: `turn ${chatCalls}` } }] });
+      writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 30 + chatCalls, completion_tokens: 1 } });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-session-prompt-freeze-"));
+  const previousStateDir = process.env.INFEROA_STATE_DIR;
+  process.env.INFEROA_STATE_DIR = path.join(dir, "user-state");
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const runtimeConfig = config(`http://127.0.0.1:${address.port}/v1`);
+    runtimeConfig.omni.enabled = false;
+    runtimeConfig.skills.enabled = [];
+    const workspace: WorkspaceIdentity = { id: "w_session_prompt_freeze", root: dir, alias: "session-prompt-freeze" };
+    const runtime = new Runtime(runtimeConfig, workspace, store);
+    const session = store.createSession(workspace, "session prompt freeze");
+
+    await runtime.run({ prompt: "first prompt freezes session surface", session_id: session.session_id });
+
+    const skillDir = path.join(dir, ".inferoa", "skills", "late");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(path.join(skillDir, "SKILL.md"), "---\nname: Late Skill\ndescription: Should not enter frozen system prompt.\n---\n\nLate body.", "utf8");
+    runtimeConfig.omni.enabled = true;
+    runtimeConfig.omni.endpoints.image_generation = { base_url: "http://localhost:8001/v1", model: "image-model" };
+    runtimeConfig.skills.enabled = ["late-skill"];
+    runtimeConfig.permissions.mode = "ask";
+    writeGoalState(store, session.session_id, createGoalState({ objective: "Goal state must stay in tail" }), "run_goal_state");
+
+    await runtime.run({
+      prompt: "reflection after config and goal changes",
+      session_id: session.session_id,
+      request_class: "reflection",
+      visibility: "internal",
+    });
+
+    const eventsBeforeCompaction = store.listEvents(session.session_id);
+    store.appendEvent({
+      session_id: session.session_id,
+      type: "context.compacted",
+      data: {
+        reason: "test-compaction",
+        summary: "Compaction is the only allowed system prompt mutation.",
+        compacted_through_event_id: eventsBeforeCompaction.at(-1)?.id ?? 0,
+      },
+    });
+    await runtime.run({ prompt: "after compaction", session_id: session.session_id });
+
+    assert.equal(requestBodies.length, 3);
+    const toolNames = requestBodies.map((body) =>
+      (((body.tools as Array<{ function?: { name?: string } }> | undefined) ?? []).map((tool) => tool.function?.name).filter(Boolean)).sort(),
+    );
+    assert.deepEqual(toolNames[1], toolNames[0]);
+    assert.deepEqual(toolNames[2], toolNames[0]);
+    assert.equal(toolNames[0]?.includes("image_generation"), false);
+
+    const systemPrompts = requestBodies.map((body) => {
+      const messages = (body.messages as Array<{ role?: string; content?: string }> | undefined) ?? [];
+      return String(messages.find((message) => message.role === "system")?.content ?? "");
+    });
+    assert.equal(systemPrompts[1], systemPrompts[0]);
+    assert.doesNotMatch(systemPrompts[1] ?? "", /Late Skill|image_generation/);
+    assert.notEqual(systemPrompts[2], systemPrompts[0]);
+    assert.match(systemPrompts[2] ?? "", /<epoch\.memory>/);
+
+    const started = store.listEvents(session.session_id).filter((event) => event.type === "model.request.started");
+    assert.equal(started.length, 3);
+    assert.equal(started[0]?.data.tool_schema_hash, started[1]?.data.tool_schema_hash);
+    assert.equal(started[0]?.data.prompt_epoch_id, started[1]?.data.prompt_epoch_id);
+    assert.equal(started[0]?.data.tool_schema_hash, started[2]?.data.tool_schema_hash);
+    assert.notEqual(started[0]?.data.prompt_epoch_id, started[2]?.data.prompt_epoch_id);
+  } finally {
+    if (previousStateDir === undefined) {
+      delete process.env.INFEROA_STATE_DIR;
+    } else {
+      process.env.INFEROA_STATE_DIR = previousStateDir;
+    }
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
+test("runtime appends tool-loop prompt changes without rewriting the previous prefix", async () => {
+  let chatCalls = 0;
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      chatCalls += 1;
+      requestBodies.push(JSON.parse(body) as Record<string, unknown>);
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (chatCalls === 1) {
+        writeSse(res, {
+          id: "resp_prefix_first",
+          model: "long-horizon-test",
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    id: "call_prefix_read",
+                    type: "function",
+                    function: { name: "read_file", arguments: JSON.stringify({ path: "missing-prefix-file.txt" }) },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 41, completion_tokens: 2 } });
+      } else {
+        writeSse(res, { id: "resp_prefix_second", model: "long-horizon-test", choices: [{ delta: { content: "prefix preserved" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 42, completion_tokens: 2 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-append-only-prefix-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_append_only_prefix", root: dir, alias: "append-only-prefix" };
+    const runtime = new Runtime(config(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+    const session = store.createSession(workspace, "append-only-prefix");
+    writeGoalState(store, session.session_id, createGoalState({ objective: "Keep goal mode fixed before user prompt" }), "run_goal_state");
+
+    const result = await runtime.run({ prompt: "use one tool then finish", session_id: session.session_id });
+
+    assert.equal(result.content, "prefix preserved");
+    assert.equal(requestBodies.length, 2);
+    const firstMessages = ((requestBodies[0]?.messages as unknown[]) ?? []).map((message) => JSON.stringify(message));
+    const secondMessages = ((requestBodies[1]?.messages as unknown[]) ?? []).map((message) => JSON.stringify(message));
+    assert.deepEqual(secondMessages.slice(0, firstMessages.length), firstMessages);
+    assert.ok(secondMessages.length > firstMessages.length);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -305,6 +609,66 @@ test("runtime freezes enabled skill prompt state for a run", async () => {
     assert.doesNotMatch(systemMessages[1]!, /- demo-skill \| enabled/);
     const started = store.listEvents(result.session.session_id).filter((event) => event.type === "model.request.started");
     assert.equal(started[0]?.data.prompt_epoch_id, started[1]?.data.prompt_epoch_id);
+  } finally {
+    if (previousStateDir === undefined) {
+      delete process.env.INFEROA_STATE_DIR;
+    } else {
+      process.env.INFEROA_STATE_DIR = previousStateDir;
+    }
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
+test("goal runs record enabled skill snapshots in the loop view", async () => {
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      writeSse(res, { id: "resp_skill_snapshot", model: "long-horizon-test", choices: [{ delta: { content: "goal used enabled skill" } }] });
+      writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 21, completion_tokens: 3 } });
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-skill-snapshot-"));
+  const previousStateDir = process.env.INFEROA_STATE_DIR;
+  process.env.INFEROA_STATE_DIR = path.join(dir, "user-state");
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const skillDir = path.join(dir, ".inferoa", "skills", "demo");
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: Demo Skill\ndescription: Demonstrates auditable skill policy.\n---\n\nUse this when the goal asks for demo policy.\n",
+      "utf8",
+    );
+    const runtimeConfig = config(`http://127.0.0.1:${address.port}/v1`);
+    runtimeConfig.skills.enabled = ["demo-skill"];
+    const workspace: WorkspaceIdentity = { id: "w_goal_skill_snapshot", root: dir, alias: "goal-skill-snapshot" };
+    const runtime = new Runtime(runtimeConfig, workspace, store);
+    const session = store.createSession(workspace, "goal skill snapshot");
+    const goal = createGoalState({ objective: "Audit skill policy" });
+    writeGoalState(store, session.session_id, goal, "run_goal");
+
+    const result = await runtime.run({ prompt: "use the enabled demo skill", session_id: session.session_id });
+
+    assert.equal(result.content, "goal used enabled skill");
+    const snapshotEvent = store.listEvents(session.session_id).find((event) => event.type === "skill.snapshot.created");
+    assert.equal(snapshotEvent?.data.goal_id, goal.goal.id);
+    assert.equal(snapshotEvent?.data.skill_count, 1);
+    assert.equal(Array.isArray(snapshotEvent?.data.skills), true);
+    const view = readGoalLoopView(store, session.session_id);
+    assert.equal(view.skill_snapshots.length, 1);
+    assert.equal(view.skill_snapshots[0]?.skills[0]?.id, "demo-skill");
+    assert.match(view.skill_snapshots[0]?.skills[0]?.body_hash ?? "", /^[a-f0-9]{64}$/);
   } finally {
     if (previousStateDir === undefined) {
       delete process.env.INFEROA_STATE_DIR;
@@ -715,10 +1079,8 @@ test("runtime yields immediately after an internal reflection decision is record
   }
 });
 
-test("runtime reports goal completion metrics after a completing tool loop", async () => {
+test("runtime rejects model-facing loop completion control-plane calls", async () => {
   let chatCalls = 0;
-  const streamed: string[] = [];
-  const statuses: RuntimeStatusEvent[] = [];
   const modelServer = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
       return;
@@ -747,7 +1109,7 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
         });
         writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 11, completion_tokens: 2 } });
       } else {
-        writeSse(res, { id: "resp_final_goal", model: "long-horizon-test", choices: [{ delta: { content: "goal finished" } }] });
+        writeSse(res, { id: "resp_final_goal", model: "long-horizon-test", choices: [{ delta: { content: "loop still active" } }] });
         writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 17, completion_tokens: 4 } });
       }
       res.end("data: [DONE]\n\n");
@@ -778,49 +1140,22 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
     const result = await runtime.run({
       prompt: "finish the active goal",
       session_id: session.session_id,
-      onDelta: (text) => streamed.push(text),
-      onStatus: (event) => statuses.push(event),
     });
 
+    assert.equal(chatCalls, 1);
     assert.equal(result.tool_rounds, 1);
     assert.equal(result.tool_calls, 1);
-    assert.equal(result.tokens_used, 34);
-    assert.match(result.content, /goal finished/);
-    assert.match(result.content, /Goal: Finish with a report/);
-    assert.doesNotMatch(result.content, /Goal report/);
-    assert.match(result.content, /1 loop · 1 tool call/);
-    assert.match(streamed.join(""), /Goal: Finish with a report/);
-    assert.doesNotMatch(streamed.join(""), /Goal report/);
-    assert.ok(statuses.some((event) => event.type === "tool_start" && event.tool_name === "goal" && event.summary === "Completing goal"));
+    assert.equal(result.content, "");
     const goal = readGoalState(store, session.session_id)?.goal;
-    assert.equal(goal?.status, "complete");
-    assert.equal(goal?.tokens_used, 34);
-    assert.equal(goal?.tool_rounds_used, 1);
-    assert.equal(goal?.tool_calls_used, 1);
+    assert.equal(goal?.status, "active");
     const events = store.listEvents(session.session_id);
-    const report = events.find((event) => event.type === "goal.completion_report");
-    assert.equal(report?.data.goal_objective, "Finish with a report");
-    assert.equal(report?.data.tool_rounds, goal?.tool_rounds_used);
-    assert.equal(report?.data.tool_calls, goal?.tool_calls_used);
-    assert.equal(report?.data.tokens, goal?.tokens_used);
-    assert.equal(report?.data.duration_ms, goal ? goalDurationMs(goal) : 0);
-    assert.match(String(report?.data.report ?? ""), /34 tokens used/);
-    assert.equal(report?.data.completion_summary, "Finished the goal.");
+    const toolResult = events.find((event) => event.type === "tool.result" && event.data.tool_call_id === "call_goal_complete");
+    assert.equal((toolResult?.data.result as { error?: { code?: string } } | undefined)?.error?.code, "invalid_tool_arguments");
+    assert.equal(events.some((event) => event.type === "goal.completion_report"), false);
     const completed = events.find((event) => event.type === "run.completed");
     assert.equal(completed?.data.tool_rounds, 1);
     assert.equal(completed?.data.tool_calls, 1);
-    assert.equal(completed?.data.tokens, 34);
     assert.equal(result.duration_ms, completed?.data.duration_ms);
-    const nextPrompt = new PromptBuilder(config(`http://127.0.0.1:${address.port}/v1`), store, workspace).build(
-      store.getSession(session.session_id)!,
-      "continue after goal completion",
-      CORE_TOOL_DEFINITIONS,
-    );
-    const assistantContext = nextPrompt.messages.filter((message) => message.role === "assistant").map((message) => String(message.content)).join("\n");
-    assert.match(assistantContext, /Goal: Finish with a report/);
-    assert.doesNotMatch(assistantContext, /Goal report/);
-    assert.match(assistantContext, /Summary: Finished the goal\./);
-    assert.match(assistantContext, /34 tokens used/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -828,7 +1163,7 @@ test("runtime reports goal completion metrics after a completing tool loop", asy
   }
 });
 
-test("runtime preserves goal completion report when final response fails", async () => {
+test("runtime yields after rejected model-facing completion before a follow-up provider call", async () => {
   let chatCalls = 0;
   const streamed: string[] = [];
   const modelServer = createServer((req, res) => {
@@ -887,35 +1222,23 @@ test("runtime preserves goal completion report when final response fails", async
       ),
     );
 
-    await assert.rejects(
-      () => runtime.run({ prompt: "complete goal then fail", session_id: session.session_id, onDelta: (text) => streamed.push(text) }),
-      /final response failed/,
-    );
+    const result = await runtime.run({ prompt: "complete goal then fail", session_id: session.session_id, onDelta: (text) => streamed.push(text) });
 
-    assert.match(streamed.join(""), /Goal: Complete before provider failure/);
-    assert.doesNotMatch(streamed.join(""), /Goal report/);
-    assert.match(streamed.join(""), /13 tokens used/);
+    assert.equal(chatCalls, 1);
+    assert.equal(result.tool_rounds, 1);
+    assert.equal(result.tool_calls, 1);
+    assert.equal(result.content, "");
+    assert.equal(streamed.join(""), "");
     const goal = readGoalState(store, session.session_id)?.goal;
-    assert.equal(goal?.status, "complete");
-    assert.equal(goal?.tokens_used, 13);
-    assert.equal(goal?.tool_rounds_used, 1);
-    assert.equal(goal?.tool_calls_used, 1);
+    assert.equal(goal?.status, "active");
     const events = store.listEvents(session.session_id);
-    assert.equal(events.filter((event) => event.type === "goal.completion_report").length, 1);
-    assert.ok(events.some((event) => event.type === "run.failed"));
-    const report = events.find((event) => event.type === "goal.completion_report");
-    assert.equal(report?.data.goal_objective, "Complete before provider failure");
-    assert.equal(report?.data.tool_rounds, goal?.tool_rounds_used);
-    assert.equal(report?.data.tool_calls, goal?.tool_calls_used);
-    assert.equal(report?.data.tokens, goal?.tokens_used);
-    assert.equal(report?.data.duration_ms, goal ? goalDurationMs(goal) : 0);
-    assert.equal(report?.data.completion_summary, "Finished before final response.");
-    const started = events.filter((event) => event.type === "model.request.started").at(-1);
-    const requestFailed = events.find((event) => event.type === "model.request.failed");
-    assert.equal(requestFailed?.data.request_class, "interactive");
-    assert.equal(requestFailed?.data.prompt_hash, started?.data.prompt_hash);
-    assert.equal(requestFailed?.data.tool_schema_hash, started?.data.tool_schema_hash);
-    assert.equal(requestFailed?.data.prompt_epoch_id, started?.data.prompt_epoch_id);
+    assert.equal(events.filter((event) => event.type === "goal.completion_report").length, 0);
+    assert.equal(events.some((event) => event.type === "run.failed"), false);
+    assert.ok(events.some((event) => event.type === "run.completed"));
+    const toolResult = events.find((event) => event.type === "tool.result" && event.data.tool_call_id === "call_goal_complete_before_failure");
+    assert.equal((toolResult?.data.result as { error?: { code?: string } } | undefined)?.error?.code, "invalid_tool_arguments");
+    assert.equal(events.filter((event) => event.type === "model.request.started").length, 1);
+    assert.equal(events.some((event) => event.type === "model.request.failed"), false);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

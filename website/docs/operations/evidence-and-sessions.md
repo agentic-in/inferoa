@@ -52,7 +52,7 @@ event types are:
 | `process` | Background process id, command, exit status |
 | `prompt_epoch` | Epoch hash, section hashes, tool schema hash |
 | `resource` | Managed resource id, type, size, export path |
-| `goal` | Goal objective, step status changes, reflection decisions |
+| `goal` | Loop objective, step status changes, verification, and loop decisions |
 | `plan` | Plan objective, draft body, approval state |
 | `job` | Job id, state transitions (queued, running, detached, etc.) |
 

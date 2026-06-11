@@ -131,11 +131,16 @@ test("runtime surfaces context compression and continues after compacting", asyn
     assert.equal(serverCalls[1]?.request_class, "interactive");
     assert.equal((serverCalls[0]?.body as { cache_salt?: unknown } | undefined)?.cache_salt, (serverCalls[1]?.body as { cache_salt?: unknown } | undefined)?.cache_salt);
     assert.match(String((serverCalls[0]?.body as { cache_salt?: unknown } | undefined)?.cache_salt ?? ""), /^cs_/);
+    assert.equal("max_tokens" in ((serverCalls[0]?.body as Record<string, unknown> | undefined) ?? {}), false);
+    assert.match(JSON.stringify((serverCalls[0]?.body as { messages?: unknown[] } | undefined)?.messages?.at(-1) ?? ""), /Compress wording, not facts/);
 
     const events = store.listEvents(session.session_id);
     const compactionBody = serverCalls[0]?.body as { messages?: unknown[] } | undefined;
-    const expectedCompactionPromptHash = hashJson({ messages: compactionBody?.messages ?? [], tool_schema_hash: hashJson([]) });
     const compactionEvidence = events.find((event) => event.type === "endpoint.evidence.recorded" && event.data.request_id === "req_1");
+    const expectedCompactionPromptHash = hashJson({
+      messages: compactionBody?.messages ?? [],
+      tool_schema_hash: compactionEvidence?.data.tool_schema_hash,
+    });
     assert.equal(compactionEvidence?.data.prompt_hash, expectedCompactionPromptHash);
     assert.equal(compactionEvidence?.data.request_class, "compaction");
     assert.match(String(compactionEvidence?.data.prompt_epoch_id ?? ""), /^pe_/);
@@ -174,7 +179,8 @@ test("runtime surfaces context compression and continues after compacting", asyn
       CORE_TOOL_DEFINITIONS,
     );
     const system = String(nextPromptContext.messages[0]?.content ?? "");
-    assert.match(system, /Compression retention: \d+ archived events; \d+ protected tail events; \d+ protected prompts\./);
+    assert.match(system, /Preserve context across compression/);
+    assert.doesNotMatch(system, /Compression retention:/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -606,10 +612,10 @@ test("context compression bounds protected user prompts while preserving the arc
     assert.equal(result.content, "continued after bounded prompt compression");
     const compactionCall = serverCalls.find((call) => call.request_class === "compaction");
     assert.ok(compactionCall);
-    const compactionBody = JSON.stringify(compactionCall.body);
-    assert.match(compactionBody, /Long protected user prompt remains useful/);
-    assert.match(compactionBody, /\[truncated \d+ chars\]/);
-    assert.doesNotMatch(compactionBody, /protected prompt tail should stay archived only/);
+    const compactionRequest = compactionRequestContent(compactionCall.body);
+    assert.match(compactionRequest, /Long protected user prompt remains useful/);
+    assert.match(compactionRequest, /\[truncated \d+ chars\]/);
+    assert.doesNotMatch(compactionRequest, /protected prompt tail should stay archived only/);
 
     const compacted = store.listEvents(session.session_id).find((event) => event.type === "context.compacted");
     assert.ok(compacted);
@@ -623,9 +629,9 @@ test("context compression bounds protected user prompts while preserving the arc
       CORE_TOOL_DEFINITIONS,
     );
     const system = String(rebuilt.messages[0]?.content ?? "");
-    assert.match(system, /Protected user prompt excerpts:/);
-    assert.match(system, /Long protected user prompt remains useful/);
-    assert.match(system, /\[truncated \d+ chars\]/);
+    assert.doesNotMatch(system, /Protected user prompt excerpts:/);
+    assert.doesNotMatch(system, /Long protected user prompt remains useful/);
+    assert.doesNotMatch(system, /\[truncated \d+ chars\]/);
     assert.doesNotMatch(system, /protected prompt tail should stay archived only/);
   } finally {
     store.close();
@@ -706,7 +712,7 @@ test("context compression uses the model summary and protects recent user loop p
       type: "goal.completion_report",
       data: {
         completion_summary: "Finished active implementation with evidence.",
-        report: "Goal achieved. 2 loops · 3 tool calls · 4s · 55 tokens used.",
+        report: "Loop achieved. 2 tool loops · 3 tool calls · 4s · 55 tokens used.",
         tool_rounds: 2,
         tool_calls: 3,
         tokens: 55,
@@ -786,27 +792,27 @@ test("context compression uses the model summary and protects recent user loop p
     assert.equal(result.content, "continued after compression");
     const compactionCall = serverCalls.find((call) => call.request_class === "compaction");
     assert.ok(compactionCall);
-    const compactionBody = JSON.stringify(compactionCall.body);
-    assert.match(compactionBody, /recent user asks for architecture analysis/);
-    assert.match(compactionBody, /current user asks for long horizon implementation/);
-    assert.match(compactionBody, /Finished active implementation with evidence/);
-    assert.match(compactionBody, /Goal achieved\. 2 loops/);
-    assert.match(compactionBody, new RegExp(escapeRegExp(activeResource.uri)));
-    assert.match(compactionBody, /resource_uris/);
-    assert.match(compactionBody, /ph_active/);
-    assert.match(compactionBody, /th_active/);
-    assert.match(compactionBody, /pe_active/);
-    assert.match(compactionBody, /interactive/);
-    assert.match(compactionBody, /cached_prompt_tokens/);
-    assert.match(compactionBody, /875/);
-    assert.match(compactionBody, /cache_hit_rate/);
-    assert.match(compactionBody, /0\.875/);
-    assert.match(compactionBody, /429 from endpoint/);
-    assert.match(compactionBody, /provider timeout/);
-    assert.match(compactionBody, /Read active extra 10/);
-    assert.doesNotMatch(compactionBody, /Read active extra 11/);
-    assert.match(compactionBody, /omitted_tool_results/);
-    assert.doesNotMatch(compactionBody, /old exploratory question/);
+    const compactionRequest = compactionRequestContent(compactionCall.body);
+    assert.match(compactionRequest, /recent user asks for architecture analysis/);
+    assert.match(compactionRequest, /current user asks for long horizon implementation/);
+    assert.match(compactionRequest, /Finished active implementation with evidence/);
+    assert.match(compactionRequest, /Loop achieved\. 2 tool loops/);
+    assert.match(compactionRequest, new RegExp(escapeRegExp(activeResource.uri)));
+    assert.match(compactionRequest, /resource_uris/);
+    assert.match(compactionRequest, /ph_active/);
+    assert.match(compactionRequest, /th_active/);
+    assert.match(compactionRequest, /pe_active/);
+    assert.match(compactionRequest, /interactive/);
+    assert.match(compactionRequest, /cached_prompt_tokens/);
+    assert.match(compactionRequest, /875/);
+    assert.match(compactionRequest, /cache_hit_rate/);
+    assert.match(compactionRequest, /0\.875/);
+    assert.match(compactionRequest, /429 from endpoint/);
+    assert.match(compactionRequest, /provider timeout/);
+    assert.match(compactionRequest, /Read active extra 10/);
+    assert.doesNotMatch(compactionRequest, /Read active extra 11/);
+    assert.match(compactionRequest, /omitted_tool_results/);
+    assert.doesNotMatch(compactionRequest, /old exploratory question/);
 
     const compacted = store.listEvents(session.session_id).find((event) => event.type === "context.compacted");
     assert.ok(compacted);
@@ -826,11 +832,12 @@ test("context compression uses the model summary and protects recent user loop p
       CORE_TOOL_DEFINITIONS,
     );
     const system = String(rebuilt.messages[0]?.content ?? "");
-    assert.match(system, /Protected recent loops:/);
-    assert.match(system, /tool read_file ok: Read run_active\.ts/);
-    assert.match(system, new RegExp(escapeRegExp(activeResource.uri)));
-    assert.match(system, /run failed: provider timeout/);
-    assert.match(system, /tool read_file ok: Read run_recent\.ts/);
+    assert.match(system, /Model-authored compacted memory/);
+    assert.doesNotMatch(system, /Protected recent loops:/);
+    assert.doesNotMatch(system, /tool read_file ok: Read run_active\.ts/);
+    assert.doesNotMatch(system, new RegExp(escapeRegExp(activeResource.uri)));
+    assert.doesNotMatch(system, /run failed: provider timeout/);
+    assert.doesNotMatch(system, /tool read_file ok: Read run_recent\.ts/);
     assert.doesNotMatch(system, /Read run_old\.ts/);
   } finally {
     store.close();
@@ -872,6 +879,11 @@ function appendLoop(store: SessionStore, sessionId: string, runId: string, promp
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compactionRequestContent(body: unknown): string {
+  const messages = (body as { messages?: Array<{ content?: unknown }> } | undefined)?.messages ?? [];
+  return String(messages.at(-1)?.content ?? "");
 }
 
 function compressionConfig(baseUrl: string): VllmAgentConfig {

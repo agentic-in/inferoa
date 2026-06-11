@@ -75,5 +75,6 @@ npm run validate:omni-real
 npm run validate:omni-e2e-runtime
 ```
 
-Use `/doctor run` for user-facing endpoint health. Strict release acceptance is
-available through the debug runner when validating a release environment.
+Use `/doctor run` for user-facing endpoint health and `/doctor tools` for a
+current-session built-in tool regression. Strict release acceptance is available
+through the debug runner when validating a release environment.

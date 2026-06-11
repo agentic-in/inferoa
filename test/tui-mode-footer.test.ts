@@ -16,7 +16,7 @@ test("mode footer surfaces plan readiness, research state, and goal progress", (
   const plain = stripAnsi(rendered ?? "");
   assert.match(plain, /Plan ready/);
   assert.match(plain, /Research pending 3/);
-  assert.match(plain, /Goal .*improve codebase quality .*horizon 1 .*1\/3 .*1m 7s/);
+  assert.match(plain, /Loop .*improve codebase quality .*task 1 .*1\/3 .*1m 7s/);
 });
 
 test("mode footer keeps draft plan and blocked goal details compact", () => {
@@ -27,7 +27,16 @@ test("mode footer keeps draft plan and blocked goal details compact", () => {
 
   const plain = stripAnsi(rendered ?? "");
   assert.match(plain, /Plan drafting/);
-  assert.match(plain, /Goal .*Improve long horizon flow .*horizon 1 .*1\/3 1 blocked/);
+  assert.match(plain, /Loop .*Improve long horizon flow .*task 1 .*1\/3 1 blocked/);
+});
+
+test("mode footer surfaces pending loop review decisions", () => {
+  const rendered = renderModeMetadataRight({
+    goal: goalState({ status: "paused", enabled: false, pendingReview: "expand" }),
+  });
+
+  const plain = stripAnsi(rendered ?? "");
+  assert.match(plain, /Loop review expand/);
 });
 
 test("mode footer hides inactive or closed modes", () => {
@@ -54,13 +63,14 @@ function planState(input: { status?: PlanState["plan"]["status"]; enabled?: bool
   };
 }
 
-function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: boolean; blocked?: boolean; objective?: string; timeUsedMs?: number } = {}): GoalState {
+function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: boolean; blocked?: boolean; objective?: string; timeUsedMs?: number; pendingReview?: "expand" | "done" | "blocked" } = {}): GoalState {
   return {
     enabled: input.enabled ?? true,
     goal: {
       id: "goal_1",
       objective: input.objective ?? "Improve long horizon flow",
       kind: "task",
+      hil_policy: "auto",
       status: input.status ?? "active",
       tokens_used: 0,
       time_used_ms: input.timeUsedMs ?? 0,
@@ -68,6 +78,14 @@ function goalState(input: { status?: GoalState["goal"]["status"]; enabled?: bool
       tool_rounds_used: 0,
       tool_calls_used: 0,
       horizon_generation: 1,
+      pending_review_decision: input.pendingReview
+        ? {
+            id: "review_1",
+            action: input.pendingReview,
+            source_horizon_generation: 1,
+            created_at: "2026-01-01T00:00:00.000Z",
+          }
+        : undefined,
       planning: {
         active_step_id: input.blocked ? "verify" : "edit",
         updated_at: "2026-01-01T00:00:00.000Z",

@@ -10,12 +10,43 @@ inferoa
 inferoa "prompt"
 inferoa setup
 inferoa --print "prompt"
+inferoa loop health
+inferoa inbox
+inferoa self-improve <command>
+inferoa worktree <command>
+inferoa verify <session> [--role role]
 inferoa debug <command>
 ```
 
 `inferoa` launches the TUI. A positional prompt is sent as the first user turn
 of the new or resumed session. `inferoa setup` opens the TUI setup wizard.
 `inferoa --print` runs a single non-interactive request.
+
+## Loop Commands
+
+```bash
+inferoa loop health              # Show workspace loop health
+inferoa inbox                    # Show loop inbox items
+inferoa worktree list            # Show managed loop worktrees
+inferoa verify <session>         # Run an independent loop verification pass
+```
+
+These commands are for loop operation and automation around the same durable
+session store the TUI uses.
+
+## Self-Improve Commands
+
+```bash
+inferoa self-improve status
+inferoa self-improve propose
+inferoa self-improve run --replay [proposal_id]
+inferoa self-improve report [replay_id]
+inferoa self-improve adopt [proposal_id]
+```
+
+Self-improve reads verified loop evidence, stages a workspace skill proposal,
+runs structured replay/gating, and adopts the skill only when explicitly
+requested.
 
 ## Options
 

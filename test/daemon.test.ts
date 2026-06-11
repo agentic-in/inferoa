@@ -9,7 +9,8 @@ import os from "node:os";
 import YAML from "yaml";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonGoal, queueDaemonRun, serveDaemon } from "../src/daemon/supervisor.js";
-import { completeGoalReflection, createGoalState, readGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { completeGoalReflection, createGoalState, readGoalState, replaceGoalPlanning, setGoalVerifierPolicy, writeGoalState } from "../src/goals/state.js";
+import { readGoalVerificationRecords } from "../src/loop/verification.js";
 import { SessionStore } from "../src/session/store.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 
@@ -54,9 +55,95 @@ test("daemon cancel preserves terminal job states", async () => {
   }
 });
 
+test("daemon run jobs can execute as isolated verification jobs", async () => {
+  let verificationModelCalls = 0;
+  const server = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      const requestClass = typeof req.headers["x-inferoa-request-class"] === "string" ? req.headers["x-inferoa-request-class"] : "interactive";
+      assert.equal(requestClass, "verification");
+      verificationModelCalls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (verificationModelCalls === 1) {
+        writeSse(res, {
+          id: "resp_verify_tool",
+          model: "daemon-goal-test",
+          choices: [{
+            delta: {
+              tool_calls: [{
+                id: "call_goal_verify",
+                type: "function",
+                function: {
+                  name: "goal",
+                  arguments: JSON.stringify({
+                    op: "verify",
+                    verdict: "pass",
+                    confidence: "soft",
+                    summary: "Isolated verifier passed.",
+                  }),
+                },
+              }],
+            },
+          }],
+        });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 20, completion_tokens: 4 } });
+      } else {
+        writeSse(res, { id: "resp_verify_done", model: "daemon-goal-test", choices: [{ delta: { content: "verification recorded" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-verification-job-"));
+  const workspaceRoot = path.join(dir, "workspace");
+  const state = path.join(dir, "state");
+  const store = await SessionStore.open(state);
+  try {
+    await mkdir(path.join(workspaceRoot, ".inferoa"), { recursive: true });
+    const configPath = path.join(workspaceRoot, ".inferoa", "config.yaml");
+    await writeFile(configPath, YAML.stringify(testConfig(`http://127.0.0.1:${address.port}/v1`)), "utf8");
+    const workspace: WorkspaceIdentity = { id: "w_daemon_verifier", root: workspaceRoot, alias: "daemon-verifier" };
+    const session = store.createSession(workspace, "daemon verifier");
+    const goal = writeGoalState(store, session.session_id, createGoalState({ objective: "Verify from daemon metadata" }));
+    const job = store.createSupervisorJob(session.session_id, workspaceRoot, "verify goal", {
+      goal_id: goal.goal.id,
+      metadata: {
+        config_path: configPath,
+        request_class: "verification",
+        skip_goal_supervisor: true,
+        goal_id: goal.goal.id,
+        horizon_generation: goal.goal.horizon_generation,
+        verifier_role: "tests",
+      },
+    });
+
+    await serveDaemon({ stateDir: state, once: true });
+
+    const finished = store.getSupervisorJob(job.job_id);
+    assert.equal(finished?.status, "complete");
+    assert.equal(verificationModelCalls, 2);
+    const records = readGoalVerificationRecords(store, session.session_id, goal.goal.id);
+    assert.equal(records[0]?.provider, "checker");
+    assert.equal(records[0]?.verdict, "pass");
+    assert.equal(records[0]?.verifier_role, "tests");
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.supervisor.paused"), false);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("daemon goal supervisor expands horizon through internal reflection and completes after done reflection", async () => {
   let reflectionCalls = 0;
   let backgroundCalls = 0;
+  const verifierCommand = `"${process.execPath}" -e "process.exit(0)"`;
   const server = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
       return;
@@ -115,6 +202,14 @@ test("daemon goal supervisor expands horizon through internal reflection and com
                 delta: {
                   tool_calls: [
                     {
+                      id: "call_verify_hidden",
+                      type: "function",
+                      function: {
+                        name: "run_command",
+                        arguments: JSON.stringify({ command: verifierCommand, timeout_ms: 10_000 }),
+                      },
+                    },
+                    {
                       id: "call_complete_hidden",
                       type: "function",
                       function: {
@@ -153,6 +248,7 @@ test("daemon goal supervisor expands horizon through internal reflection and com
     goal = replaceGoalPlanning(goal, {
       steps: [{ id: "initial", title: "Initial horizon", status: "completed" }],
     });
+    goal = setGoalVerifierPolicy(goal, { command_verifiers: [{ id: "daemon-unit", command: verifierCommand, required: true }] });
     writeGoalState(store, session.session_id, goal);
 
     const job = await queueDaemonGoal({ stateDir: state, workspaceRoot, sessionId: session.session_id, maxIterations: 6, configPath });
@@ -238,9 +334,10 @@ test("daemon goal supervisor pauses when reflection omits a decision instead of 
   }
 });
 
-test("daemon run with an active goal triggers hidden goal supervision after the visible turn", async () => {
+test("daemon run with an active goal pauses hidden supervision without strong verification", async () => {
   let reflectionCalls = 0;
   let backgroundCalls = 0;
+  let verificationCalls = 0;
   const server = createServer((req, res) => {
     if (serveEndpointSignal(req.url, res)) {
       return;
@@ -282,6 +379,10 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
           writeSse(res, { id: "resp_hidden_reflection_final", model: "daemon-goal-test", choices: [{ delta: { content: "reflection settled" } }] });
           writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 21, completion_tokens: 4 } });
         }
+      } else if (requestClass === "verification") {
+        verificationCalls += 1;
+        writeSse(res, { id: "resp_hidden_verification_no_record", model: "daemon-goal-test", choices: [{ delta: { content: "verification did not record a verdict" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 24, completion_tokens: 4 } });
       } else {
         backgroundCalls += 1;
         writeSse(res, { id: "resp_visible_turn", model: "daemon-goal-test", choices: [{ delta: { content: "visible turn settled" } }] });
@@ -312,10 +413,13 @@ test("daemon run with an active goal triggers hidden goal supervision after the 
 
     assert.equal(backgroundCalls, 1);
     assert.equal(reflectionCalls, 1);
+    assert.equal(verificationCalls, 1);
     const current = readGoalState(store, session.session_id)?.goal;
-    assert.equal(current?.status, "complete");
+    assert.equal(current?.status, "paused");
     assert.equal(current?.last_reflection_decision, "done");
-    assert.equal(store.getSupervisorJob(job.job_id)?.status, "complete");
+    const finishedJob = store.getSupervisorJob(job.job_id);
+    assert.equal(finishedJob?.status, "paused");
+    assert.match(String(finishedJob?.metadata.pause_reason ?? ""), /Reflection-only evidence is not enough/);
     const prompts = store.listEvents(session.session_id).filter((event) => event.type === "user.prompt");
     assert.ok(prompts.some((event) => event.data.prompt === "visible daemon work" && event.data.visibility === "normal"));
     assert.ok(prompts.some((event) => event.data.request_class === "reflection" && event.data.visibility === "internal"));

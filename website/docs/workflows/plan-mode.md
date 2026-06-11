@@ -17,7 +17,7 @@ Use plan mode when:
 - the plan should become durable session context.
 
 Do not use plan mode for routine one-turn work. Do not use it as the main
-progress tracker for long execution; after approval, use [Goal mode](./goal-mode.md)
+progress tracker for long execution; after approval, use [Loop mode](./loop-mode.md)
 when the work should continue until completion.
 
 ## Basic Commands
@@ -74,6 +74,6 @@ so the execution checklist and goal context stay aligned.
 
 ## Relationship To Other Modes
 
-Plan mode answers "what should we do?" Goal mode answers "keep working until it
-is done." Research goals answer "which measured change is better?" A common
-flow is plan first, approve, then execute under a goal.
+Plan mode answers "what should we do?" Loop mode answers "keep working until it
+is done." Research loops answer "which measured change is better?" A common
+flow is plan first, approve, then execute under a loop.

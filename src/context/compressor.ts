@@ -7,6 +7,15 @@ import { estimateTokens, PromptBuilder, type PromptContext } from "./prompt.js";
 import type { SkillDescriptor } from "../skills/registry.js";
 
 const COMPACTION_PROTECTED_PROMPT_LIMIT = 4_000;
+type CompactionSummaryStrategy = "prefix_query" | "standalone_payload" | "deterministic";
+
+interface CompactionAttempt {
+  strategy: Exclude<CompactionSummaryStrategy, "deterministic">;
+  messages: ModelMessage[];
+  tools: ToolDefinition[];
+  toolSchemaHash: string;
+  promptHash: string;
+}
 
 export interface CompactDecision {
   should_compact: boolean;
@@ -57,7 +66,15 @@ export class ContextCompressor {
     tools: ToolDefinition[],
     reason: string,
     options: { activeRunId?: string; currentPrompt?: string; skills?: SkillDescriptor[]; enabledSkillNames?: string[] } = {},
-  ): Promise<{ summary: string; epoch_id: string; resource_uri: string; archived_events: number; protected_tail_events: number; protected_user_prompts: string[] }> {
+  ): Promise<{
+    summary: string;
+    summary_strategy: CompactionSummaryStrategy;
+    epoch_id: string;
+    resource_uri: string;
+    archived_events: number;
+    protected_tail_events: number;
+    protected_user_prompts: string[];
+  }> {
     const events = this.store.listEvents(session.session_id);
     const previousCompaction = events.filter((event) => event.type === "context.compacted").at(-1);
     const previousSummary = previousCompaction?.data.summary;
@@ -75,73 +92,52 @@ export class ContextCompressor {
       event_count: compactedRegion.length,
     });
     let summary = deterministicSummary(session, this.workspace.root, summaryRegion, previousSummary, protectedPromptExcerpts);
+    let summaryStrategy: CompactionSummaryStrategy = "deterministic";
     if (this.config.model_setup.base_url && this.config.model_setup.model && compactedRegion.length > 0) {
-      try {
-        const runId = randomId("run");
-        const compactionMessages: ModelMessage[] = [
-          {
-            role: "system",
-            content:
-              "Summarize Inferoa session state using exactly these headings: Goal, Open Objectives, Constraints And Preferences, Progress, Key Decisions, Files And Code, Commands And Outcomes, Errors And Fixes, Critical Context, Next Steps, Resources And Evidence. Preserve exact paths, commands, endpoint names, resource URIs, and protected user prompt excerpts. Do not invent facts.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              previous_summary: previousSummary ?? null,
-              archive_resource: resource.uri,
-              protected_user_prompts: protectedPromptExcerpts,
-              protected_loops: protection.protected_loops.map(boundProtectedLoop),
-              compacted_events: summarizeEventsForCompaction(summaryRegion, protection.protected_user_prompts),
-            }),
-          },
-        ];
-        const compactionToolSchemaHash = hashJson([]);
-        const compactionPromptHash = hashJson({ messages: compactionMessages, tool_schema_hash: compactionToolSchemaHash });
-        const response = await this.gateway.stream({
-          session_id: session.session_id,
-          run_id: runId,
-          mode: this.config.model_setup.mode,
-          provider_id: this.config.model_setup.provider ?? this.config.model_setup.router ?? "unknown",
-          model: this.config.model_setup.model,
-          request_class: "compaction",
-          messages: compactionMessages,
-          tools: [],
-          prompt_hash: compactionPromptHash,
-          tool_schema_hash: compactionToolSchemaHash,
-          prompt_epoch_id: promptContext.epoch.prompt_epoch_id,
-          cache_salt: promptContext.epoch.cache_salt,
-          max_tokens: 1600,
-          temperature: 0,
-        });
-        if (response.content.trim()) {
+      const modelPayload = compactionPayload(previousSummary, resource.uri, protectedPromptExcerpts, protection, summaryRegion);
+      const attempts = compactionAttempts(promptContext, tools, modelPayload, reason);
+      let lastError: unknown;
+      for (const attempt of attempts) {
+        try {
+          const runId = randomId("run");
+          const request = {
+            session_id: session.session_id,
+            run_id: runId,
+            mode: this.config.model_setup.mode,
+            provider_id: this.config.model_setup.provider ?? this.config.model_setup.router ?? "unknown",
+            model: this.config.model_setup.model,
+            request_class: "compaction" as const,
+            messages: attempt.messages,
+            tools: attempt.tools,
+            prompt_hash: attempt.promptHash,
+            tool_schema_hash: attempt.toolSchemaHash,
+            prompt_epoch_id: promptContext.epoch.prompt_epoch_id,
+            cache_salt: promptContext.epoch.cache_salt,
+            temperature: 0,
+          };
+          const response = await this.gateway.stream(request);
+          if (!response.content.trim()) {
+            lastError = new Error(`empty ${attempt.strategy} compaction response`);
+            continue;
+          }
           summary = response.content.trim();
+          summaryStrategy = attempt.strategy;
           this.store.recordEndpointEvidence(
             session.session_id,
             runId,
-            this.config.model_setup.provider ?? this.config.model_setup.router ?? "unknown",
-            this.gateway.evidenceFromResponse(
-              {
-                session_id: session.session_id,
-                run_id: runId,
-                mode: this.config.model_setup.mode,
-                provider_id: this.config.model_setup.provider ?? this.config.model_setup.router ?? "unknown",
-                model: this.config.model_setup.model,
-                messages: [],
-                tools: [],
-                request_class: "compaction",
-                prompt_hash: compactionPromptHash,
-                tool_schema_hash: compactionToolSchemaHash,
-                prompt_epoch_id: promptContext.epoch.prompt_epoch_id,
-              },
-              response,
-            ),
-            compactionPromptHash,
-            compactionToolSchemaHash,
+            request.provider_id,
+            this.gateway.evidenceFromResponse(request, response),
+            attempt.promptHash,
+            attempt.toolSchemaHash,
           );
+          break;
+        } catch (error) {
+          lastError = error;
         }
-      } catch (error) {
+      }
+      if (summaryStrategy === "deterministic" && lastError) {
         summary += `\n\nErrors And Fixes\n- Model compaction unavailable; used deterministic summary. Error: ${
-          error instanceof Error ? error.message : String(error)
+          lastError instanceof Error ? lastError.message : String(lastError)
         }`;
       }
     }
@@ -159,6 +155,7 @@ export class ContextCompressor {
         protected_prompt_count: protectedPromptExcerpts.length,
         protected_user_prompts: protectedPromptExcerpts,
         protected_loops: protection.protected_loops.map(boundProtectedLoop),
+        summary_strategy: summaryStrategy,
         compacted_through_event_id: compactedThroughEventId,
       },
     });
@@ -167,6 +164,7 @@ export class ContextCompressor {
     const rebuilt = builder.build(sessionNow, options.currentPrompt ?? "", tools, options.skills ?? [], options.activeRunId, options.enabledSkillNames);
     return {
       summary,
+      summary_strategy: summaryStrategy,
       epoch_id: rebuilt.epoch.prompt_epoch_id,
       resource_uri: resource.uri,
       archived_events: compactedRegion.length,
@@ -174,6 +172,78 @@ export class ContextCompressor {
       protected_user_prompts: protectedPromptExcerpts,
     };
   }
+}
+
+function compactionAttempts(promptContext: PromptContext, tools: ToolDefinition[], payload: JsonObject, reason: string): CompactionAttempt[] {
+  const standalone = standaloneCompactionAttempt(payload);
+  if (reason === "provider-context-limit") {
+    return [standalone];
+  }
+  const prefixMessages = [
+    ...promptContext.messages,
+    {
+      role: "user" as const,
+      content: [
+        "<context.compaction.request>",
+        "Summarize the session state visible in the conversation above and the bounded lifecycle evidence below.",
+        "The JSON payload is the authoritative compacted event set; use the preceding conversation only to preserve cached prefix and resolve references. Do not retain old user prompts unless they appear in protected_user_prompts or compacted_events.",
+        "Merge previous_summary with new evidence; do not replace it or discard unresolved objectives, active goal state, blockers, verification evidence, or next actions.",
+        "Use precise, dense language to maximize recoverable information while removing filler. Compress wording, not facts.",
+        "Use exactly these headings: Goal, Open Objectives, Constraints And Preferences, Progress, Key Decisions, Files And Code, Commands And Outcomes, Errors And Fixes, Critical Context, Next Steps, Resources And Evidence.",
+        "For active goal or long-running work, preserve the goal objective, current status, active step, blockers, verification evidence, and the next concrete action.",
+        "Preserve exact paths, commands, endpoint names, resource URIs, and protected user prompt excerpts. Do not invent facts. Do not call tools.",
+        JSON.stringify(payload),
+        "</context.compaction.request>",
+      ].join("\n"),
+    },
+  ];
+  const prefixToolSchemaHash = promptContext.tool_schema_hash;
+  const prefix: CompactionAttempt = {
+    strategy: "prefix_query",
+    messages: prefixMessages,
+    tools,
+    toolSchemaHash: prefixToolSchemaHash,
+    promptHash: hashJson({ messages: prefixMessages, tool_schema_hash: prefixToolSchemaHash }),
+  };
+  return [prefix, standalone];
+}
+
+function standaloneCompactionAttempt(payload: JsonObject): CompactionAttempt {
+  const messages: ModelMessage[] = [
+    {
+      role: "system",
+      content:
+        "Summarize Inferoa session state as a precise, dense, recoverable memory. Merge previous_summary with new evidence; do not replace it or discard unresolved objectives, active goal state, blockers, verification evidence, next actions, exact paths, commands, endpoint names, resource URIs, or protected user prompt excerpts. Use exactly these headings: Goal, Open Objectives, Constraints And Preferences, Progress, Key Decisions, Files And Code, Commands And Outcomes, Errors And Fixes, Critical Context, Next Steps, Resources And Evidence. For active goal or long-running work, preserve the goal objective, current status, active step, blockers, verification evidence, and the next concrete action. Compress wording, not facts. Do not invent facts.",
+    },
+    {
+      role: "user",
+      content: JSON.stringify(payload),
+    },
+  ];
+  const toolSchemaHash = hashJson([]);
+  return {
+    strategy: "standalone_payload",
+    messages,
+    tools: [],
+    toolSchemaHash,
+    promptHash: hashJson({ messages, tool_schema_hash: toolSchemaHash }),
+  };
+}
+
+function compactionPayload(
+  previousSummary: unknown,
+  archiveResourceUri: string,
+  protectedPromptExcerpts: string[],
+  protection: ProtectedLoopContext,
+  summaryRegion: { id?: number; run_id?: string; type: string; data: JsonObject; created_at?: string }[],
+): JsonObject {
+  return {
+    previous_summary: typeof previousSummary === "string" ? previousSummary : null,
+    archive_resource: archiveResourceUri,
+    protected_user_prompts: protectedPromptExcerpts,
+    protected_loops: protection.protected_loops.map(boundProtectedLoop),
+    compacted_events: summarizeEventsForCompaction(summaryRegion, protection.protected_user_prompts),
+  };
 }
 
 interface ProtectedLoopContext {

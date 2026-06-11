@@ -100,6 +100,9 @@ test("explicit config strips unknown fields on load and user config save", async
         "omni:",
         "  enabled: false",
         "  endpoints: {}",
+        "loop:",
+        "  default_background_isolation: worktree",
+        "  unknown_loop_key: old",
       ].join("\n"),
       "utf8",
     );
@@ -109,8 +112,10 @@ test("explicit config strips unknown fields on load and user config save", async
     assert.equal(Object.prototype.hasOwnProperty.call(loaded.config.model_setup, "unknown_model_setup"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(loaded.config.context, "unknown_context_key"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(loaded.config.context.engine, "unknown_engine_key"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(loaded.config.loop, "unknown_loop_key"), false);
     assert.equal(loaded.config.context.engine?.provider, "codegraph");
     assert.equal(loaded.config.context.engine?.watch, false);
+    assert.equal(loaded.config.loop.default_background_isolation, "worktree");
 
     const saved = await saveUserConfig(loaded.config);
     const text = await readFile(saved, "utf8");

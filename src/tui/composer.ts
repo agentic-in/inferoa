@@ -402,7 +402,7 @@ export function renderWelcomeComposerSurface(options: WelcomeComposerRenderOptio
   let cursorLine = inputStartLine + 1;
   let cursorColumn = left + 3;
   if (options.buffer.length === 0) {
-    const placeholder = fg256(244, options.placeholder ?? "Start a long-horizon goal...");
+    const placeholder = fg256(244, options.placeholder ?? "Start a long-horizon loop...");
     pushInputLine(`  ${placeholder}`);
   } else {
     const cursor = clampCursor(display.buffer, display.cursor);

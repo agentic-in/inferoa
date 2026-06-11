@@ -17,15 +17,25 @@ import type {
 } from "./types.js";
 import { SessionStore } from "./session/store.js";
 import { randomId } from "./util/hash.js";
-import { PromptBuilder } from "./context/prompt.js";
+import {
+  createPromptSessionSnapshot,
+  currentTurnContextMessagesForSession,
+  PROMPT_SESSION_SNAPSHOT_EVENT,
+  promptSessionSnapshotToJson,
+  PromptBuilder,
+  readPromptSessionSnapshot,
+  type PromptSessionSnapshot,
+} from "./context/prompt.js";
 import { ContextCompressor } from "./context/compressor.js";
 import { ModelGateway } from "./model/gateway.js";
 import { EndpointSignals, providerId } from "./model/endpoint-signals.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { SkillRegistry } from "./skills/registry.js";
+import { createSkillSnapshot, skillSnapshotToJson } from "./skills/snapshot.js";
 import { CodeIntelligenceHub } from "./code-intelligence/hub.js";
 import { fail } from "./util/limit.js";
 import { isAbortError, throwIfAborted } from "./util/abort.js";
+import { effectiveWorkspacePermission } from "./tools/permissions.js";
 import {
   applyGoalUsage,
   goalCompletionReportForRun,
@@ -72,11 +82,13 @@ export type RuntimeStatusEvent =
       summary: string;
       protected_user_prompts?: string[];
     }
-  | { type: "tool_start"; session_id: string; run_id: string; tool_name: string; tool_call_id: string; summary?: string }
+  | { type: "tool_start"; session_id: string; run_id: string; step_id?: string; step_index?: number; tool_name: string; tool_call_id: string; summary?: string }
   | {
       type: "tool_end";
       session_id: string;
       run_id: string;
+      step_id?: string;
+      step_index?: number;
       tool_name: string;
       tool_call_id: string;
       ok: boolean;
@@ -123,6 +135,32 @@ export class Runtime {
     return this.store.createSession(this.workspace, title);
   }
 
+  private ensurePromptSessionSnapshot(
+    sessionId: string,
+    runId: string,
+    tools: ToolDefinition[],
+    skills: Awaited<ReturnType<SkillRegistry["discover"]>>,
+    enabledSkillNames: string[],
+  ): PromptSessionSnapshot {
+    const existing = readPromptSessionSnapshot(this.store, sessionId);
+    if (existing) {
+      return existing;
+    }
+    const snapshot = createPromptSessionSnapshot(
+      tools,
+      skills,
+      enabledSkillNames,
+      effectiveWorkspacePermission(this.config, this.workspace).mode,
+    );
+    this.store.appendEvent({
+      session_id: sessionId,
+      run_id: runId,
+      type: PROMPT_SESSION_SNAPSHOT_EVENT,
+      data: promptSessionSnapshotToJson(snapshot),
+    });
+    return snapshot;
+  }
+
   async run(options: RuntimeRunOptions): Promise<RuntimeRunResult> {
     const session = options.session_id ? this.requiredSession(options.session_id) : await this.createSession(options.title ?? titleFromPrompt(options.prompt));
     const clientId = options.client_id ?? randomId("c");
@@ -140,21 +178,58 @@ export class Runtime {
     heartbeat.unref();
     try {
       throwIfAborted(options.signal);
-      const discoveredSkills = await this.skills.discover();
-      const enabledSkillNames = this.config.skills.enabled.slice().sort();
-      const loadedSkills = await this.skills.loadEnabled(discoveredSkills);
-      const availableTools = toolsForRequestClass(this.tools.list(), requestClass);
+      const liveDiscoveredSkills = await this.skills.discover();
+      const liveEnabledSkillNames = this.config.skills.enabled.slice().sort();
+      const promptSnapshot = this.ensurePromptSessionSnapshot(
+        session.session_id,
+        runId,
+        this.tools.list(),
+        liveDiscoveredSkills,
+        liveEnabledSkillNames,
+      );
+      const discoveredSkills = promptSnapshot.skills;
+      const enabledSkillNames = promptSnapshot.enabledSkillNames;
+      const availableTools = promptSnapshot.tools;
+      const loadedSkills = await this.skills.loadSelected(discoveredSkills, enabledSkillNames);
+      const activeGoal = readGoalState(this.store, session.session_id)?.goal;
+      if (activeGoal && activeGoal.status !== "complete" && activeGoal.status !== "dropped") {
+        const snapshot = createSkillSnapshot(loadedSkills, enabledSkillNames);
+        this.store.appendEvent({
+          session_id: session.session_id,
+          run_id: runId,
+          type: "skill.snapshot.created",
+          data: {
+            goal_id: activeGoal.id,
+            ...skillSnapshotToJson(snapshot),
+          },
+        });
+      }
       this.store.appendEvent({
         session_id: session.session_id,
         run_id: runId,
         type: "session.resumed",
         data: {
           title: session.title,
+          tool_count: availableTools.length,
           skill_count: discoveredSkills.length,
           enabled_skill_count: loadedSkills.length,
           enabled_skills: loadedSkills.map((skill) => skill.name),
+          prompt_snapshot_hash: promptSnapshot.snapshotHash,
         },
       });
+      const turnContextMessages = currentTurnContextMessagesForSession(this.store, session);
+      if (turnContextMessages.length) {
+        this.store.appendEvent({
+          session_id: session.session_id,
+          run_id: runId,
+          type: "prompt.context",
+          data: {
+            request_class: requestClass,
+            visibility,
+            messages: turnContextMessages as unknown as JsonObject[],
+          },
+        });
+      }
       this.store.appendEvent({
         session_id: session.session_id,
         run_id: runId,
@@ -166,6 +241,7 @@ export class Runtime {
       let currentPrompt = options.prompt;
       let response: ModelResponse | undefined;
       const maxToolRounds = normalizeMaxToolRounds(options.max_tool_rounds);
+      let stepIndex = 0;
       let stopped: JsonObject | undefined;
       let compressedThisRun = false;
       while (true) {
@@ -201,6 +277,7 @@ export class Runtime {
               protected_tail_events: compacted.protected_tail_events,
               protected_prompt_count: compacted.protected_user_prompts.length,
               protected_user_prompts: compacted.protected_user_prompts,
+              summary_strategy: compacted.summary_strategy,
             },
           });
           options.onStatus?.({
@@ -216,6 +293,8 @@ export class Runtime {
           });
         }
         throwIfAborted(options.signal);
+        stepIndex += 1;
+        const stepId = randomId("step");
         const rebuilt = this.promptBuilder.build(
           this.requiredSession(session.session_id),
           currentPrompt,
@@ -227,6 +306,8 @@ export class Runtime {
         const request: ModelRequest = {
           session_id: session.session_id,
           run_id: runId,
+          step_id: stepId,
+          step_index: stepIndex,
           mode: this.config.model_setup.mode,
           provider_id: providerId(this.config),
           model: this.config.model_setup.model ?? "",
@@ -243,6 +324,8 @@ export class Runtime {
           run_id: runId,
           type: "model.request.started",
           data: {
+            step_id: stepId,
+            step_index: stepIndex,
             provider_id: request.provider_id,
             mode: request.mode,
             model: request.model,
@@ -289,6 +372,7 @@ export class Runtime {
                 protected_tail_events: compacted.protected_tail_events,
                 protected_prompt_count: compacted.protected_user_prompts.length,
                 protected_user_prompts: compacted.protected_user_prompts,
+                summary_strategy: compacted.summary_strategy,
               },
             });
             options.onStatus?.({
@@ -327,13 +411,19 @@ export class Runtime {
           run_id: runId,
           type: "model.response.settled",
           data: {
+            step_id: stepId,
+            step_index: stepIndex,
             content: response.content,
             tool_calls: response.tool_calls as never,
             usage: response.usage as never,
             http_status: response.http_status,
             request_id: response.request_id,
             response_id: response.response_id,
+            provider_id: request.provider_id,
             model: response.model,
+            prompt_hash: request.prompt_hash,
+            tool_schema_hash: request.tool_schema_hash,
+            prompt_epoch_id: request.prompt_epoch_id,
             request_class: requestClass,
             visibility,
             raw: response.raw as never,
@@ -352,7 +442,7 @@ export class Runtime {
         let shouldYieldAfterToolCalls = false;
         for (const call of response.tool_calls) {
           throwIfAborted(options.signal);
-          await this.executeToolCall(call, session.session_id, runId, requestClass, visibility, options.onStatus, options.onClarify);
+          await this.executeToolCall(call, session.session_id, runId, stepId, stepIndex, requestClass, visibility, options.onStatus, options.onClarify);
           toolCalls += 1;
           throwIfAborted(options.signal);
           const yieldEvent = goalYieldEventAfterToolCall(this.store, session.session_id, runId, requestClass, visibility);
@@ -399,6 +489,7 @@ export class Runtime {
             protected_tail_events: compacted.protected_tail_events,
             protected_prompt_count: compacted.protected_user_prompts.length,
             protected_user_prompts: compacted.protected_user_prompts,
+            summary_strategy: compacted.summary_strategy,
           },
         });
         options.onStatus?.({
@@ -547,6 +638,8 @@ export class Runtime {
             run_id: request.run_id,
             type: "model.request.failed",
             data: {
+              step_id: request.step_id,
+              step_index: request.step_index,
               provider_id: request.provider_id,
               mode: request.mode,
               model: request.model,
@@ -569,6 +662,8 @@ export class Runtime {
           run_id: request.run_id,
           type: "model.request.retry",
           data: {
+            step_id: request.step_id,
+            step_index: request.step_index,
             provider_id: request.provider_id,
             mode: request.mode,
             model: request.model,
@@ -687,6 +782,8 @@ export class Runtime {
         { id: randomId("prefetch"), name: "web_open", arguments: { url, max_bytes: 1_000_000 } },
         sessionId,
         runId,
+        undefined,
+        undefined,
         requestClass,
         visibility,
         onStatus,
@@ -716,6 +813,8 @@ export class Runtime {
     call: ToolCall,
     sessionId: string,
     runId: string,
+    stepId: string | undefined,
+    stepIndex: number | undefined,
     requestClass: ModelRequest["request_class"],
     visibility: "normal" | "internal",
     onStatus?: RuntimeRunOptions["onStatus"],
@@ -726,13 +825,15 @@ export class Runtime {
       type: "tool_start",
       session_id: sessionId,
       run_id: runId,
+      step_id: stepId,
+      step_index: stepIndex,
       tool_name: call.name,
       tool_call_id: call.id,
       summary: summarizeToolStart(call.name, call.arguments),
     });
     let result: ToolResult;
     try {
-      result = await this.tools.call(call, { session_id: sessionId, run_id: runId, request_class: requestClass, visibility, clarify: onClarify });
+      result = await this.tools.call(call, { session_id: sessionId, run_id: runId, step_id: stepId, step_index: stepIndex, request_class: requestClass, visibility, clarify: onClarify });
     } catch (error) {
       result = fail("tool_runtime_exception", error instanceof Error ? error.message : String(error));
       this.store.appendEvent({
@@ -742,6 +843,8 @@ export class Runtime {
         data: {
           tool_call_id: call.id,
           tool_name: call.name,
+          step_id: stepId,
+          step_index: stepIndex,
           request_class: requestClass,
           visibility,
           result: result as unknown as JsonObject,
@@ -752,6 +855,8 @@ export class Runtime {
       type: "tool_end",
       session_id: sessionId,
       run_id: runId,
+      step_id: stepId,
+      step_index: stepIndex,
       tool_name: call.name,
       tool_call_id: call.id,
       ok: result.ok,
@@ -1027,7 +1132,7 @@ function modelRequestTimeoutError(timeoutMs: number): Error {
 }
 
 function renderGoalReportBlock(completion: GoalCompletionReport): string {
-  return `\n\n${grayText(`Goal: ${completion.objective}\n${completion.report}`)}`;
+  return `\n\n${grayText(`Loop: ${completion.objective}\n${completion.report}`)}`;
 }
 
 function appendGoalReport(content: string, reportBlock: string): string {
@@ -1137,22 +1242,22 @@ function humanizeToolName(name: string): string {
 function summarizeGoalStart(args: JsonObject): string {
   switch (stringField(args.op)) {
     case "create":
-      return "Starting goal";
+      return "Starting loop";
     case "decompose":
     case "update_plan":
-      return "Planning goal";
+      return "Planning loop";
     case "update_step":
-      return "Updating goal step";
+      return "Updating loop step";
     case "complete":
-      return "Completing goal";
+      return "Completing loop";
     case "drop":
-      return "Dropping goal";
+      return "Dropping loop";
     case "resume":
-      return "Resuming goal";
+      return "Resuming loop";
     case "get":
-      return "Reading goal";
+      return "Reading loop";
     default:
-      return "Updating goal";
+      return "Updating loop";
   }
 }
 
@@ -1177,28 +1282,6 @@ function directHttpUrls(text: string): string[] {
     }
   }
   return urls;
-}
-
-function toolsForRequestClass(tools: ToolDefinition[], requestClass: ModelRequest["request_class"]): ToolDefinition[] {
-  if (requestClass !== "reflection") {
-    return tools;
-  }
-  const allowed = new Set([
-    "ast_grep",
-    "file_search",
-    "git_diff",
-    "git_show",
-    "git_status",
-    "glob",
-    "goal",
-    "list_dir",
-    "lsp",
-    "read_file",
-    "read_resource",
-    "run_command",
-    "session_note",
-  ]);
-  return tools.filter((tool) => allowed.has(tool.name));
 }
 
 function mergeEndpointEvidence(snapshot: EndpointSignalSnapshot, response: EndpointSignalSnapshot): EndpointSignalSnapshot {

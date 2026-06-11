@@ -20,7 +20,7 @@ import { resolveRtkStatus, type RtkStatus } from "../rtk/manager.js";
 import { staticOmniCapabilityMatrix } from "../model/omni-capabilities.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { SkillRegistry, type SkillDescriptor } from "../skills/registry.js";
-import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonRun, startDaemon } from "../daemon/supervisor.js";
+import { attachDaemonJob, cancelDaemonJob, daemonStatus, detachDaemonJob, queueDaemonRun, queueDaemonRunInWorktree, startDaemon } from "../daemon/supervisor.js";
 import type { RuntimeRunOptions, RuntimeRunResult, RuntimeStatusEvent } from "../runtime.js";
 import {
   attachGoalPlanSnapshot,
@@ -33,20 +33,88 @@ import {
   goalPlanningProgressSummary,
   goalApproachName,
   goalStrategyModeFromPublicName,
-  readGoalHorizons,
-  readGoalReflections,
   readGoalState,
   recordGoalCompletionReport,
+  setGoalOwner,
+  setGoalReviewOwner,
   writeGoalState,
   type GoalHorizonSnapshot,
   type GoalReflectionSnapshot,
+  type GoalReflectionDecision,
   type GoalRecord,
   type GoalKind,
+  type GoalHilPolicy,
+  type GoalReviewDecision,
   type GoalStrategyInput,
   type GoalState,
 } from "../goals/state.js";
 import { runGoalSupervisor } from "../goals/supervisor.js";
 import { buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
+import { buildGoalVerificationPrompt, parseGoalVerifierArgs } from "../goals/verifier.js";
+import { readGoalLoopView } from "../loop/projection.js";
+import type { GoalLoopAttempt } from "../loop/types.js";
+import { readLoopHealth } from "../loop/health.js";
+import { readLoopDashboard } from "../loop/dashboard.js";
+import { readLoopMetrics } from "../loop/metrics.js";
+import { readLoopEvidence } from "../loop/evidence.js";
+import { readLoopTrace } from "../loop/trace.js";
+import { readLoopRoadmap } from "../loop/roadmap.js";
+import { readLoopWorkers } from "../loop/workers.js";
+import { readLoopConnectors } from "../loop/connectors.js";
+import { readLoopTasks } from "../loop/tasks.js";
+import { parseConnectorActionPreflightInput, recordConnectorActionPreflight } from "../loop/action-preflight.js";
+import { parseConnectorActionRunInput, runConnectorAction } from "../loop/actions.js";
+import { readLoopActions } from "../loop/action-log.js";
+import { queueGoalVerificationSuite, runGoalVerificationSuite } from "../loop/verifier-suite.js";
+import { runConnectorVerifier } from "../loop/connector-verifiers.js";
+import {
+  createLoopAutomationSchedule,
+  enqueueDueAutomationSchedules,
+  parseAutomationInterval,
+  pauseLoopAutomationSchedule,
+  removeLoopAutomationSchedule,
+  resumeLoopAutomationSchedule,
+  type AutomationIsolation,
+  type AutomationReviewPolicy,
+} from "../loop/automation.js";
+import {
+  createGitChangesDiscoverySchedule,
+  createGitHubAssignedIssuesDiscoverySchedule,
+  createGitHubAssignedPullRequestsDiscoverySchedule,
+  createGitHubActionsDiscoverySchedule,
+  createGitHubDeploymentsDiscoverySchedule,
+  createGitHubDraftReleasesDiscoverySchedule,
+  createGitHubIssuesDiscoverySchedule,
+  createGitHubNotificationsDiscoverySchedule,
+  createGitHubPullRequestsDiscoverySchedule,
+  createGitHubReviewRequestsDiscoverySchedule,
+  createHttpHealthDiscoverySchedule,
+  createLoopDiscoverySchedule,
+  createNpmPackageDiscoverySchedule,
+  pauseLoopDiscoverySchedule,
+  removeLoopDiscoverySchedule,
+  resumeLoopDiscoverySchedule,
+  runDueDiscoverySchedules,
+} from "../loop/discovery.js";
+import {
+  parseLoopInboxSnoozeUntil,
+  promoteLoopInboxItem,
+  readLoopInbox,
+  readLoopInboxRouting,
+  updateLoopInboxAssignment,
+  updateLoopInboxItemState,
+  updateLoopInboxMute,
+  updateLoopInboxRouting,
+  type LoopInboxAction,
+  type LoopInboxItem,
+  type LoopInboxItemKind,
+  type LoopInboxPriority,
+  type LoopInboxPromotionIsolation,
+} from "../loop/inbox.js";
+import { readLoopPolicy, resolveLoopBackgroundIsolation } from "../loop/policy.js";
+import { adoptLoopWorktree, cleanupLoopWorktrees, createLoopWorktree, listLoopWorktrees, readLoopWorktreeHealth, removeLoopWorktree } from "../loop/worktree.js";
+import { optLiteAdopt, optLitePropose, optLiteReport, optLiteRun, optLiteStatus } from "../opt/opt-lite.js";
+import type { GoalLoopVerification } from "../loop/types.js";
 import { readAutoresearchState, researchCompletionBlockMessage, setAutoresearchMode } from "../autoresearch/state.js";
 import { clonePlanState, createPlanState, planApprovalBlockMessage, readPlanState, writePlanState, type PlanState } from "../plans/state.js";
 import type {
@@ -65,19 +133,19 @@ import type {
   VllmAgentConfig,
   WorkspaceIdentity,
 } from "../types.js";
-import type { SupervisorJob } from "../session/store.js";
+import type { AutomationSchedule, DiscoveryCandidate, DiscoverySchedule, ManagedWorktree, SupervisorJob } from "../session/store.js";
 import { randomId } from "../util/hash.js";
 import { isAbortError } from "../util/abort.js";
 import type { loadApp } from "../app.js";
 import { ansi, bgLine, bg256, center, centerBlock, fg256, frame, padRight, terminalHeight, terminalWidth, truncateToWidth, visibleWidth } from "./ansi.js";
-import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands, SLASH_COMMANDS, type SlashCommandName } from "./slash.js";
+import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands, suggestedSlashCommands, type SlashCommandName } from "./slash.js";
 import { inferoaActivityLabel, renderActivityLine, renderActivityRecordLine } from "./activity.js";
 import { cacheTurnKind, formatDuration, renderCacheFooter, renderCacheReportTurn } from "./cache-footer.js";
 import { renderCompactEventLine, renderSessionActivityLines } from "./event-view.js";
 import { renderModeMetadataRight } from "./mode-footer.js";
 import { renderPlanDocumentSurface } from "./plan-view.js";
 import { renderRtkSessionLines } from "./rtk-view.js";
-import { renderTokenmaxxingLines } from "./tokenmaxxing-view.js";
+import { renderTokenmaxxingRows, renderTokenmaxxingScreen, tokenmaxxingScreenPageCount, type TokenmaxxingScreenRow } from "./tokenmaxxing-view.js";
 import { composerEraseRowsForResize } from "./resize.js";
 import { RESUME_SESSION_PAGE_SIZE, resumeSessionPage } from "./session-picker.js";
 import { filterProviderPickerOptions, providerPickerPage } from "./provider-picker.js";
@@ -137,15 +205,21 @@ type WebSearchProviderChoice = VllmAgentConfig["web_search"]["provider"];
 type SkillAction = "list" | "manage";
 type SessionAction = "resume" | "new" | "rename" | "archive" | "all";
 type DaemonAction = "status" | "queue" | "attach" | "detach" | "cancel";
-type DoctorAction = "status" | "run";
+type WorktreeAction = "status" | "list" | "health" | "create" | "run" | "adopt" | "cleanup" | "remove";
+type DoctorAction = "status" | "run" | "tools";
 type ToolTraceMode = "compact" | "expanded";
 type GoalKindChoice = "task" | "research";
 type GoalApproachChoice = "auto" | "focus" | "explore" | "timebox";
 type GoalCampaignHoursChoice = "auto" | "30m" | "2h" | "4h" | "custom";
+type GoalReviewPolicyChoice = "auto" | "review";
+type GoalReviewChoice = GoalReviewDecision;
 
 interface GoalStartOptions {
   kind?: GoalKind;
   strategy?: GoalStrategyInput;
+  hil_policy?: GoalHilPolicy;
+  owner?: string;
+  review_owner?: string;
 }
 
 interface ParsedGoalModeOptions extends GoalStartOptions {
@@ -157,6 +231,7 @@ interface ComposerMetadataRightCache {
   latestEventId: number;
   activeRunStartedAtMs?: number;
   activeRunElapsedSecond: number;
+  checkedAtMs: number;
   value?: string;
 }
 
@@ -245,6 +320,7 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const PASTE_TOKEN_PREFIX = "\u{e000}paste:";
 const SETUP_TOTAL_STEPS = 7;
 const SELECT_OPTION_PAGE_SIZE = 12;
+const COMPOSER_METADATA_CACHE_TTL_MS = 250;
 
 export const TUI_OMNI_SETUP_CAPABILITIES: Array<{
   name: OmniEndpointName;
@@ -464,21 +540,34 @@ export class TuiApp {
             suppressTranscript: request.suppressTranscript,
           }),
         onReflectionExpanded: (state) => {
-          this.renderGoalSupervisorRecord("Goal reflection", reflectionDetail("expanded horizon", state.goal.last_reflection_summary, state.goal.horizon_generation), 75);
+          this.renderGoalSupervisorRecord("Loop decision", reflectionDetail("expanded loop task", state.goal.last_reflection_summary, state.goal.horizon_generation), 75);
         },
         onCompleted: (state) => {
-          this.renderGoalSupervisorRecord("Goal complete", goalCompletionRecordDetails(state.goal), 48);
+          this.renderGoalSupervisorRecord("Loop complete", goalCompletionRecordDetails(state.goal), 48);
         },
         onPaused: (_state, _runId, reason) => {
-          this.renderGoalSupervisorRecord("Goal paused", reason, 220);
+          this.renderGoalSupervisorRecord("Loop paused", reason, 220);
         },
         onWaiting: (reason) => {
-          this.renderGoalSupervisorRecord("Goal waiting", reason);
+          this.renderGoalSupervisorRecord("Loop waiting", reason);
         },
       });
+      await this.promptPendingGoalReviewIfNeeded(session);
     } finally {
       this.#goalSupervisorActive = false;
     }
+  }
+
+  private async promptPendingGoalReviewIfNeeded(session: SessionRecord): Promise<void> {
+    if (!this.#running || this.#promptQueue.length) {
+      return;
+    }
+    const state = readGoalState(this.app.store, session.session_id);
+    if (!state?.goal.pending_review_decision) {
+      return;
+    }
+    this.renderGoalSupervisorRecord("Loop review", goalReviewPendingDetail(state.goal.pending_review_decision), 220);
+    this.renderLoopReviewPanel(state);
   }
 
   private updateQueueFooter(): void {
@@ -1070,7 +1159,8 @@ export class TuiApp {
           }));
       }
       const query = buffer.slice(1).trim().toLowerCase();
-      return SLASH_COMMANDS.filter((command) => !query || `${command.name} ${command.description}`.toLowerCase().includes(query))
+      return suggestedSlashCommands()
+        .filter((command) => !query || `${command.name} ${command.description}`.toLowerCase().includes(query))
         .sort((a, b) => commandScore(a.name, a.description, query) - commandScore(b.name, b.description, query))
         .map((command) => ({
           value: `/${command.name}`,
@@ -1253,9 +1343,18 @@ export class TuiApp {
       return undefined;
     }
     const nowMs = Date.now();
-    const latestEventId = this.app.store.latestEventId(session.session_id);
     const activeRunElapsedSecond = this.activeRunElapsedSecond(nowMs);
     const cached = this.#composerMetadataRightCache;
+    if (
+      cached &&
+      cached.sessionId === session.session_id &&
+      cached.activeRunStartedAtMs === this.#activeRunStartedAtMs &&
+      cached.activeRunElapsedSecond === activeRunElapsedSecond &&
+      nowMs - cached.checkedAtMs < COMPOSER_METADATA_CACHE_TTL_MS
+    ) {
+      return cached.value;
+    }
+    const latestEventId = this.app.store.latestEventId(session.session_id);
     if (
       cached &&
       cached.sessionId === session.session_id &&
@@ -1274,6 +1373,7 @@ export class TuiApp {
       latestEventId,
       activeRunStartedAtMs: this.#activeRunStartedAtMs,
       activeRunElapsedSecond,
+      checkedAtMs: nowMs,
       value,
     };
     return value;
@@ -1314,14 +1414,20 @@ export class TuiApp {
         case "skills":
           await this.renderSkillsView(args);
           return;
-        case "goal":
-          await this.renderGoalView(args);
+        case "loop":
+          await this.renderLoopView(args);
+          return;
+        case "inbox":
+          await this.renderInboxView(args);
+          return;
+        case "self-improve":
+          await this.renderSelfImproveView(args);
           return;
         case "plan":
           await this.renderPlanView(args);
           return;
         case "tokenmaxxing":
-          this.renderTokenmaxxingView();
+          await this.renderTokenmaxxingView(args);
           return;
         case "context":
           await this.renderContextView(args);
@@ -1334,6 +1440,15 @@ export class TuiApp {
           return;
         case "daemon":
           await this.renderDaemonView(args);
+          return;
+        case "automation":
+          await this.renderAutomationView(args);
+          return;
+        case "discovery":
+          await this.renderDiscoveryView(args);
+          return;
+        case "worktree":
+          await this.renderWorktreeView(args);
           return;
         case "doctor":
           await this.renderDoctorView(args);
@@ -1603,7 +1718,8 @@ export class TuiApp {
 
   private async chooseSlashCommand(query = ""): Promise<SlashCommandName> {
     const normalized = query.toLowerCase();
-    const commands = SLASH_COMMANDS.filter((command) => !normalized || `${command.name} ${command.description}`.toLowerCase().includes(normalized));
+    const commands = suggestedSlashCommands()
+      .filter((command) => !normalized || `${command.name} ${command.description}`.toLowerCase().includes(normalized));
     if (!commands.length) {
       this.renderNotice(`No command matched ${query}.`);
       return "help";
@@ -2550,15 +2666,100 @@ export class TuiApp {
     this.renderPanel("RTK", renderRtkSessionLines(this.app.store.listEvents(session.session_id), terminalWidth()));
   }
 
-  private renderTokenmaxxingView(): void {
+  private async renderTokenmaxxingView(args = ""): Promise<void> {
     const session = this.optionalSession();
     if (!session) {
       this.renderPanel("Tokenmaxxing", ["No active session yet. Run a prompt first."]);
       return;
     }
-    const events = this.app.store.listEvents(session.session_id);
-    const evidence = this.app.store.listEndpointEvidence(session.session_id);
-    this.renderPanel("Tokenmaxxing", renderTokenmaxxingLines(events, evidence, terminalWidth()));
+    const action = args.trim().toLowerCase().split(/\s+/)[0] ?? "";
+    if (action && action !== "signals" && action !== "signal") {
+      this.renderPanel("Tokenmaxxing", [`Unknown tokenmaxxing view '${action}'.`, fg256(244, "Use /tokenmaxxing or /tokenmaxxing signals.")]);
+      return;
+    }
+    await this.renderTokenmaxxingFullscreen(session, { signals: action === "signals" || action === "signal" });
+  }
+
+  private async renderTokenmaxxingFullscreen(session: SessionRecord, options: { signals?: boolean } = {}): Promise<void> {
+    this.#rl?.pause();
+    let pageIndex = 0;
+    let latestBody: TokenmaxxingScreenRow[] = [];
+    let renderedLines: string[] = [];
+    let renderedWidth = 0;
+    let renderedCursorLine = 0;
+    const clampPage = () => {
+      const pageCount = tokenmaxxingScreenPageCount(latestBody, terminalHeight());
+      pageIndex = Math.max(0, Math.min(pageIndex, pageCount - 1));
+    };
+    const render = () => {
+      const width = safeTerminalWidth();
+      const height = terminalHeight();
+      const events = this.app.store.listEvents(session.session_id);
+      const evidence = this.app.store.listEndpointEvidence(session.session_id);
+      latestBody = renderTokenmaxxingRows(events, evidence, width, {
+        detailLimit: Number.POSITIVE_INFINITY,
+        activityOnly: options.signals === true,
+        includeActivity: options.signals === true,
+      });
+      clampPage();
+      const screen = renderTokenmaxxingScreen(latestBody, width, height, pageIndex);
+      const sameFrame = renderedWidth === width && renderedLines.length === screen.length && renderedLines.every((line, index) => line === screen[index]);
+      if (sameFrame) {
+        return;
+      }
+      const canPatch = renderedLines.length > 0 && renderedWidth === width && renderedLines.length === screen.length;
+      if (canPatch) {
+        stdout.write(
+          terminalBlockPatchSequence(
+            { lines: renderedLines, cursorLine: renderedCursorLine, cursorColumn: 0, width: renderedWidth },
+            { lines: screen, cursorLine: screen.length - 1, cursorColumn: 0 },
+          ),
+        );
+      } else {
+        stdout.write(`${ansi.clear}${ansi.hideCursor}${screen.join("\n")}`);
+      }
+      renderedLines = screen;
+      renderedWidth = width;
+      renderedCursorLine = screen.length - 1;
+    };
+
+    render();
+    const interval = setInterval(render, 1000);
+    (interval as { unref?: () => void }).unref?.();
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearInterval(interval);
+        stdin.off("data", onData);
+        if (stdin.isTTY) {
+          stdin.setRawMode(false);
+        }
+        stdout.write(ansi.showCursor);
+        this.resumeReadline();
+        this.redrawVisibleSessionSurface();
+        resolve();
+      };
+      const page = (delta: number) => {
+        pageIndex += delta;
+        clampPage();
+        render();
+      };
+      const onData = (chunk: Buffer) => {
+        for (const key of terminalInputTokens(chunk.toString("utf8"))) {
+          if (key === "\u0003" || key === "\u001b") {
+            done();
+            return;
+          }
+          if (key === "\u001b[D") {
+            page(-1);
+          } else if (key === "\u001b[C") {
+            page(1);
+          }
+        }
+      };
+      stdin.setRawMode(true);
+      stdin.resume();
+      stdin.on("data", onData);
+    });
   }
 
   private async renderContextView(args = ""): Promise<void> {
@@ -2981,14 +3182,14 @@ export class TuiApp {
     ]);
   }
 
-  private async renderGoalView(args: string): Promise<void> {
-    const parsed = parseModeAction(args, new Set(["show", "mode", "pause", "resume", "budget", "complete", "drop"]));
+  private async renderLoopControlView(args: string): Promise<void> {
+    const parsed = parseModeAction(args, new Set(["status", "mode", "owner", "review-owner", "review", "verify", "verify-github-pr", "verify-github-pr-status", "verify-github-review-request", "verify-github-issue-status", "verify-github-notification", "verify-github-run", "verify-github-workflow", "verify-github-deployment", "verify-github-release", "verify-npm-package", "verify-git-clean", "verify-http", "pause", "resume", "budget", "complete", "drop"]));
     const existingSession = this.optionalSession();
-    if (!existingSession && parsed.action === "show") {
-      this.renderPanel("Goal", ["No active session yet. Use /goal <objective> to start one."]);
+    if (!existingSession && parsed.action === "status") {
+      this.renderLoopTranscriptPanel("Loop", ["No active session yet. Use /loop <objective> to start one."]);
       return;
     }
-    const session = existingSession ?? this.createModeSession(titleFromPromptForMode(parsed.rest || "Goal"));
+    const session = existingSession ?? this.createModeSession(titleFromPromptForMode(parsed.rest || "Loop"));
     const current = readGoalState(this.app.store, session.session_id);
 
     if (!parsed.action && !parsed.rest) {
@@ -2996,9 +3197,9 @@ export class TuiApp {
         this.renderGoalPanel(current);
         return;
       }
-      const objective = (await this.askModeObjective("Goal objective")).trim();
+      const objective = (await this.askModeObjective("Loop objective")).trim();
       if (!objective) {
-        this.renderNotice("No goal objective entered.");
+        this.renderNotice("No loop objective entered.");
         return;
       }
       const setup = await this.chooseGoalSetup();
@@ -3007,48 +3208,124 @@ export class TuiApp {
     }
 
     if (parsed.action === "budget") {
-      this.renderNotice("Goal token budgets are no longer a slash command. Start a bounded goal through the model/tool flow when needed.");
+      this.renderNotice("Loop token budgets are no longer a slash command. Start a bounded loop through the model/tool flow when needed.");
       return;
     }
 
     if (parsed.action === "mode") {
       const start = parseGoalModeArgs(parsed.rest);
       const setup = start ?? (await this.chooseGoalSetup());
-      const objective = start?.objective || (await this.askModeObjective("Goal objective", current?.goal.objective)).trim();
+      const objective = start?.objective || (await this.askModeObjective("Loop objective", current?.goal.objective)).trim();
       if (!objective) {
-        this.renderNotice("No goal objective entered.");
+        this.renderNotice("No loop objective entered.");
         return;
       }
       const targetHours = setup.strategy?.mode === "campaign" && setup.strategy.target_hours === undefined ? await this.chooseCampaignHours() : setup.strategy?.target_hours;
       await this.startGoal(session, objective, {
         kind: setup.kind,
         strategy: setup.strategy?.mode === "campaign" ? { ...setup.strategy, target_hours: targetHours } : setup.strategy,
+        hil_policy: setup.hil_policy,
+        owner: setup.owner,
+        review_owner: setup.review_owner,
       });
       return;
     }
 
     if (!parsed.action) {
+      if (parsed.rest.trim().toLowerCase() === "show") {
+        this.renderNotice("Use /loop status.");
+        return;
+      }
       const legacy = legacyGoalModeShortcut(parsed.rest);
       if (legacy) {
-        this.renderNotice(`Use /goal mode ${legacy} <objective>. Goal modes now live under /goal mode.`);
+        this.renderNotice(`Use /loop mode ${legacy} <objective>. Loop modes now live under /loop mode.`);
         return;
       }
-      const objective = parsed.rest || (await this.askModeObjective("Goal objective", current?.goal.objective)).trim();
+      const start = parseGoalStartArgs(parsed.rest);
+      const objective = start.objective || (await this.askModeObjective("Loop objective", current?.goal.objective)).trim();
       if (!objective) {
-        this.renderNotice("No goal objective entered.");
+        this.renderNotice("No loop objective entered.");
         return;
       }
-      await this.startGoal(session, objective, { kind: "task" });
+      await this.startGoal(session, objective, { kind: "task", hil_policy: start.hil_policy, owner: start.owner, review_owner: start.review_owner });
       return;
     }
 
-    if (parsed.action === "show") {
+    if (parsed.action === "status") {
       this.renderGoalPanel(current);
       return;
     }
 
+    if (parsed.action === "owner") {
+      await this.updateGoalOwner(session, current, parsed.rest);
+      return;
+    }
+
+    if (parsed.action === "review-owner") {
+      await this.updateGoalReviewOwner(session, current, parsed.rest);
+      return;
+    }
+
+    if (parsed.action === "review") {
+      await this.reviewGoalDecision(session, current, parsed.rest);
+      return;
+    }
+
+    if (parsed.action === "verify") {
+      await this.verifyGoal(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-pr") {
+      await this.verifyGoalGitHubPullRequest(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-pr-status") {
+      await this.verifyGoalGitHubPullRequestStatus(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-review-request") {
+      await this.verifyGoalGitHubReviewRequest(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-issue-status") {
+      await this.verifyGoalGitHubIssueStatus(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-notification") {
+      await this.verifyGoalGitHubNotification(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-run") {
+      await this.verifyGoalGitHubRun(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-workflow") {
+      await this.verifyGoalGitHubWorkflow(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-deployment") {
+      await this.verifyGoalGitHubDeployment(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-github-release") {
+      await this.verifyGoalGitHubRelease(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-npm-package") {
+      await this.verifyGoalNpmPackage(session, current, parsed.rest);
+      return;
+    }
+    if (parsed.action === "verify-git-clean") {
+      await this.verifyGoalGitClean(session, current);
+      return;
+    }
+    if (parsed.action === "verify-http") {
+      await this.verifyGoalHttp(session, current, parsed.rest);
+      return;
+    }
+
     if (!current) {
-      this.renderPanel("Goal", ["No goal set. Use /goal <objective> or /goal mode auto <objective> to start one."]);
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
       return;
     }
 
@@ -3066,7 +3343,12 @@ export class TuiApp {
     if (parsed.action === "resume") {
       const next = cloneGoalState(current);
       if (next.goal.status === "complete" || next.goal.status === "dropped") {
-        this.renderNotice(`Cannot resume a ${next.goal.status} goal.`);
+        this.renderNotice(`Cannot resume a ${next.goal.status} loop.`);
+        return;
+      }
+      if (next.goal.pending_review_decision) {
+        this.renderNotice("Resolve the pending loop review decision before resuming.");
+        this.renderGoalPanel(current);
         return;
       }
       next.enabled = true;
@@ -3133,8 +3415,581 @@ export class TuiApp {
     }
   }
 
+  private async reviewGoalDecision(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    if (!current.goal.pending_review_decision) {
+      this.renderNotice("No pending loop review decision.");
+      this.renderGoalPanel(current);
+      return;
+    }
+    const parsed = parseGoalReviewArgs(args);
+    if (!parsed.decision) {
+      this.renderLoopReviewPanel(current);
+      return;
+    }
+    const decision = parsed.decision;
+    let feedback = parsed.feedback;
+    if (!feedback && decision !== "approve") {
+      feedback = (await this.ask(decision === "block" ? "Block reason" : "Review feedback", current.goal.pending_review_decision.summary)).trim();
+    }
+    const registry = new ToolRegistry(this.app.config, this.app.workspace, this.app.store);
+    const result = await registry.call(
+      {
+        id: randomId("goal_review"),
+        name: "goal",
+        arguments: {
+          op: "review_decision",
+          review_decision: decision,
+          ...(feedback ? { feedback } : {}),
+        },
+      },
+      { session_id: session.session_id, run_id: randomId("goal_review"), request_class: "interactive", visibility: "normal", control_plane: true },
+    );
+    const saved = readGoalState(this.app.store, session.session_id);
+    if (!result.ok) {
+      this.renderNotice(result.error?.message ?? result.summary);
+      this.renderGoalPanel(saved ?? current);
+      return;
+    }
+    this.renderGoalPanel(saved);
+    if (saved?.enabled && saved.goal.status === "active" && !saved.goal.pending_review_decision) {
+      await this.enqueueGoalContinuation(saved);
+    }
+  }
+
+  private renderLoopReviewPanel(state: GoalState): void {
+    this.renderLoopTranscriptPanel("Loop Review", loopReviewPanelLines(state.goal, safeTerminalWidth()));
+  }
+
+  private renderLoopVerificationPanel(lines: string[]): void {
+    this.renderLoopTranscriptPanel("Loop Verification", lines);
+  }
+
+  private renderLoopTranscriptPanel(title: string, lines: string[]): void {
+    this.writeTranscript(withConversationGap(renderTranscriptBand(title, lines, safeTerminalWidth()).join("\n")));
+  }
+
+  private async updateGoalOwner(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    if (current.goal.status === "complete" || current.goal.status === "dropped") {
+      this.renderNotice(`Cannot update owner for a ${current.goal.status} loop.`);
+      this.renderGoalPanel(current);
+      return;
+    }
+    const raw = args.trim();
+    const owner = raw || (await this.ask("Loop owner", current.goal.owner)).trim();
+    const next = setGoalOwner(current, owner === "clear" || owner === "none" || owner === "-" ? undefined : owner);
+    this.renderGoalPanel(writeGoalState(this.app.store, session.session_id, next, randomId("goal_owner")));
+  }
+
+  private async updateGoalReviewOwner(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    if (current.goal.status === "complete" || current.goal.status === "dropped") {
+      this.renderNotice(`Cannot update review owner for a ${current.goal.status} loop.`);
+      this.renderGoalPanel(current);
+      return;
+    }
+    const raw = args.trim();
+    const owner = raw || (await this.ask("Loop review owner", current.goal.review_owner)).trim();
+    const next = setGoalReviewOwner(current, owner === "clear" || owner === "none" || owner === "-" ? undefined : owner);
+    this.renderGoalPanel(writeGoalState(this.app.store, session.session_id, next, randomId("goal_review_owner")));
+  }
+
+  private async verifyGoal(session: SessionRecord, current: GoalState | undefined, rubric: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGoalVerifierArgs>;
+    try {
+      parsed = parseGoalVerifierArgs(rubric.trim() ? rubric.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (parsed.background) {
+      try {
+        const queued = await queueGoalVerificationSuite({
+          store: this.app.store,
+          workspace: this.app.workspace,
+          session_id: session.session_id,
+          goal_state: current,
+          roles: parsed.roles,
+          rubric: parsed.rubric,
+          source: "tui",
+          isolation: parsed.isolation,
+          config_path: this.app.configFiles[0],
+        });
+        this.renderLoopVerificationPanel([
+          `${fg256(48, "•")} queued isolated verifier suite ${queued.suite_id.slice(0, 12)}`,
+          `  roles ${queued.roles.join(", ")}`,
+          `  isolation ${queued.isolation}`,
+          ...queued.jobs.map((job) => `  ${job.role} · job ${job.job_id.slice(0, 12)} · session ${job.session_id.slice(0, 12)}${job.worktree_id ? ` · wt ${job.worktree_id.slice(0, 12)}` : ""}`),
+        ]);
+      } catch (error) {
+        this.renderNotice(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    if (parsed.roles.length > 1) {
+      this.renderLoopVerificationPanel([
+        `${fg256(75, "•")} running verification suite`,
+        `  roles ${parsed.roles.join(", ")}`,
+        fg256(244, "Each role records independent checker evidence and does not mutate the loop plan."),
+      ]);
+      try {
+        const suite = await runGoalVerificationSuite({
+          store: this.app.store,
+          runtime: this.app.runtime,
+          session_id: session.session_id,
+          goal: current.goal,
+          roles: parsed.roles,
+          rubric: parsed.rubric,
+          source: "tui",
+        });
+        this.renderLoopVerificationPanel([
+          `${fg256(48, "•")} suite ${suite.suite_id.slice(0, 12)} · ${suite.results.length} roles`,
+          ...suite.results.map((result) => {
+            const verification = result.verification;
+            const verdict = verification ? `${verification.verdict} · ${verification.confidence}` : "no record";
+            return `  ${result.role} · ${result.run_id.slice(0, 12)} · ${verdict} · ${result.tool_calls} tool calls`;
+          }),
+        ]);
+      } catch (error) {
+        this.renderNotice(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    const runId = randomId("verify");
+    this.app.store.appendEvent({
+      session_id: session.session_id,
+      run_id: runId,
+      type: "goal.verification.requested",
+      data: {
+        goal_id: current.goal.id,
+        horizon_generation: current.goal.horizon_generation,
+        role: parsed.role,
+        source: "tui",
+      },
+    });
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} running ${parsed.role} verification`,
+      fg256(244, "This records evidence but does not complete or mutate the loop plan."),
+    ]);
+    const result = await this.app.runtime.run({
+      prompt: buildGoalVerificationPrompt(current.goal, parsed),
+      session_id: session.session_id,
+      run_id: runId,
+      client_id: randomId("verify"),
+      request_class: "verification",
+      visibility: "internal",
+    });
+    const view = readGoalLoopView(this.app.store, session.session_id);
+    const latest = view.verifications.at(-1);
+    this.renderLoopVerificationPanel([
+      `${fg256(48, "•")} run ${result.run_id.slice(0, 12)} · ${parsed.role} · ${result.tool_calls} tool calls`,
+      latest ? `  ${latest.provider} ${latest.verdict} · ${latest.confidence}${latest.verifier_role ? ` · ${latest.verifier_role}` : ""}` : "  no verification record",
+      latest?.summary ? `  ${truncateToWidth(oneLine(latest.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+      latest?.failure_reason ? `  ${truncateToWidth(oneLine(latest.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+    ].filter((line): line is string => Boolean(line)));
+  }
+
+  private async verifyGoalGitHubPullRequest(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubPrVerifierArgs>;
+    try {
+      parsed = parseGitHubPrVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub PR checks`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-pr-checks", {
+        session_id: session.session_id,
+        params: { pr: parsed.pr, repo: parsed.repo },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub PR ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubPullRequestStatus(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubPrVerifierArgs>;
+    try {
+      parsed = parseGitHubPrVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub PR status`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-pr-status", {
+        session_id: session.session_id,
+        params: { pr: parsed.pr, repo: parsed.repo },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub PR status ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubReviewRequest(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubReviewRequestVerifierArgs>;
+    try {
+      parsed = parseGitHubReviewRequestVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub review request status`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-review-request", {
+        session_id: session.session_id,
+        params: { pr: parsed.pr, repo: parsed.repo, reviewer: parsed.reviewer },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub review request ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubIssueStatus(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubIssueVerifierArgs>;
+    try {
+      parsed = parseGitHubIssueVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub issue status`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-issue-status", {
+        session_id: session.session_id,
+        params: { issue: parsed.issue, repo: parsed.repo },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub issue status ${parsed.issue} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubNotification(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubNotificationVerifierArgs>;
+    try {
+      parsed = parseGitHubNotificationVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub notification thread`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-notification-status", {
+        session_id: session.session_id,
+        params: { thread: parsed.thread },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub notification ${parsed.thread} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubRun(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubRunVerifierArgs>;
+    try {
+      parsed = parseGitHubRunVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub Actions run`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-actions-run", {
+        session_id: session.session_id,
+        params: { run: parsed.run, repo: parsed.repo, attempt: parsed.attempt },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub run ${parsed.run} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubWorkflow(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubWorkflowVerifierArgs>;
+    try {
+      parsed = parseGitHubWorkflowVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading latest GitHub workflow run`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-workflow-run-status", {
+        session_id: session.session_id,
+        params: {
+          workflow: parsed.workflow,
+          repo: parsed.repo,
+          branch: parsed.branch,
+          event: parsed.event,
+          commit: parsed.commit,
+        },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub workflow ${parsed.workflow} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubDeployment(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubDeploymentVerifierArgs>;
+    try {
+      parsed = parseGitHubDeploymentVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub deployment status`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-deployment-status", {
+        session_id: session.session_id,
+        params: {
+          repo: parsed.repo,
+          deployment_id: parsed.deployment_id,
+          environment: parsed.environment,
+          ref: parsed.ref,
+          expect: parsed.expect,
+        },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub deployment ${parsed.deployment_id ?? parsed.environment ?? "target"} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitHubRelease(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseGitHubReleaseVerifierArgs>;
+    try {
+      parsed = parseGitHubReleaseVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading GitHub release`,
+      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-release-status", {
+        session_id: session.session_id,
+        params: { tag: parsed.tag, repo: parsed.repo, expect: parsed.expect },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} GitHub release ${parsed.tag} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalNpmPackage(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseNpmPackageVerifierArgs>;
+    try {
+      parsed = parseNpmPackageVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading npm package metadata`,
+      fg256(244, "This records connector evidence but does not publish or mutate npm."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "npm-package-status", {
+        session_id: session.session_id,
+        params: {
+          package_name: parsed.package_name,
+          version: parsed.version,
+          tag: parsed.tag,
+          timeout_ms: parsed.timeout_ms,
+        },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} npm ${parsed.package_name}@${parsed.version} · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalGitClean(session: SessionRecord, current: GoalState | undefined): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading local git status`,
+      fg256(244, "This records connector evidence but does not mutate git or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "git-clean", {
+        session_id: session.session_id,
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} Git clean · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async verifyGoalHttp(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
+    if (!current) {
+      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
+      return;
+    }
+    let parsed: ReturnType<typeof parseHttpVerifierArgs>;
+    try {
+      parsed = parseHttpVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.renderLoopVerificationPanel([
+      `${fg256(75, "•")} reading HTTP health endpoint`,
+      fg256(244, "This records connector evidence but does not mutate the endpoint or complete the loop."),
+    ]);
+    try {
+      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "http-health", {
+        session_id: session.session_id,
+        params: { url: parsed.url, expected_status: parsed.status, timeout_ms: parsed.timeout_ms },
+      });
+      this.renderLoopVerificationPanel([
+        `${fg256(48, "•")} HTTP health · ${verification.verdict} · ${verification.confidence}`,
+        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
+        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   private async startGoal(session: SessionRecord, objective: string, options: GoalStartOptions = {}): Promise<void> {
-    const state = writeGoalState(this.app.store, session.session_id, createGoalState({ objective, kind: options.kind, strategy: options.strategy }));
+    const state = writeGoalState(
+      this.app.store,
+      session.session_id,
+      createGoalState({ objective, kind: options.kind, strategy: options.strategy, hil_policy: options.hil_policy, owner: options.owner, review_owner: options.review_owner }),
+    );
     if (state.goal.kind === "research") {
       setAutoresearchMode(this.app.store, session.session_id, { mode: "on", goal: state.goal.objective });
     }
@@ -3143,16 +3998,16 @@ export class TuiApp {
   }
 
   private async chooseGoalSetup(): Promise<GoalStartOptions> {
-    const kind = await this.selectOption<GoalKindChoice>(
-      "Goal Type",
+    const kind = await this.chooseGoalSetupOption<GoalKindChoice>(
+      "Loop Type",
       [
         { value: "task", label: "Task", description: "Ordinary implementation or investigation goal." },
         { value: "research", label: "Research", description: "Metric-driven experimental goal." },
       ],
       0,
     );
-    const approach = await this.selectOption<GoalApproachChoice>(
-      "Goal Approach",
+    const approach = await this.chooseGoalSetupOption<GoalApproachChoice>(
+      "Loop Approach",
       [
         { value: "auto", label: "Auto", description: "Inferoa decides after orientation." },
         { value: "focus", label: "Focus", description: "Finish only the current goal." },
@@ -3162,14 +4017,23 @@ export class TuiApp {
       0,
     );
     const targetHours = approach === "timebox" ? await this.chooseCampaignHours() : undefined;
+    const reviewPolicy = await this.chooseGoalSetupOption<GoalReviewPolicyChoice>(
+      "Review Policy",
+      [
+        { value: "auto", label: "Auto", description: "Continue automatically after internal reflection." },
+        { value: "review", label: "Review", description: "Pause for approval before applying reflection decisions." },
+      ],
+      0,
+    );
     return {
       kind,
       strategy: goalStrategyInputForApproach(approach, targetHours),
+      hil_policy: reviewPolicy,
     };
   }
 
   private async chooseCampaignHours(): Promise<number | undefined> {
-    const choice = await this.selectOption<GoalCampaignHoursChoice>(
+    const choice = await this.chooseGoalSetupOption<GoalCampaignHoursChoice>(
       "Timebox",
       [
         { value: "auto", label: "Auto", description: "Inferoa picks the checkpoint time." },
@@ -3192,18 +4056,66 @@ export class TuiApp {
     if (choice === "4h") {
       return 4;
     }
-    const raw = (await this.ask("Timebox", "4h")).trim();
-    const value = parseGoalCampaignHours(raw);
-    if (value === undefined) {
-      this.renderNotice("Use a positive time like 2h or 90m.");
-      return await this.chooseCampaignHours();
+    let error: string | undefined;
+    for (;;) {
+      const raw = (await this.askGoalSetupValue("Custom Timebox", "4h", ["Use a positive time like 2h or 90m."], error)).trim();
+      const value = parseGoalCampaignHours(raw);
+      if (value !== undefined) {
+        return value;
+      }
+      error = "Use a positive time like 2h or 90m.";
     }
-    return value;
+  }
+
+  private async chooseGoalSetupOption<T extends string>(title: string, options: SelectOption<T>[], defaultIndex = 0, footer: string[] = []): Promise<T> {
+    if (!options.length) {
+      throw new Error(`${title} has no options`);
+    }
+    const defaultValue = options[Math.max(0, Math.min(defaultIndex, options.length - 1))]!.value;
+    const previousPanel = this.#composerPanel;
+    let error: string | undefined;
+    try {
+      for (;;) {
+        this.#composerPanel = {
+          lines: renderGoalSetupChoicePanel(title, options, defaultValue, error, footer, safeTerminalWidth()),
+        };
+        const raw = (await this.readComposer({
+          placeholder: `${title}: ${defaultValue}`,
+          initialBuffer: defaultValue,
+          suggestions: false,
+          cancelOnInterrupt: true,
+        })).trim();
+        const resolved = resolveGoalSetupChoice(raw, options);
+        if (resolved !== undefined) {
+          return resolved;
+        }
+        error = `Unknown choice: ${oneLine(raw)}`;
+      }
+    } finally {
+      this.#composerPanel = previousPanel;
+    }
+  }
+
+  private async askGoalSetupValue(title: string, defaultValue: string, detail: string[], error?: string): Promise<string> {
+    const previousPanel = this.#composerPanel;
+    this.#composerPanel = {
+      lines: renderGoalSetupValuePanel(title, detail, error, safeTerminalWidth()),
+    };
+    try {
+      return await this.readComposer({
+        placeholder: title,
+        initialBuffer: defaultValue,
+        suggestions: false,
+        cancelOnInterrupt: true,
+      });
+    } finally {
+      this.#composerPanel = previousPanel;
+    }
   }
 
   private async enqueueGoalContinuation(stateOrObjective: GoalState | string): Promise<void> {
     if (!this.app.config.model_setup.base_url || !this.app.config.model_setup.model) {
-      this.renderNotice("Goal is saved. Configure a model with /setup before triggering model work.");
+      this.renderNotice("Loop is saved. Configure a model with /setup before triggering model work.");
       return;
     }
     const session = this.optionalSession();
@@ -3216,13 +4128,13 @@ export class TuiApp {
 
   private enqueueGoalPlanningContinuation(objective: string): void {
     if (!this.app.config.model_setup.base_url || !this.app.config.model_setup.model) {
-      this.renderNotice("Goal is saved. Configure a model with /setup before triggering model planning.");
+      this.renderNotice("Loop is saved. Configure a model with /setup before triggering model planning.");
       return;
     }
     this.enqueuePrompt(
       [
         `Goal objective: ${objective}`,
-        "Review the current goal state. Decompose or update the internal goal plan with the goal tool, including active step, blockers, and verification steps.",
+        "Review the current loop state. Decompose or update the internal loop plan with the goal tool, including active step, blockers, and verification steps.",
       ].join("\n"),
       { renderPrompt: false },
     );
@@ -3230,31 +4142,51 @@ export class TuiApp {
 
   private renderGoalPanel(state: GoalState | undefined): void {
     if (!state) {
-      this.renderPanel("Goal", ["No goal set."]);
+      this.renderLoopTranscriptPanel("Loop", ["No loop set."]);
       return;
     }
     const goal = state.goal;
     const width = goalPanelContentWidth();
     const status = goalPanelStatusLabel(state);
     const session = this.optionalSession();
-    const reflections = session ? readGoalReflections(this.app.store, session.session_id, goal.id) : [];
+    const loopView = session ? readGoalLoopView(this.app.store, session.session_id) : undefined;
+    const reflections = loopView?.reflections ?? [];
+    const attempts = loopView?.attempts ?? [];
     const lines = renderGoalPanelStatus(status, goal.objective, width);
     const usage = goalPanelUsage(goal);
     appendGoalPanelField(lines, "type", goal.kind, width, 244);
+    if (goal.owner) {
+      appendGoalPanelField(lines, "owner", goal.owner, width, 244);
+    }
+    if (goal.review_owner) {
+      appendGoalPanelField(lines, "review owner", goal.review_owner, width, 244);
+    }
     if (usage) {
       lines.push(fg256(244, usage));
     }
+    if (attempts.length) {
+      appendGoalPanelField(lines, "attempts", goalPanelAttemptsSummary(attempts), width, 244);
+    }
     appendGoalPanelField(lines, "approach", goalPanelStrategy(goal), width, 244);
+    appendGoalPanelField(lines, "review", goalPanelReviewSummary(goal), width, goal.pending_review_decision ? 250 : 244, goal.pending_review_decision ? 203 : 39);
     appendGoalPanelField(lines, "candidates", goalPanelCandidates(goal), width, 244);
     if (goal.summary) {
       appendGoalPanelField(lines, "summary", goal.summary, width);
     }
+    const verification = loopView?.verifications.at(-1);
+    if (verification) {
+      appendGoalPanelField(lines, "verification", goalPanelVerificationSummary(verification), width, 244);
+    }
+    const skillSnapshot = loopView?.skill_snapshots.at(-1);
+    if (skillSnapshot) {
+      appendGoalPanelField(lines, "skills", goalPanelSkillSnapshotSummary(skillSnapshot), width, 244);
+    }
     if (reflections.length) {
-      appendGoalPanelField(lines, "reflections", goalPanelReflectionsSummary(reflections), width, 244);
+      appendGoalPanelField(lines, "decisions", goalPanelReflectionsSummary(reflections), width, 244);
     } else if (goal.last_reflection_decision) {
       appendGoalPanelField(
         lines,
-        "reflection",
+        "decision",
         `${goal.last_reflection_decision}${goal.last_reflection_summary ? ` · ${goal.last_reflection_summary}` : ""}`,
         width,
       );
@@ -3262,20 +4194,26 @@ export class TuiApp {
     if (goal.blocker) {
       appendGoalPanelField(lines, "blocker", goal.blocker, width, 203, 203);
     }
+    if (goal.pending_review_decision?.steps?.length) {
+      appendGoalPanelField(lines, "proposed", goalPanelProposedStepsSummary(goal), width, 250, 203);
+    }
+    if (goal.pending_review_decision) {
+      appendGoalPanelField(lines, "next", "/loop review approve · /loop review revise · /loop review block", width, 244, 203);
+    }
     if (goal.planning) {
-      lines.push(`${fg256(39, "plan")} ${goalPlanningProgressSummary(goal.planning)}`);
+      lines.push(`${fg256(39, "task plan")} ${goalPlanningProgressSummary(goal.planning)}`);
       const active = goal.planning.active_step_id ? goal.planning.steps.find((step) => step.id === goal.planning?.active_step_id) : undefined;
       if (active) {
-        appendGoalPanelField(lines, "now", `${goalStepPlainStatusMarker(active.status)} ${active.id} ${active.title}`, width);
+        appendGoalPanelField(lines, "active step", `${goalStepPlainStatusMarker(active.status)} ${active.id} ${active.title}`, width);
       }
-      const horizons = session ? readGoalHorizons(this.app.store, session.session_id, goal.id) : [];
+      const horizons = loopView?.horizons ?? [];
       if (horizons.length) {
         lines.push("", ...renderGoalPanelHorizons(horizons, width, reflections));
       }
     } else {
-      lines.push(fg256(244, "No internal plan yet."));
+      lines.push(fg256(244, "No loop task plan yet."));
     }
-    this.renderPanel("Goal", lines);
+    this.renderLoopTranscriptPanel("Loop", lines);
   }
 
   private async renderPlanView(args: string): Promise<void> {
@@ -3714,6 +4652,26 @@ export class TuiApp {
     this.#hasTranscript = true;
   }
 
+  private redrawVisibleSessionSurface(): void {
+    this.#inlineRenderedLines = 0;
+    this.#inlinePanelStartRow = undefined;
+    stdout.write(ansi.clear);
+    const session = this.optionalSession();
+    if (!session) {
+      this.#hasTranscript = false;
+      this.writeHomeFrame();
+      return;
+    }
+    this.writeHomeFrame();
+    const transcript = renderSessionTranscript(this.app.store.listEvents(session.session_id), safeTerminalWidth());
+    if (transcript) {
+      stdout.write(transcript);
+    } else {
+      stdout.write(`${fg256(244, "No prior chat history in this session.")}\n\n`);
+    }
+    this.#hasTranscript = true;
+  }
+
   private resetVisibleSessionSurface(): void {
     this.#inlineRenderedLines = 0;
     this.#inlinePanelStartRow = undefined;
@@ -3865,6 +4823,1137 @@ export class TuiApp {
     );
   }
 
+  private async renderInboxView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const parsed = parseInboxViewArgs(tokens);
+    const command = (parsed.args[0] ?? "show").toLowerCase();
+    if (command === "resolve" || command === "dismiss" || command === "reopen") {
+      await this.applyInboxAction(command as LoopInboxAction, parsed.args.slice(1));
+      return;
+    }
+    if (command === "snooze") {
+      await this.applyInboxAction("snooze", parsed.args.slice(1));
+      return;
+    }
+    if (command === "promote") {
+      await this.promoteInboxItem(parsed.args.slice(1));
+      return;
+    }
+    if (command === "assign" || command === "unassign") {
+      await this.assignInboxItem(command, parsed.args.slice(1));
+      return;
+    }
+    if (command === "routes" || command === "route") {
+      await this.routeInboxItems(command, parsed.args.slice(1));
+      return;
+    }
+    if (command === "mute" || command === "unmute") {
+      await this.muteInboxItem(command, parsed.args.slice(1));
+      return;
+    }
+    const inbox = await readLoopInbox(this.app.store, this.app.workspace, {
+      includeDone: parsed.includeDone,
+      includeSnoozed: parsed.includeDone,
+      includeMuted: parsed.includeMuted,
+      assignee: parsed.assignee,
+      onlyUnassigned: parsed.onlyUnassigned,
+    });
+    const counts = Object.entries(inbox.summary.by_kind)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([kind, count]) => `${kind}:${count}`)
+      .join("  ");
+    this.renderLoopTranscriptPanel("Loop Inbox", [
+      `${fg256(39, "Open")} ${inbox.summary.open}  ${fg256(203, "High")} ${inbox.summary.high}  ${fg256(75, "Assigned")} ${inbox.summary.assigned}  ${fg256(244, "Muted")} ${inbox.summary.muted}  ${fg256(244, "Total")} ${inbox.summary.total}`,
+      inboxFilterLabel(parsed) ?? (counts ? fg256(244, counts) : fg256(244, "No loop inbox items.")),
+      "",
+      ...(inbox.items.length ? inbox.items.slice(0, 40).flatMap((item, index) => renderInboxItemLines(item, index + 1)) : ["  no items"]),
+      ...(inbox.items.length > 40 ? [fg256(244, `  ... ${inbox.items.length - 40} more`)] : []),
+    ]);
+  }
+
+  private async applyInboxAction(action: LoopInboxAction, args: string[]): Promise<void> {
+    const itemId = args[0];
+    if (!itemId) {
+      this.renderNotice(`Usage: /inbox ${action} <item_id>${action === "snooze" ? " <30m|2h|1d|iso>" : ""}`);
+      return;
+    }
+    try {
+      const result = await updateLoopInboxItemState(this.app.store, this.app.workspace, {
+        action,
+        item_id: itemId,
+        snoozed_until: action === "snooze" ? parseLoopInboxSnoozeUntil(args[1] ?? "") : undefined,
+        note: args.slice(action === "snooze" ? 2 : 1).join(" "),
+      });
+      this.renderLoopTranscriptPanel("Loop Inbox", [
+        `${fg256(48, "•")} ${action} ${result.item.id}`,
+        result.state?.disposition ? `  disposition ${result.state.disposition}` : "  reopened",
+        result.state?.snoozed_until ? `  until ${result.state.snoozed_until}` : undefined,
+        result.state?.note ? `  note ${result.state.note}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async promoteInboxItem(args: string[]): Promise<void> {
+    const parsed = parseInboxPromoteFlags(args);
+    const itemId = parsed.item_id;
+    if (!itemId) {
+      this.renderNotice("Usage: /inbox promote [--worktree] <item_id>");
+      return;
+    }
+    try {
+      const result = await promoteLoopInboxItem(this.app.store, this.app.workspace, itemId, {
+        config_path: this.app.configFiles[0],
+        isolation: resolveLoopBackgroundIsolation(parsed.isolation, this.app.config),
+      });
+      this.renderLoopTranscriptPanel("Loop Inbox", [
+        `${fg256(48, "•")} promoted ${result.item.id}`,
+        `  job ${result.job.job_id.slice(0, 12)} · ${result.job.kind} · ${result.job.status}`,
+        result.worktree ? `  worktree ${result.worktree.worktree_id.slice(0, 12)} · ${result.worktree.branch}` : undefined,
+        `  ${truncateToWidth(oneLine(result.job.prompt), Math.max(24, terminalWidth() - 6))}`,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async assignInboxItem(command: string, args: string[]): Promise<void> {
+    const itemId = args[0];
+    if (!itemId || (command === "assign" && !args[1])) {
+      this.renderNotice(`Usage: /inbox ${command === "assign" ? "assign <item_id> <owner> [note]" : "unassign <item_id>"}`);
+      return;
+    }
+    try {
+      const result = await updateLoopInboxAssignment(this.app.store, this.app.workspace, {
+        item_id: itemId,
+        assignee: command === "assign" ? args[1] : undefined,
+        note: command === "assign" ? args.slice(2).join(" ") : undefined,
+      });
+      this.renderLoopTranscriptPanel("Loop Inbox", [
+        `${fg256(48, "•")} ${result.action} ${result.item.id}`,
+        result.state?.assignee ? `  owner ${result.state.assignee}` : "  owner cleared",
+        result.state?.assignment_note ? `  note ${result.state.assignment_note}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async routeInboxItems(command: string, args: string[]): Promise<void> {
+    const subcommand = command === "routes" ? "list" : (args[0] ?? "list").toLowerCase();
+    try {
+      if (subcommand === "list" || subcommand === "show") {
+        const routes = await readLoopInboxRouting(this.app.workspace);
+        this.renderLoopTranscriptPanel("Loop Inbox Routes", routes.length
+          ? routes.map((route) => `  ${route.route_id} -> ${route.assignee}${routeSelectorLabel(route)}${route.note ? ` · ${route.note}` : ""}`)
+          : ["  no routes"]);
+        return;
+      }
+      if (subcommand === "add") {
+        const route = parseInboxRouteAddFlags(args.slice(1));
+        const result = await updateLoopInboxRouting(this.app.workspace, { action: "add", ...route });
+        this.renderLoopTranscriptPanel("Loop Inbox Routes", [
+          `${fg256(48, "•")} route ${result.route?.route_id ?? "added"}`,
+          result.route ? `  owner ${result.route.assignee}${routeSelectorLabel(result.route)}` : undefined,
+          result.route?.note ? `  note ${result.route.note}` : undefined,
+        ].filter((line): line is string => Boolean(line)));
+        return;
+      }
+      if (subcommand === "remove" || subcommand === "delete") {
+        const routeId = args[1];
+        if (!routeId) {
+          this.renderNotice("Usage: /inbox route remove <route_id>");
+          return;
+        }
+        const result = await updateLoopInboxRouting(this.app.workspace, { action: "remove", route_id: routeId });
+        this.renderLoopTranscriptPanel("Loop Inbox Routes", [
+          `${fg256(48, "•")} removed ${result.route?.route_id ?? routeId}`,
+          `  remaining ${result.routes.length}`,
+        ]);
+        return;
+      }
+      this.renderNotice("Usage: /inbox routes | /inbox route add <owner> --kind <kind>|--source <source>|--priority <priority> [--id route_id] [note] | /inbox route remove <route_id>");
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async muteInboxItem(command: string, args: string[]): Promise<void> {
+    const itemId = args[0];
+    if (!itemId) {
+      this.renderNotice(`Usage: /inbox ${command === "mute" ? "mute <item_id> [note]" : "unmute <item_id|mute_key>"}`);
+      return;
+    }
+    try {
+      const result = await updateLoopInboxMute(this.app.store, this.app.workspace, {
+        action: command === "mute" ? "mute" : "unmute",
+        item_id: itemId,
+        note: command === "mute" ? args.slice(1).join(" ") : undefined,
+      });
+      this.renderLoopTranscriptPanel("Loop Inbox", [
+        `${fg256(48, "•")} ${result.action} ${result.mute_key}`,
+        result.state?.muted_until ? `  until ${result.state.muted_until}` : undefined,
+        result.state?.note ? `  note ${result.state.note}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async renderSelfImproveView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const action = (tokens[0] ?? "status").toLowerCase();
+    try {
+      if (action === "status" || action === "show") {
+        const status = await optLiteStatus(this.app.store, this.app.workspace);
+        this.renderPanel("Self-Improve", [
+          `${fg256(39, "Evidence")} sessions ${status.eligible_goal_sessions} · verifications ${status.verified_records} · feedback ${status.human_feedback_records} · signals ${status.learning_signal_records}`,
+          `${fg256(39, "Proposals")} total ${status.proposal_count} · staged ${status.staged_count} · adopted ${status.adopted_count}`,
+          `${fg256(39, "Replay")} reports ${status.replay_count}`,
+          status.latest_proposal ? `${fg256(39, "Latest proposal")} ${status.latest_proposal.id} · ${status.latest_proposal.status} · ${status.latest_proposal.skill_id}` : `${fg256(39, "Latest proposal")} none`,
+          status.latest_replay ? `${fg256(39, "Latest replay")} ${status.latest_replay.id} · ${status.latest_replay.status} · samples ${status.latest_replay.sample_count} · ${formatOptScore(status.latest_replay.baseline_score)} -> ${formatOptScore(status.latest_replay.candidate_score)}` : `${fg256(39, "Latest replay")} none`,
+        ]);
+        return;
+      }
+      if (action === "propose") {
+        const proposal = await optLitePropose(this.app.store, this.app.workspace);
+        this.renderPanel("Self-Improve Proposal", [
+          `${fg256(48, "•")} staged ${proposal.id}`,
+          `  skill ${proposal.skill_id}`,
+          `  evidence sessions ${proposal.evidence.goal_sessions} · verifications ${proposal.evidence.verification_records} · signals ${proposal.evidence.learning_signal_records}`,
+          `  ${proposal.staged_skill_path}`,
+        ]);
+        return;
+      }
+      if (action === "replay") {
+        const run = await optLiteRun(this.app.store, this.app.workspace, { replay: true, proposal_id: tokens[1] });
+        this.renderOptReplayPanel(run.replay);
+        return;
+      }
+      if (action === "run") {
+        const run = await optLiteRun(this.app.store, this.app.workspace, parseOptRunFlags(tokens.slice(1)));
+        this.renderOptReplayPanel(run.replay);
+        return;
+      }
+      if (action === "report") {
+        const report = await optLiteReport(this.app.workspace, tokens[1]);
+        this.renderOptReplayPanel(report);
+        return;
+      }
+      if (action === "adopt") {
+        const proposal = await optLiteAdopt(this.app.store, this.app.workspace, this.app.config, tokens[1]);
+        this.renderPanel("Self-Improve Adopted", [
+          `${fg256(48, "•")} adopted ${proposal.id}`,
+          `  skill ${proposal.skill_id}`,
+          proposal.skill_path ? `  ${proposal.skill_path}` : undefined,
+        ].filter((line): line is string => Boolean(line)));
+        return;
+      }
+      this.renderNotice("Usage: /self-improve status | /self-improve propose | /self-improve run --replay [proposal_id] | /self-improve report [replay_id] | /self-improve adopt [proposal_id]");
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private renderOptReplayPanel(report: Awaited<ReturnType<typeof optLiteReport>>): void {
+    this.renderPanel("Self-Improve Replay", [
+      `${fg256(39, "Report")} ${report.id} · ${report.status} · proposal ${report.proposal_id}`,
+      `${fg256(39, "Samples")} total ${report.sample_count} · train ${report.splits.train.length} · validation ${report.splits.validation.length} · heldout ${report.splits.heldout.length}`,
+      `${fg256(39, "Scores")} baseline ${formatOptScore(report.baseline_score)} · candidate ${formatOptScore(report.candidate_score)}`,
+      `${fg256(39, "Gate")} validation ${report.gate.validation_improved ? "improved" : "not improved"} · heldout ${report.gate.heldout_not_regressed ? "not regressed" : "regressed"} · hard failures ${report.gate.hard_failures}`,
+      `${fg256(39, "Path")} ${report.report_path}`,
+    ]);
+  }
+
+  private async renderLoopView(args = ""): Promise<void> {
+    const first = args.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? "";
+    const internalActions = new Set([
+      "health",
+      "dashboard",
+      "overview",
+      "trace",
+      "evidence",
+      "metrics",
+      "tasks",
+      "task",
+      "workers",
+      "worker",
+      "connectors",
+      "connector",
+      "policy",
+      "action-preflight",
+      "action",
+      "action-run",
+      "action-execute",
+      "actions",
+      "action-log",
+      "roadmap",
+      "coverage",
+    ]);
+    if (internalActions.has(first)) {
+      await this.renderLoopInternalView(args);
+      return;
+    }
+    await this.renderLoopControlView(args);
+  }
+
+  private async renderLoopInternalView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const action = (tokens[0] ?? "health").toLowerCase();
+    if (action === "health") {
+      await this.renderLoopHealthView();
+      return;
+    }
+    if (action === "dashboard" || action === "overview") {
+      await this.renderLoopDashboardView();
+      return;
+    }
+    if (action === "trace") {
+      this.renderLoopTraceView(tokens.slice(1));
+      return;
+    }
+    if (action === "evidence") {
+      this.renderLoopEvidenceView(tokens.slice(1));
+      return;
+    }
+    if (action === "metrics") {
+      this.renderLoopMetricsView();
+      return;
+    }
+    if (action === "tasks" || action === "task") {
+      this.renderLoopTasksView();
+      return;
+    }
+    if (action === "workers" || action === "worker") {
+      this.renderLoopWorkersView();
+      return;
+    }
+    if (action === "connectors" || action === "connector") {
+      this.renderLoopConnectorsView();
+      return;
+    }
+    if (action === "policy") {
+      await this.renderLoopPolicyView();
+      return;
+    }
+    if (action === "action-preflight" || action === "action") {
+      this.renderLoopActionPreflightView(tokens.slice(1));
+      return;
+    }
+    if (action === "action-run" || action === "action-execute") {
+      await this.renderLoopActionRunView(tokens.slice(1));
+      return;
+    }
+    if (action === "actions" || action === "action-log") {
+      this.renderLoopActionsView();
+      return;
+    }
+    if (action === "roadmap" || action === "coverage") {
+      this.renderLoopRoadmapView();
+      return;
+    }
+    this.renderNotice(`Unknown loop action ${args}. Use /loop health.`);
+  }
+
+  private async renderLoopDashboardView(): Promise<void> {
+    const dashboard = await readLoopDashboard(this.app.store, this.app.workspace);
+    const topGoal = dashboard.top.goal;
+    const topSource = dashboard.top.source;
+    const topConnector = dashboard.top.connector;
+    this.renderPanel("Loop Internal Dashboard", [
+      `${fg256(39, "Severity")} ${dashboard.status.severity}${dashboard.status.reasons.length ? ` · ${dashboard.status.reasons.join(", ")}` : ""}`,
+      `${fg256(39, "Inbox")} open ${dashboard.status.open_inbox_items} · high ${dashboard.status.high_inbox_items} · background ${dashboard.status.active_jobs} · reviews ${dashboard.status.pending_reviews}`,
+      `${fg256(39, "Totals")} sessions ${dashboard.totals.sessions} · loops ${dashboard.totals.goals} · runs ${dashboard.totals.runs} · calls ${dashboard.totals.model_calls} · tok ${formatCompactNumber(dashboard.totals.total_tokens)}`,
+      `${fg256(39, "Verification")} pass ${dashboard.verification.pass} · fail ${dashboard.verification.fail} · partial ${dashboard.verification.partial} · blocked ${dashboard.verification.blocked} · rate ${formatOptionalPercent(dashboard.verification.pass_rate)}`,
+      `${fg256(39, "Ops")} automation due ${dashboard.operations.automation_due} · discovery due ${dashboard.operations.discovery_due} · discovery errors ${dashboard.operations.discovery_errors} · worktrees ${dashboard.operations.worktrees_active}`,
+      `${fg256(39, "Top loop")} ${topGoal ? `${truncateToWidth(oneLine(topGoal.label ?? topGoal.key), 48)} · ${formatCompactNumber(topGoal.tokens)} tok · verify ${topGoal.verifications}` : "none"}`,
+      `${fg256(39, "Top source")} ${topSource ? `${topSource.key} · ${formatCompactNumber(topSource.tokens)} tok · verify ${topSource.verifications}` : "none"}`,
+      `${fg256(39, "Top connector")} ${topConnector ? `${topConnector.key} · ${formatCompactNumber(topConnector.tokens)} tok · verify ${topConnector.verifications}` : "none"}`,
+      "",
+      fg256(39, "Attention"),
+      ...(dashboard.attention.inbox_items.length
+        ? dashboard.attention.inbox_items.slice(0, 5).map((item) => `  ${item.priority} · ${item.kind} · ${truncateToWidth(oneLine(item.title), 68)}`)
+        : ["  none"]),
+      "",
+      fg256(39, "Roadmap edges"),
+      ...(dashboard.attention.roadmap_edges.length
+        ? dashboard.attention.roadmap_edges.slice(0, 5).map((item) => `  ${item.name} · ${item.status}`)
+        : ["  none"]),
+    ]);
+  }
+
+  private async renderLoopHealthView(): Promise<void> {
+    const health = await readLoopHealth(this.app.store, this.app.workspace);
+    this.renderLoopTranscriptPanel("Loop Health", [
+      `${fg256(39, "Severity")} ${health.severity}`,
+      health.reasons.length ? `${fg256(39, "Reasons")} ${health.reasons.join(", ")}` : `${fg256(39, "Reasons")} none`,
+      "",
+      `${fg256(39, "Inbox")} open ${health.inbox.open} · high ${health.inbox.high} · total ${health.inbox.total}`,
+      `${fg256(39, "Background")} active ${health.jobs.active} · failed ${health.jobs.by_status.failed ?? 0} · blocked ${health.jobs.by_status.blocked ?? 0} · total ${health.jobs.total}`,
+      `${fg256(39, "Loops")} active ${health.goals.by_status.active ?? 0} · paused ${health.goals.by_status.paused ?? 0} · review ${health.goals.pending_review} · total ${health.goals.total}`,
+      `${fg256(39, "Automation")} enabled ${health.automation.by_status.enabled ?? 0} · due ${health.automation.due} · review ${health.automation.review_pending} · worktree ${health.automation.worktree_isolated} · total ${health.automation.total}`,
+      `${fg256(39, "Discovery")} open ${health.discovery.candidates_open} · due ${health.discovery.due} · errors ${health.discovery.last_error} · total ${health.discovery.total}`,
+      `${fg256(39, "Worktrees")} active ${health.worktrees.active} · attention ${health.worktrees.attention} · cleanup ${health.worktrees.cleanup_due} · total ${health.worktrees.total}`,
+      `${fg256(39, "Verification")} pass ${health.verification.by_verdict.pass ?? 0} · fail ${health.verification.by_verdict.fail ?? 0} · hard pass ${health.verification.hard_pass} · total ${health.verification.total}`,
+      `${fg256(39, "Learning")} positive ${health.learning_signals.by_polarity.positive ?? 0} · negative ${health.learning_signals.by_polarity.negative ?? 0} · constraints ${health.learning_signals.by_polarity.constraint ?? 0} · total ${health.learning_signals.total}`,
+    ]);
+  }
+
+  private renderLoopTraceView(args: string[]): void {
+    const session = args[0]
+      ? this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0])
+      : this.optionalSession();
+    if (!session) {
+      this.renderNotice("Usage: /loop trace [session]");
+      return;
+    }
+    const trace = readLoopTrace(this.app.store, session, { limit: 8 });
+    this.renderPanel("Run Trace", [
+      `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
+      `${fg256(39, "Summary")} runs ${trace.summary.runs} · steps ${trace.summary.steps} · tools ${trace.summary.tool_calls} · verifications ${trace.summary.verifications}`,
+      "",
+      ...(trace.runs.length
+        ? trace.runs.map((run) => {
+          const goal = run.goal_events.length ? ` · goal ${run.goal_events.length}` : "";
+          const verify = run.verification_count ? ` · verify ${run.verification_count}` : "";
+          const status = run.status.padEnd(9);
+          return `  ${status} ${run.run_id.slice(0, 12)} · ${run.request_class ?? "unknown"} · steps ${run.steps.length} · tools ${run.tool_calls ?? run.tools.length}${verify}${goal}`;
+        })
+        : ["  no runs"]),
+    ]);
+  }
+
+  private renderLoopEvidenceView(args: string[]): void {
+    const session = args[0]
+      ? this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0])
+      : this.optionalSession();
+    if (!session) {
+      this.renderNotice("Usage: /loop evidence [session]");
+      return;
+    }
+    const evidence = readLoopEvidence(this.app.store, session);
+    const latestVerification = evidence.verification.latest;
+    const latestSignal = evidence.learning_signals.latest[0];
+    const latestSkills = evidence.skills.latest;
+    this.renderPanel("Loop Evidence", [
+      `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
+      evidence.goal
+        ? `${fg256(39, "Loop")} ${evidence.goal.kind} · ${evidence.goal.status} · loop task ${evidence.goal.horizon_generation} · HIL ${evidence.goal.hil_policy}`
+        : `${fg256(39, "Loop")} none`,
+      evidence.current_horizon
+        ? `${fg256(39, "Loop task")} ${evidence.current_horizon.generation} · steps ${evidence.current_horizon.step_count} · done ${evidence.current_horizon.steps_by_status.completed} · blocked ${evidence.current_horizon.steps_by_status.blocked}`
+        : `${fg256(39, "Loop task")} none`,
+      `${fg256(39, "Attempts")} total ${evidence.summary.attempts} · completed ${evidence.summary.completed_attempts} · failed ${evidence.summary.failed_attempts}`,
+      `${fg256(39, "Verification")} total ${evidence.summary.verifications} · hard pass ${evidence.summary.hard_pass_verifications} · fail ${evidence.summary.failed_verifications} · blocked ${evidence.summary.blocked_verifications}`,
+      `${fg256(39, "Memory")} skills ${evidence.summary.skill_snapshots} · learning ${evidence.summary.learning_signals} · review ${evidence.summary.pending_review ? "pending" : "clear"}`,
+      latestVerification ? `${fg256(39, "Latest verification")} ${latestVerification.provider}/${latestVerification.verdict}/${latestVerification.confidence}${latestVerification.summary ? ` · ${truncateToWidth(oneLine(latestVerification.summary), 64)}` : ""}` : `${fg256(39, "Latest verification")} none`,
+      latestSignal ? `${fg256(39, "Latest signal")} ${latestSignal.category}/${latestSignal.polarity} · ${truncateToWidth(oneLine(latestSignal.summary), 64)}` : `${fg256(39, "Latest signal")} none`,
+      latestSkills ? `${fg256(39, "Latest skills")} ${latestSkills.skill_count} · ${latestSkills.skill_ids.slice(0, 5).join(", ") || "none"}` : `${fg256(39, "Latest skills")} none`,
+    ]);
+  }
+
+  private renderLoopMetricsView(): void {
+    const metrics = readLoopMetrics(this.app.store, this.app.workspace);
+    const topSource = metrics.by_source[0];
+    const topWorktree = metrics.by_worktree[0];
+    const topGoal = metrics.by_goal.find((item) => item.key !== "no_goal") ?? metrics.by_goal[0];
+    this.renderPanel("Loop Internal Metrics", [
+      `${fg256(39, "Totals")} sessions ${metrics.totals.sessions} · runs ${metrics.totals.runs} · loops ${metrics.totals.goals} · calls ${metrics.totals.model_calls}`,
+      `${fg256(39, "Tokens")} total ${formatCompactNumber(metrics.tokens.total_tokens)} · prompt ${formatCompactNumber(metrics.tokens.prompt_tokens)} · completion ${formatCompactNumber(metrics.tokens.completion_tokens)} · cached ${formatCompactNumber(metrics.tokens.cached_prompt_tokens)}${metrics.tokens.cache_hit_rate !== undefined ? ` · cache ${formatPercent(metrics.tokens.cache_hit_rate)}` : ""}`,
+      `${fg256(39, "Verification")} pass ${metrics.verification.summary.pass} · fail ${metrics.verification.summary.fail} · partial ${metrics.verification.summary.partial} · blocked ${metrics.verification.summary.blocked} · rate ${formatOptionalPercent(metrics.verification.summary.pass_rate)}`,
+      `${fg256(39, "Checker")} total ${metrics.verification.checker_effectiveness.total} · pass ${metrics.verification.checker_effectiveness.pass} · fail ${metrics.verification.checker_effectiveness.fail} · rate ${formatOptionalPercent(metrics.verification.checker_effectiveness.pass_rate)}`,
+      `${fg256(39, "Learning")} positive ${metrics.learning_signals.positive} · negative ${metrics.learning_signals.negative} · constraints ${metrics.learning_signals.constraint} · total ${metrics.learning_signals.total}`,
+      `${fg256(39, "Top loop")} ${topGoal ? `${truncateToWidth(oneLine(topGoal.label ?? topGoal.key), 48)} · ${formatCompactNumber(topGoal.tokens.total_tokens)} tok · verify ${topGoal.verification.total}` : "none"}`,
+      `${fg256(39, "Top source")} ${topSource ? `${topSource.key} · ${formatCompactNumber(topSource.tokens.total_tokens)} tok · verify ${topSource.verification.total}` : "none"}`,
+      `${fg256(39, "Top worktree")} ${topWorktree ? `${topWorktree.key} · ${formatCompactNumber(topWorktree.tokens.total_tokens)} tok · verify ${topWorktree.verification.total}` : "none"}`,
+      `${fg256(39, "Trend days")} ${metrics.trends.daily.length}`,
+    ]);
+  }
+
+  private renderLoopTasksView(): void {
+    const report = readLoopTasks(this.app.store, this.app.workspace);
+    this.renderPanel("Loop Tasks", [
+      `${fg256(39, "Summary")} total ${report.summary.total} · current ${report.summary.current} · task ${report.summary.by_kind.task} · research ${report.summary.by_kind.research}`,
+      `${fg256(39, "Attention")} review ${report.summary.pending_review} · blocked ${report.summary.blocked} · failed ${report.summary.verification_failed} · ready ${report.summary.ready_for_verification} · verified ${report.summary.verified}`,
+      "",
+      ...(report.tasks.length
+        ? report.tasks.slice(0, 14).map((task) => {
+          const current = task.current ? "current" : `task ${task.horizon_generation}`;
+          const verify = task.verification.latest ? ` · ${task.verification.latest.verdict}/${task.verification.latest.confidence}` : "";
+          const attempts = task.attempts.total ? ` · attempts ${task.attempts.total}` : "";
+          const owner = task.owner ? ` · ${task.owner}` : "";
+          return `  ${task.state.padEnd(22)} ${task.goal_kind} · ${current} · steps ${task.steps.total} · verify ${task.verification.total}${verify}${attempts}${owner} · ${truncateToWidth(oneLine(task.goal_objective), 48)}`;
+        })
+        : ["  no loop tasks"]),
+    ]);
+  }
+
+  private renderLoopWorkersView(): void {
+    const report = readLoopWorkers(this.app.store, this.app.workspace);
+    this.renderPanel("Loop Internal Jobs", [
+      `${fg256(39, "Summary")} total ${report.summary.total} · active ${report.summary.active} · verifiers ${report.summary.verifiers} · sub-agents ${report.summary.subagents}`,
+      `${fg256(39, "Status")} ${compactRecordCounts(report.summary.by_status)}`,
+      `${fg256(39, "Roles")} ${compactRecordCounts(report.summary.by_role)}`,
+      "",
+      ...(report.workers.length
+        ? report.workers.slice(0, 12).map((worker) => {
+          const role = worker.role ? ` · ${worker.role}` : "";
+          const parent = worker.parent_session_id ? ` · parent ${worker.parent_session_id.slice(0, 12)}` : "";
+          const worktree = worker.worktree_id ? ` · wt ${worker.worktree_id.slice(0, 12)}` : "";
+          const verify = worker.verification ? ` · ${worker.verification.verdict}/${worker.verification.confidence}` : "";
+          return `  ${worker.status.padEnd(14)} ${worker.kind}${role} · job ${worker.job_id.slice(0, 12)} · session ${worker.session_id.slice(0, 12)}${parent}${worktree}${verify}`;
+        })
+        : ["  no internal jobs"]),
+    ]);
+  }
+
+  private renderLoopConnectorsView(): void {
+    const report = readLoopConnectors(this.app.store, this.app.workspace);
+    this.renderPanel("Loop Internal Connectors", [
+      `${fg256(39, "Summary")} connectors ${report.summary.connectors} · configured ${report.summary.configured_connectors} · sources ${report.summary.discovery_sources}`,
+      `${fg256(39, "Discovery")} schedules ${report.summary.schedules} · enabled ${report.summary.enabled_schedules} · due ${report.summary.due_schedules} · open ${report.summary.open_candidates}`,
+      `${fg256(39, "Verification")} verifiers ${report.summary.verifiers}`,
+      `${fg256(39, "Action policy")} connector ${report.summary.action_policies} · runners ${report.summary.action_runners} · global ${report.summary.global_action_policies}`,
+      "",
+      ...(report.connectors.length
+        ? report.connectors.map((connector) => {
+          const configured = connector.status === "configured" ? "configured" : "available";
+          const hot = connector.summary.high_open_candidates ? ` · high ${connector.summary.high_open_candidates}` : "";
+          return `  ${connector.connector.padEnd(8)} ${configured} · sources ${connector.summary.discovery_sources} · schedules ${connector.summary.schedules} · open ${connector.summary.open_candidates}${hot} · verifiers ${connector.summary.verifiers} · policies ${connector.summary.action_policies} · runners ${connector.summary.action_runners}`;
+        })
+        : ["  no connectors"]),
+      ...(report.global_action_policies.length
+        ? ["", fg256(39, "Global policies"), ...report.global_action_policies.map((policy) => `  ${policy.id} · ${policy.kind}/${policy.decision} · ${policy.request_classes.join("/")}`)]
+        : []),
+    ]);
+  }
+
+  private async renderLoopPolicyView(): Promise<void> {
+    const policy = await readLoopPolicy(this.app.config, this.app.workspace);
+    this.renderPanel("Loop Internal Policy", [
+      `${fg256(39, "Default background isolation")} ${policy.default_background_isolation}`,
+      `${fg256(39, "Workspace permission")} ${policy.workspace_permission.mode} · ${policy.workspace_permission.source}`,
+      `${fg256(39, "Completion gate")} background requires ${policy.unattended_completion.task_strong_pass_providers.join("/")} pass · reflection only ${policy.unattended_completion.reflection_only_sufficient ? "allowed" : "blocked"}`,
+      `${fg256(39, "Tool gates")} ${policy.unattended_tool_gates.request_classes.join("/")} deny destructive shell and connector mutation · read-only connector inspection ${policy.unattended_tool_gates.read_only_connector_inspection}`,
+      `${fg256(39, "Connector verifiers")} ${policy.connector_verifiers.map((item) => item.id).join(", ") || "none"}`,
+      `${fg256(39, "Action policies")} ${policy.connector_action_policies.map((item) => item.id).join(", ") || "none"}`,
+      `${fg256(39, "Action runners")} ${policy.connector_action_runners.map((item) => item.id).join(", ") || "none"}`,
+      `${fg256(39, "Skills")} enabled ${policy.skill_policy.enabled_count}/${policy.skill_policy.configured_enabled.length} · discovered ${policy.skill_policy.discovered_count} · missing ${policy.skill_policy.missing_enabled.length}`,
+      `${fg256(39, "Learned skill")} ${policy.skill_policy.learned_workspace_skill.enabled ? "enabled" : policy.skill_policy.learned_workspace_skill.discovered ? "available" : "not adopted"}`,
+      `${fg256(39, "Skill bodies")} ${policy.skill_policy.prompt_contract.skill_body_access} · embedded ${policy.skill_policy.prompt_contract.skill_bodies_embedded ? "yes" : "no"}`,
+      fg256(244, "Applies when automation, inbox promotion, or daemon queueing does not pass --worktree or --active-checkout."),
+    ]);
+  }
+
+  private renderLoopActionPreflightView(args: string[]): void {
+    let session: SessionRecord | undefined;
+    let inputArgs = args;
+    if (args[0]) {
+      const explicit = this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0]);
+      if (explicit) {
+        session = explicit;
+        inputArgs = args.slice(1);
+      }
+    }
+    session ??= this.optionalSession();
+    if (!session) {
+      this.renderNotice("Usage: /loop action-preflight [session] <connector> <area> <operation> [--kind read|mutation] [--surface first_class|cli|tool] [--request-class background|verification|interactive]");
+      return;
+    }
+    try {
+      const result = recordConnectorActionPreflight(this.app.store, session, parseConnectorActionPreflightInput(inputArgs));
+      this.renderPanel("Loop Action Preflight", [
+        `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
+        `${fg256(39, "Decision")} ${result.status}${result.needs_review ? " · needs review" : ""}${result.recorded ? " · recorded" : ""}`,
+        `${fg256(39, "Request")} ${result.request_class} · ${result.action.surface} · ${result.action.connector}`,
+        `${fg256(39, "Action")} ${result.action.kind} · ${result.action.area}.${result.action.operation}`,
+        `${fg256(39, "Reason")} ${result.reason}`,
+        result.review_surface ? `${fg256(39, "Review")} ${result.review_surface}` : undefined,
+        result.event_id ? `${fg256(39, "Event")} ${result.event_id}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async renderLoopActionRunView(args: string[]): Promise<void> {
+    let session: SessionRecord | undefined;
+    let inputArgs = args;
+    if (args[0]) {
+      const explicit = this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0]);
+      if (explicit) {
+        session = explicit;
+        inputArgs = args.slice(1);
+      }
+    }
+    session ??= this.optionalSession();
+    if (!session) {
+      this.renderNotice("Usage: /loop action-run [session] github pull_request merge --repo owner/repo --number N [--execute] OR github pull_request review --repo owner/repo --number N --event approve|request-changes|comment [--body TEXT] [--execute] OR github pull_request comment --repo owner/repo --number N --body TEXT [--execute] OR github pull_request label --repo owner/repo --number N [--add-label LABEL ...] [--remove-label LABEL ...] [--execute] OR github issue close --repo owner/repo --number N [--execute] OR github issue comment --repo owner/repo --number N --body TEXT [--execute] OR github issue label --repo owner/repo --number N [--add-label LABEL ...] [--remove-label LABEL ...] [--execute] OR github notification mark-read --thread THREAD [--execute] OR github run rerun --repo owner/repo --run-id RUN_ID [--execute] OR github workflow dispatch --repo owner/repo --workflow deploy.yml [--ref main] [--field key=value ...] [--execute] OR github deployment create-status --repo owner/repo --deployment-id ID --state success|failure|inactive|in_progress|queued|pending|error [--execute] OR github release create-draft --repo owner/repo --tag TAG (--notes TEXT|--generate-notes) [--execute] OR github release publish-draft --repo owner/repo --tag TAG [--execute] OR npm package publish [--tag latest] [--access public|restricted] [--provenance] [--execute]");
+      return;
+    }
+    try {
+      const result = await runConnectorAction(this.app.store, session, parseConnectorActionRunInput(inputArgs), {
+        cwd: this.app.workspace.root,
+        env: process.env,
+      });
+      this.renderPanel("Loop Action Run", [
+        `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
+        `${fg256(39, "Status")} ${result.status}${result.recorded ? " · recorded" : ""}`,
+        `${fg256(39, "Request")} ${result.action.request_class} · ${result.action.connector} · ${result.action.area}.${result.action.operation}`,
+        `${fg256(39, "Target")} ${formatConnectorActionTarget(result.action)}${formatConnectorActionOptions(result.action)}`,
+        `${fg256(39, "Command")} ${result.command.executable} ${result.command.args.join(" ")}`,
+        `${fg256(39, "Preflight")} ${result.preflight.status}${result.preflight.needs_review ? " · needs review" : ""}`,
+        result.exit_code !== undefined ? `${fg256(39, "Exit")} ${result.exit_code}` : undefined,
+        result.reason ? `${fg256(39, "Reason")} ${truncateToWidth(oneLine(result.reason), 72)}` : undefined,
+        result.event_id ? `${fg256(39, "Event")} ${result.event_id}` : undefined,
+      ].filter((line): line is string => Boolean(line)));
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private renderLoopActionsView(): void {
+    const report = readLoopActions(this.app.store, this.app.workspace, { limit: 14 });
+    this.renderPanel("Connector Action Audit", [
+      `${fg256(39, "Summary")} total ${report.summary.total} · dry-run ${report.summary.dry_run} · executed ${report.summary.executed} · failed ${report.summary.failed} · denied ${report.summary.denied}`,
+      `${fg256(39, "Connectors")} ${compactRecordCounts(report.summary.by_connector)}`,
+      "",
+      ...(report.actions.length
+        ? report.actions.map((action) => {
+          const target = action.thread
+            ? ` · thread ${action.thread}`
+            : action.target_run_id
+              ? ` · ${action.repo ?? "repo unknown"} run ${action.target_run_id}`
+              : action.workflow
+                ? ` · ${action.repo ?? "repo unknown"} workflow ${action.workflow}${action.ref ? ` @ ${action.ref}` : ""}`
+                : action.tag
+                  ? ` · ${action.repo ?? "repo unknown"} release ${action.tag}`
+                : action.dist_tag
+                  ? ` · tag ${action.dist_tag}`
+                : action.repo && action.number !== undefined ? ` · ${action.repo}#${action.number}` : "";
+          const method = action.review_event ? ` · ${action.review_event}` : action.method ? ` · ${action.method}` : "";
+          const workflowOptions = action.area === "workflow" && action.fields?.length
+            ? ` · fields ${action.fields.length}`
+            : "";
+          const labelOptions = action.add_labels?.length || action.remove_labels?.length
+            ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
+            : "";
+          const npmOptions = action.area === "package"
+            ? `${action.access ? ` · ${action.access}` : ""}${action.provenance ? " · provenance" : ""}`
+            : "";
+          const exit = action.exit_code !== undefined ? ` · exit ${action.exit_code}` : "";
+          const source = action.source === "action_run" ? "" : ` · ${action.source}`;
+          return `  ${action.status.padEnd(8)} ${action.connector}.${action.area}.${action.operation}${target}${method}${workflowOptions}${labelOptions}${npmOptions}${exit}${source} · ${truncateToWidth(oneLine(action.session_title), 42)}`;
+        })
+        : ["  no connector actions"]),
+    ]);
+  }
+
+  private renderLoopRoadmapView(): void {
+    const roadmap = readLoopRoadmap();
+    const partial = roadmap.capabilities.filter((item) => item.status === "partially_implemented");
+    this.renderPanel("Loop Internal Roadmap", [
+      `${fg256(39, "Goal-native closure")} ${roadmap.closure_status}`,
+      `${fg256(39, "Full product model")} ${roadmap.full_product_model_status}`,
+      `${fg256(39, "Scope")} ${truncateToWidth(roadmap.scope_note, 88)}`,
+      `${fg256(39, "Coverage")} implemented ${roadmap.summary.implemented} · partial ${roadmap.summary.partially_implemented} · future ${roadmap.summary.future_product_work}`,
+      "",
+      fg256(39, "Current closure"),
+      ...roadmap.current_closure.map((item) => `  ${item}`),
+      "",
+      fg256(39, "Partial/future edges"),
+      ...(partial.length ? partial.slice(0, 6).map((item) => `  ${item.name} · ${truncateToWidth(item.roadmap_position, 72)}`) : ["  none"]),
+      ...(roadmap.future_product_extensions.length ? ["", fg256(39, "Future product extensions"), ...roadmap.future_product_extensions.slice(0, 4).map((item) => `  ${truncateToWidth(item, 84)}`)] : []),
+    ]);
+  }
+
+  private async renderAutomationView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const action = (tokens[0] ?? "list").toLowerCase();
+    try {
+      switch (action) {
+        case "list":
+        case "status":
+          this.renderAutomationPanel();
+          return;
+        case "add":
+          await this.addAutomationSchedule(tokens.slice(1));
+          return;
+        case "run-due": {
+          const result = await enqueueDueAutomationSchedules(this.app.store);
+          this.renderPanel("Automation", [
+            `${fg256(39, "Enqueued")} ${result.enqueued.length}  ${fg256(244, "Skipped")} ${result.skipped.length}`,
+            ...result.enqueued.map(({ schedule, job }) => `  ${schedule.schedule_id.slice(0, 12)} -> ${job.job_id.slice(0, 12)} · ${truncateToWidth(oneLine(schedule.prompt), 70)}`),
+            ...result.skipped.map(({ schedule, reason }) => `  ${schedule.schedule_id.slice(0, 12)} skipped · ${reason}`),
+          ]);
+          return;
+        }
+        case "pause":
+          this.renderAutomationMutation("Paused", pauseLoopAutomationSchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        case "resume":
+          this.renderAutomationMutation("Resumed", resumeLoopAutomationSchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        case "remove":
+          this.renderAutomationMutation("Removed", removeLoopAutomationSchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        default:
+          this.renderNotice(`Unknown automation action ${args}. Use /automation list, add, run-due, pause, resume, or remove.`);
+      }
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async addAutomationSchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const parsed = parseAutomationFlags(args.slice(1));
+    const prompt = parsed.args.length ? parsed.args.join(" ") : await this.ask("Recurring task", "Review the loop inbox and summarize open work");
+    const schedule = createLoopAutomationSchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      prompt,
+      config_path: this.app.configFiles[0],
+      isolation: resolveLoopBackgroundIsolation(parsed.isolation, this.app.config),
+      review_policy: parsed.review_policy,
+    });
+    this.renderAutomationMutation("Schedule Added", schedule);
+  }
+
+  private renderAutomationPanel(): void {
+    const schedules = this.app.store.listAutomationSchedules({ workspaceId: this.app.workspace.id });
+    this.renderPanel("Automation", [
+      `${fg256(39, "Schedules")} ${schedules.length}`,
+      "",
+      ...(schedules.length ? schedules.map((schedule) => `  ${this.automationScheduleLabel(schedule)}`) : ["  no schedules"]),
+    ]);
+  }
+
+  private renderAutomationMutation(title: string, schedule: AutomationSchedule): void {
+    this.renderPanel(title, [`  ${this.automationScheduleLabel(schedule)}`]);
+  }
+
+  private automationScheduleLabel(schedule: AutomationSchedule): string {
+    const interval = formatAutomationInterval(schedule.interval_ms);
+    const last = schedule.last_job_id ? ` · last ${schedule.last_job_id.slice(0, 12)}` : "";
+    const policy = [
+      schedule.metadata.review_policy === "review" ? "review" : undefined,
+      schedule.metadata.isolation === "worktree" ? "worktree" : undefined,
+    ].filter(Boolean).join(" ");
+    const policyText = policy ? ` · ${policy}` : "";
+    return `${schedule.status.padEnd(7)} ${schedule.schedule_id.slice(0, 12)} · every ${interval} · next ${schedule.next_run_at}${policyText}${last} · ${truncateToWidth(oneLine(schedule.prompt), Math.max(24, terminalWidth() - 72))}`;
+  }
+
+  private async renderDiscoveryView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const action = (tokens[0] ?? "list").toLowerCase();
+    try {
+      switch (action) {
+        case "list":
+        case "status":
+          this.renderDiscoveryPanel();
+          return;
+        case "add":
+          await this.addDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-git":
+          await this.addGitDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-issues":
+          await this.addGitHubIssuesDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-assigned-issues":
+          await this.addGitHubAssignedIssuesDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-prs":
+          await this.addGitHubPullRequestsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-assigned-prs":
+          await this.addGitHubAssignedPullRequestsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-review-requests":
+          await this.addGitHubReviewRequestsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-notifications":
+          await this.addGitHubNotificationsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-ci":
+          await this.addGitHubActionsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-draft-releases":
+          await this.addGitHubDraftReleasesDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-github-deployments":
+          await this.addGitHubDeploymentsDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-http":
+          await this.addHttpHealthDiscoverySchedule(tokens.slice(1));
+          return;
+        case "add-npm-package":
+          await this.addNpmPackageDiscoverySchedule(tokens.slice(1));
+          return;
+        case "run-due": {
+          const result = await runDueDiscoverySchedules(this.app.store);
+          this.renderPanel("Discovery", [
+            `${fg256(39, "Ran")} ${result.ran.length}  ${fg256(203, "Failed")} ${result.failed.length}`,
+            ...result.ran.flatMap(({ schedule, candidates }) => [
+              `  ${schedule.schedule_id.slice(0, 12)} · ${candidates.length} candidates`,
+              ...candidates.slice(0, 5).map((candidate) => `    ${candidate.candidate_id.slice(0, 12)} · ${truncateToWidth(oneLine(candidate.title), 64)}`),
+            ]),
+            ...result.failed.map(({ schedule, error }) => `  ${schedule.schedule_id.slice(0, 12)} failed · ${truncateToWidth(oneLine(error), 72)}`),
+          ]);
+          return;
+        }
+        case "pause":
+          this.renderDiscoveryMutation("Paused", pauseLoopDiscoverySchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        case "resume":
+          this.renderDiscoveryMutation("Resumed", resumeLoopDiscoverySchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        case "remove":
+          this.renderDiscoveryMutation("Removed", removeLoopDiscoverySchedule(this.app.store, requiredText(tokens[1], "schedule")));
+          return;
+        default:
+          this.renderNotice(`Unknown discovery action ${args}. Use /discovery list, add, add-git, add-github-issues, add-github-assigned-issues, add-github-prs, add-github-assigned-prs, add-github-review-requests, add-github-notifications, add-github-ci, add-github-draft-releases, add-github-deployments, add-http, add-npm-package, run-due, pause, resume, or remove.`);
+      }
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async addDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const command = args.length > 1 ? args.slice(1).join(" ") : await this.ask("Discovery command", "node .inferoa/discovery.js");
+    const schedule = createLoopDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      command,
+    });
+    this.renderDiscoveryMutation("Discovery Added", schedule);
+  }
+
+  private async addGitDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const schedule = createGitChangesDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+    });
+    this.renderDiscoveryMutation("Git Discovery Added", schedule);
+  }
+
+  private async addGitHubIssuesDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const schedule = createGitHubIssuesDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      labels: flags.labels,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Issues Discovery Added", schedule);
+  }
+
+  private async addGitHubAssignedIssuesDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryAssignedConnectorFlags(args.slice(1));
+    const schedule = createGitHubAssignedIssuesDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      assignee: flags.assignee,
+      labels: flags.labels,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Assigned Issues Discovery Added", schedule);
+  }
+
+  private async addGitHubAssignedPullRequestsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryAssignedConnectorFlags(args.slice(1));
+    const schedule = createGitHubAssignedPullRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      assignee: flags.assignee,
+      labels: flags.labels,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Assigned PR Discovery Added", schedule);
+  }
+
+  private async addGitHubPullRequestsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const schedule = createGitHubPullRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      labels: flags.labels,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub PR Discovery Added", schedule);
+  }
+
+  private async addGitHubReviewRequestsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const schedule = createGitHubReviewRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Review Requests Discovery Added", schedule);
+  }
+
+  private async addGitHubNotificationsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryNotificationFlags(args.slice(1));
+    const schedule = createGitHubNotificationsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      participating: flags.participating,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Notifications Discovery Added", schedule);
+  }
+
+  private async addGitHubActionsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const schedule = createGitHubActionsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub CI Discovery Added", schedule);
+  }
+
+  private async addGitHubDraftReleasesDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const schedule = createGitHubDraftReleasesDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo: flags.repo,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Draft Release Discovery Added", schedule);
+  }
+
+  private async addGitHubDeploymentsDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryDeploymentFlags(args.slice(1));
+    const repo = flags.repo ?? (await this.ask("GitHub repo", "owner/repo"));
+    const schedule = createGitHubDeploymentsDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      repo,
+      environment: flags.environment,
+      ref: flags.ref,
+      limit: flags.limit,
+    });
+    this.renderDiscoveryMutation("GitHub Deployment Discovery Added", schedule);
+  }
+
+  private async addHttpHealthDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryHttpFlags(args.slice(1));
+    const url = flags.url ?? (await this.ask("HTTP URL", "http://127.0.0.1:3000/health"));
+    const schedule = createHttpHealthDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      url,
+      expected_status: flags.status,
+      timeout_ms: flags.timeout_ms,
+    });
+    this.renderDiscoveryMutation("HTTP Health Discovery Added", schedule);
+  }
+
+  private async addNpmPackageDiscoverySchedule(args: string[]): Promise<void> {
+    const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
+    const interval = parseAutomationInterval(intervalText);
+    const flags = parseDiscoveryNpmPackageFlags(args.slice(1));
+    const packageName = flags.package_name ?? (await this.ask("npm package", "inferoa"));
+    const version = flags.version ?? (await this.ask("npm version", "0.0.0"));
+    const schedule = createNpmPackageDiscoverySchedule(this.app.store, this.app.workspace, {
+      interval_ms: interval,
+      package_name: packageName,
+      version,
+      tag: flags.tag,
+    });
+    this.renderDiscoveryMutation("npm Package Discovery Added", schedule);
+  }
+
+  private renderDiscoveryPanel(): void {
+    const schedules = this.app.store.listDiscoverySchedules({ workspaceId: this.app.workspace.id });
+    const candidates = this.app.store.listDiscoveryCandidates({ workspaceId: this.app.workspace.id }).slice(0, 20);
+    this.renderPanel("Discovery", [
+      `${fg256(39, "Schedules")} ${schedules.length}  ${fg256(39, "Candidates")} ${candidates.length}`,
+      "",
+      fg256(39, "Schedules"),
+      ...(schedules.length ? schedules.map((schedule) => `  ${this.discoveryScheduleLabel(schedule)}`) : ["  no schedules"]),
+      "",
+      fg256(39, "Candidates"),
+      ...(candidates.length ? candidates.map((candidate) => `  ${this.discoveryCandidateLabel(candidate)}`) : ["  no candidates"]),
+    ]);
+  }
+
+  private renderDiscoveryMutation(title: string, schedule: DiscoverySchedule): void {
+    this.renderPanel(title, [`  ${this.discoveryScheduleLabel(schedule)}`]);
+  }
+
+  private discoveryScheduleLabel(schedule: DiscoverySchedule): string {
+    const interval = formatAutomationInterval(schedule.interval_ms);
+    const error = schedule.last_error ? ` · error ${truncateToWidth(oneLine(schedule.last_error), 32)}` : "";
+    return `${schedule.status.padEnd(7)} ${schedule.schedule_id.slice(0, 12)} · every ${interval} · next ${schedule.next_run_at}${error} · ${truncateToWidth(oneLine(schedule.command), Math.max(24, terminalWidth() - 78))}`;
+  }
+
+  private discoveryCandidateLabel(candidate: DiscoveryCandidate): string {
+    return `${candidate.status.padEnd(8)} ${candidate.priority.padEnd(6)} ${candidate.candidate_id.slice(0, 12)} · ${truncateToWidth(oneLine(candidate.title), Math.max(24, terminalWidth() - 42))}`;
+  }
+
+  private async renderWorktreeView(args = ""): Promise<void> {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const requested = (tokens[0] ?? "list").toLowerCase() as WorktreeAction;
+    const action = requested === "status" ? "list" : requested;
+    if (!["list", "health", "create", "run", "adopt", "cleanup", "remove"].includes(action)) {
+      this.renderNotice(`Unknown worktree action ${args}. Use /worktree list, health, create, run, adopt, cleanup, or remove.`);
+      return;
+    }
+    try {
+      switch (action) {
+        case "list":
+          this.renderWorktreePanel(tokens.slice(1));
+          return;
+        case "health":
+          this.renderWorktreeHealthPanel();
+          return;
+        case "create":
+          await this.createWorktreeFromTui(tokens.slice(1));
+          return;
+        case "run":
+          await this.queueWorktreeRunFromTui(tokens.slice(1));
+          return;
+        case "adopt":
+          await this.adoptWorktreeFromTui(tokens.slice(1));
+          return;
+        case "cleanup":
+          await this.cleanupWorktreesFromTui(tokens.slice(1));
+          return;
+        case "remove":
+          await this.removeWorktreeFromTui(tokens.slice(1));
+          return;
+      }
+    } catch (error) {
+      this.renderNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private renderWorktreePanel(args: string[] = []): void {
+    const includeRemoved = args.includes("--all") || args.includes("all");
+    const worktrees = listLoopWorktrees(this.app.store, this.app.workspace, { includeRemoved });
+    this.renderPanel("Worktrees", [
+      `${fg256(39, "Managed")} ${worktrees.length}`,
+      "",
+      ...(worktrees.length ? worktrees.map((worktree) => `  ${this.worktreeLabel(worktree)}`) : ["  no worktrees"]),
+    ]);
+  }
+
+  private renderWorktreeHealthPanel(): void {
+    const health = readLoopWorktreeHealth(this.app.store, this.app.workspace);
+    const notable = health.items.filter((item) => item.severity !== "ok").slice(0, 10);
+    this.renderPanel("Worktree Health", [
+      `  active ${health.counts.active} · adopted ${health.counts.adopted} · failed ${health.counts.failed} · removed ${health.counts.removed}`,
+      `  stale ${health.active_stale_count} · cleanup due ${health.cleanup_due_count} · attention ${health.attention_count}`,
+      "",
+      ...(notable.length
+        ? notable.map((item) => `  ${item.severity.padEnd(9)} ${item.reasons.join(",")} · ${this.worktreeLabel(item.worktree)}`)
+        : ["  no worktree health findings"]),
+    ]);
+  }
+
+  private async createWorktreeFromTui(args: string[]): Promise<void> {
+    const parsed = parseInlineWorktreeFlags(args);
+    const worktree = await createLoopWorktree(this.app.store, this.app.workspace, {
+      base_ref: parsed.baseRef,
+      branch: parsed.branch,
+      path: parsed.path,
+    });
+    this.renderPanel("Worktree Created", [`  ${this.worktreeLabel(worktree)}`]);
+  }
+
+  private async queueWorktreeRunFromTui(args: string[]): Promise<void> {
+    const parsed = parseInlineWorktreeFlags(args);
+    const prompt = parsed.args.length ? parsed.args.join(" ") : await this.ask("Isolated task", "Run repository validation and record evidence");
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      this.renderNotice("No isolated task queued.");
+      return;
+    }
+    const result = await queueDaemonRunInWorktree({
+      stateDir: this.options.stateDir,
+      workspaceRoot: this.app.workspace.root,
+      sessionId: this.#sessionId,
+      prompt: trimmed,
+      title: titleFromPrompt(trimmed),
+      configPath: this.app.configFiles[0],
+      baseRef: parsed.baseRef,
+      branch: parsed.branch,
+      path: parsed.path,
+    });
+    const status = await startDaemon({ stateDir: this.options.stateDir });
+    this.#sessionId = result.job.session_id;
+    this.renderPanel("Worktree Job Queued", [
+      `${fg256(48, "•")} ${this.worktreeLabel(result.worktree)}`,
+      `${fg256(48, "•")} ${this.jobLabel(result.job)}`,
+      `${fg256(39, "Daemon")} ${status.alive ? `alive pid ${status.pid}` : "start requested"}`,
+    ]);
+  }
+
+  private async removeWorktreeFromTui(args: string[]): Promise<void> {
+    const parsed = parseInlineWorktreeFlags(args);
+    const worktree = await removeLoopWorktree(this.app.store, this.app.workspace, requiredText(parsed.args[0], "worktree"), { force: parsed.force });
+    this.renderPanel("Worktree Removed", [`  ${this.worktreeLabel(worktree)}`]);
+  }
+
+  private async adoptWorktreeFromTui(args: string[]): Promise<void> {
+    const parsed = parseInlineWorktreeFlags(args);
+    const result = await adoptLoopWorktree(this.app.store, this.app.workspace, requiredText(parsed.args[0], "worktree"), {
+      dry_run: parsed.dryRun,
+      message: parsed.message,
+    });
+    this.renderPanel(parsed.dryRun ? "Worktree Adoption Check" : "Worktree Adopted", [
+      `  ${result.status} · ${result.worktree.worktree_id.slice(0, 12)} · ${result.worktree.branch}`,
+      `  base ${result.base_head.slice(0, 12)} · worktree ${result.worktree_head.slice(0, 12)}`,
+      ...(result.output ? [`  ${truncateToWidth(oneLine(result.output), Math.max(24, terminalWidth() - 4))}`] : []),
+    ]);
+  }
+
+  private async cleanupWorktreesFromTui(args: string[]): Promise<void> {
+    const parsed = parseInlineWorktreeFlags(args);
+    const result = await cleanupLoopWorktrees(this.app.store, this.app.workspace, {
+      dry_run: parsed.dryRun,
+      force: parsed.force,
+      older_than_ms: parsed.all ? 0 : parsed.olderThanMs,
+    });
+    this.renderPanel(parsed.dryRun ? "Worktree Cleanup Check" : "Worktrees Cleaned", [
+      `  candidates ${result.candidates.length} · removed ${result.removed.length} · failed ${result.failed.length}`,
+      `  cutoff ${result.cutoff}`,
+      ...result.candidates.slice(0, 8).map((worktree) => `  ${this.worktreeLabel(worktree)}`),
+    ]);
+  }
+
+  private worktreeLabel(worktree: ManagedWorktree): string {
+    const job = worktree.job_id ? ` · job ${worktree.job_id.slice(0, 12)}` : "";
+    const session = worktree.session_id ? ` · session ${worktree.session_id.slice(0, 12)}` : "";
+    return `${worktree.status.padEnd(8)} ${worktree.worktree_id.slice(0, 12)} · ${worktree.branch}${session}${job} · ${truncateToWidth(worktree.path, Math.max(24, terminalWidth() - 72))}`;
+  }
+
   private async renderDaemonView(args = ""): Promise<void> {
     const requested = args.trim().toLowerCase() as DaemonAction | "";
     const action = requested
@@ -3909,6 +5998,13 @@ export class TuiApp {
     this.renderPanel("Daemon", [
       `${fg256(39, "Daemon")} ${status.alive ? `alive pid ${status.pid}` : "not running"}`,
       "",
+      fg256(39, "Schedules"),
+      ...(status.schedules.length ? status.schedules.map((schedule) => `  ${this.automationScheduleLabel(schedule)}`) : ["  no schedules"]),
+      "",
+      fg256(39, "Discovery"),
+      ...(status.discovery_schedules.length ? status.discovery_schedules.map((schedule) => `  ${this.discoveryScheduleLabel(schedule)}`) : ["  no discovery schedules"]),
+      "",
+      fg256(39, "Jobs"),
       ...(status.jobs.length ? status.jobs.map((job) => `  ${this.jobLabel(job)}`) : ["  no jobs"]),
     ]);
   }
@@ -3920,20 +6016,32 @@ export class TuiApp {
       this.renderNotice("No background task queued.");
       return;
     }
-    const job = await queueDaemonRun({
-      stateDir: this.options.stateDir,
-      workspaceRoot: this.app.workspace.root,
-      sessionId: this.#sessionId,
-      prompt: trimmed,
-      title: titleFromPrompt(trimmed),
-      configPath: this.app.configFiles[0],
-    });
+    const isolation = resolveLoopBackgroundIsolation(undefined, this.app.config);
+    const queued = isolation === "worktree"
+      ? await queueDaemonRunInWorktree({
+        stateDir: this.options.stateDir,
+        workspaceRoot: this.app.workspace.root,
+        sessionId: this.#sessionId,
+        prompt: trimmed,
+        title: titleFromPrompt(trimmed),
+        configPath: this.app.configFiles[0],
+      })
+      : { job: await queueDaemonRun({
+        stateDir: this.options.stateDir,
+        workspaceRoot: this.app.workspace.root,
+        sessionId: this.#sessionId,
+        prompt: trimmed,
+        title: titleFromPrompt(trimmed),
+        configPath: this.app.configFiles[0],
+      }) };
     const status = await startDaemon({ stateDir: this.options.stateDir });
-    this.#sessionId = job.session_id;
+    this.#sessionId = queued.job.session_id;
+    const worktree = "worktree" in queued ? queued.worktree : undefined;
     this.renderPanel("Job Queued", [
-      `${fg256(48, "•")} ${this.jobLabel(job)}`,
+      worktree ? `${fg256(48, "•")} ${this.worktreeLabel(worktree)}` : undefined,
+      `${fg256(48, "•")} ${this.jobLabel(queued.job)}`,
       `${fg256(39, "Daemon")} ${status.alive ? `alive pid ${status.pid}` : "start requested"}`,
-    ]);
+    ].filter((line): line is string => Boolean(line)));
   }
 
   private async attachDaemonJobFromTui(): Promise<void> {
@@ -3996,13 +6104,23 @@ export class TuiApp {
     const session = this.app.store.getSession(job.session_id);
     const sessionLabel = session ? `${session.session_id.slice(0, 12)} · ${session.title}` : job.session_id.slice(0, 12);
     const kind = job.kind === "goal" ? "goal" : "run";
-    return `${job.status.padEnd(16)} ${kind.padEnd(4)} ${job.job_id.slice(0, 12)} · ${sessionLabel} · ${truncateToWidth(oneLine(job.prompt), Math.max(24, terminalWidth() - 60))}`;
+    const pauseReason = typeof job.metadata.pause_reason === "string" && job.metadata.pause_reason.trim() ? ` · ${job.metadata.pause_reason}` : "";
+    const worktree = typeof job.metadata.worktree_id === "string" && job.metadata.worktree_id.trim() ? ` · wt ${job.metadata.worktree_id.slice(0, 12)}` : "";
+    return `${job.status.padEnd(16)} ${kind.padEnd(4)} ${job.job_id.slice(0, 12)} · ${sessionLabel}${worktree}${pauseReason} · ${truncateToWidth(oneLine(job.prompt), Math.max(24, terminalWidth() - 60))}`;
   }
 
   private async renderDoctorView(args = ""): Promise<void> {
     const action = (args.trim().toLowerCase() || "status") as DoctorAction;
-    if (action !== "status" && action !== "run") {
-      this.renderNotice(`Unknown doctor action ${args}. Use /doctor status or /doctor run.`);
+    if (action !== "status" && action !== "run" && action !== "tools") {
+      this.renderNotice(`Unknown doctor action ${args}. Use /doctor status, /doctor run, or /doctor tools.`);
+      return;
+    }
+    if (action === "tools") {
+      this.renderLoopTranscriptPanel("Doctor Tools", [
+        `${fg256(75, "•")} queued built-in tool regression in this session`,
+        fg256(243, "The agent will exercise representative tools, then return a report and improvement suggestions."),
+      ]);
+      this.enqueuePrompt(buildDoctorToolsRegressionPrompt(), { renderPrompt: false });
       return;
     }
     if (action === "run") {
@@ -4045,6 +6163,7 @@ export class TuiApp {
       ...matrix.map((capability) => `${doctorMarker(capability.runtime_passed === true)} Omni ${capability.label} · ${omniCapabilitySummary(capability)} · optional`),
       "",
       `${fg256(39, "/doctor run")} probes configured endpoint metadata and optional Omni routes.`,
+      `${fg256(39, "/doctor tools")} asks the current agent to regress built-in tools in-session and report issues.`,
       fg256(243, "Strict release acceptance is intentionally separate from the user health check."),
       ...(errors.length
         ? [
@@ -4068,16 +6187,18 @@ export class TuiApp {
       "  Ctrl+T expands compact tool traces",
       "",
       fg256(39, "Commands"),
-      ...SLASH_COMMANDS.map((command) => `  /${command.name.padEnd(11)} ${command.description}`),
+      ...suggestedSlashCommands().map((command) => `  /${command.name.padEnd(11)} ${command.description}`),
       "",
       fg256(39, "Subcommands"),
       `  /skills    list · manage`,
-      `  /goal      mode auto|research|focus|explore|timebox · show · pause · resume · complete · drop`,
+      `  /loop      status · mode auto|research|focus|explore|timebox · health · review · verify · pause · resume · drop`,
+      `  /inbox     show · all · resolve · dismiss · promote`,
+      `  /self-improve status · propose · run --replay · report · adopt`,
       `  /plan      show · set · pause · resume · approve · drop`,
       `  /tools     expand · compact · last`,
-      `  /daemon    status · queue · attach · detach · cancel`,
+      `  /worktree  list · health · adopt`,
       `  /sessions  resume · new · all`,
-      `  /doctor    status · run`,
+      `  /doctor    status · run · tools`,
     ]);
   }
 
@@ -4217,7 +6338,7 @@ export class TuiApp {
       const message = error instanceof Error ? error.message : String(error);
       const renderedError = isAbortError(error) ? fg256(244, `Interrupted current loop: ${message}`) : fg256(203, message);
       if (options.suppressTranscript) {
-        this.renderGoalSupervisorRecord("Goal run failed", message, 203);
+        this.renderGoalSupervisorRecord("Loop run failed", message, 203);
       } else {
         this.writeTranscript(`${flushed}${flushed ? "\n" : ""}${renderedError}\n\n`);
       }
@@ -4511,7 +6632,7 @@ export class TuiApp {
   }
 
   private renderNotice(message: string): void {
-    this.renderPanel("Notice", [fg256(203, message)]);
+    this.renderLoopTranscriptPanel("Notice", [fg256(203, message)]);
   }
 
   private renderUnknownSlashCommand(input: string): void {
@@ -4576,14 +6697,261 @@ function parseModeAction(args: string, actions: Set<string>): { action?: string;
   return { rest: trimmed };
 }
 
-function parseGoalModeArgs(args: string): ParsedGoalModeOptions | undefined {
+function parseGoalStartArgs(args: string): { objective: string; hil_policy?: GoalHilPolicy; owner?: string; review_owner?: string } {
   const parts = args.trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) {
-    return undefined;
+  const parsed = extractGoalStartFlags(parts);
+  return {
+    objective: parsed.parts.join(" ").trim(),
+    hil_policy: parsed.hil_policy,
+    owner: parsed.owner,
+    review_owner: parsed.review_owner,
+  };
+}
+
+function extractGoalStartFlags(parts: string[]): { parts: string[]; hil_policy?: GoalHilPolicy; owner?: string; review_owner?: string } {
+  let hilPolicy: GoalHilPolicy | undefined;
+  let owner: string | undefined;
+  let reviewOwner: string | undefined;
+  const rest: string[] = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index] ?? "";
+    const normalized = part.toLowerCase();
+    if (normalized === "--review") {
+      hilPolicy = "review";
+      continue;
+    }
+    if (normalized === "--auto-review" || normalized === "--no-review") {
+      hilPolicy = "auto";
+      continue;
+    }
+    if (normalized === "--owner") {
+      owner = parts[index + 1];
+      index += 1;
+      continue;
+    }
+    if (normalized.startsWith("--owner=")) {
+      owner = part.slice("--owner=".length);
+      continue;
+    }
+    if (normalized === "--review-owner") {
+      reviewOwner = parts[index + 1];
+      index += 1;
+      continue;
+    }
+    if (normalized.startsWith("--review-owner=")) {
+      reviewOwner = part.slice("--review-owner=".length);
+      continue;
+    }
+    rest.push(part);
   }
+  return { parts: rest, hil_policy: hilPolicy, owner, review_owner: reviewOwner };
+}
+
+function parseGoalReviewArgs(args: string): { decision?: GoalReviewChoice; feedback?: string } {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+  const decision = parseGoalReviewChoice(parts[0]);
+  if (!decision) {
+    return { feedback: args.trim() || undefined };
+  }
+  return {
+    decision,
+    feedback: parts.slice(1).join(" ").trim() || undefined,
+  };
+}
+
+function parseGoalReviewChoice(value: string | undefined): GoalReviewChoice | undefined {
+  return value === "approve" || value === "reject" || value === "revise" || value === "block" ? value : undefined;
+}
+
+function goalReviewPendingDetail(pending: NonNullable<GoalRecord["pending_review_decision"]>): string {
+  const summary = pending.summary ?? pending.blocker ?? "human review required";
+  return `${pending.action} · loop task ${pending.source_horizon_generation} · ${oneLine(summary)}`;
+}
+
+function loopReviewPanelLines(goal: GoalRecord, width = terminalWidth()): string[] {
+  const pending = goal.pending_review_decision;
+  if (!pending) {
+    return ["No pending loop review decision."];
+  }
+  const lines: string[] = [];
+  appendGoalPanelField(lines, "objective", goal.objective, width, 250, 39);
+  appendGoalPanelField(lines, "decision", `${pending.action} from loop task ${pending.source_horizon_generation}`, width, 250, 203);
+  if (pending.summary) {
+    appendGoalPanelField(lines, "summary", pending.summary, width, 250, 39);
+  }
+  if (pending.blocker) {
+    appendGoalPanelField(lines, "blocker", pending.blocker, width, 203, 203);
+  }
+  if (pending.verification_evidence) {
+    appendGoalPanelField(lines, "evidence", compactLoopReviewEvidence(pending.verification_evidence), width, 244, 39);
+  }
+  if (pending.source_run_id) {
+    appendGoalPanelField(lines, "source", pending.source_run_id, width, 244, 39);
+  }
+  if (pending.active_step_id) {
+    appendGoalPanelField(lines, "active", pending.active_step_id, width, 244, 39);
+  }
+  if (pending.steps?.length) {
+    lines.push("");
+    lines.push(fg256(39, "Proposed next steps"));
+    for (const [index, step] of pending.steps.entries()) {
+      const status = step.status ? ` · ${step.status}` : "";
+      const id = step.id ? `${step.id} · ` : "";
+      appendLoopReviewText(lines, `- ${id}${step.title}${status}`, width, 250);
+      if (step.evidence) {
+        appendLoopReviewText(lines, `  evidence ${compactLoopReviewEvidence(step.evidence)}`, width, 244);
+      }
+    }
+  } else if (pending.action === "expand") {
+    lines.push("");
+    lines.push(fg256(203, "No proposed next steps were recorded for this expand decision."));
+  }
+  lines.push("");
+  lines.push(fg256(39, "Actions"));
+  lines.push(`${fg256(48, "  /loop review approve")} ${fg256(244, loopReviewApproveDescription(pending.action))}`);
+  lines.push(`${fg256(75, "  /loop review revise <feedback>")} ${fg256(244, "keep the loop active and re-plan with your feedback")}`);
+  lines.push(`${fg256(220, "  /loop review reject <reason>")} ${fg256(244, "discard the staged decision and keep the current loop task active")}`);
+  lines.push(`${fg256(203, "  /loop review block <reason>")} ${fg256(244, "pause the loop with a blocker")}`);
+  return lines;
+}
+
+function appendLoopReviewText(lines: string[], text: string, width: number, color: number): void {
+  for (const chunk of wrapPlainText(oneLine(text), Math.max(12, width - 4))) {
+    lines.push(fg256(color, chunk));
+  }
+}
+
+function renderTranscriptBand(title: string, body: string[], width = terminalWidth()): string[] {
+  return [
+    bgLine(236, "", width),
+    bgLine(236, `  ${fg256(75, title)}`, width),
+    bgLine(236, "", width),
+    ...body.map((line) => bgLine(236, `  ${line}`, width)),
+    bgLine(236, "", width),
+  ];
+}
+
+function resolveGoalSetupChoice<T extends string>(input: string, options: SelectOption<T>[]): T | undefined {
+  const normalized = input.trim().toLowerCase();
+  if (/^\d+$/.test(normalized)) {
+    return options[Number.parseInt(normalized, 10) - 1]?.value;
+  }
+  return options.find((option) => option.value.toLowerCase() === normalized || option.label.toLowerCase() === normalized)?.value;
+}
+
+function renderGoalSetupChoicePanel<T extends string>(
+  title: string,
+  options: SelectOption<T>[],
+  defaultValue: T,
+  error: string | undefined,
+  footer: string[],
+  width = terminalWidth(),
+): string[] {
+  const lines = [
+    bgLine(236, "", width),
+    bgLine(236, `  ${fg256(75, title)}`, width),
+    bgLine(236, `  ${fg256(244, "type a value or number, then press enter · esc cancels")}`, width),
+    bgLine(236, "", width),
+  ];
+  for (const [index, option] of options.entries()) {
+    const isDefault = option.value === defaultValue;
+    const value = isDefault ? fg256(48, option.value) : fg256(250, option.value);
+    const suffix = [
+      isDefault ? fg256(244, "default") : undefined,
+      option.description ? fg256(244, option.description) : undefined,
+    ].filter(Boolean).join(` ${fg256(238, "·")} `);
+    const detail = suffix ? ` ${fg256(238, "·")} ${suffix}` : "";
+    lines.push(bgLine(236, `  ${fg256(244, `${index + 1}.`)} ${fg256(250, option.label)} ${fg256(238, "·")} ${value}${detail}`, width));
+  }
+  for (const item of footer) {
+    lines.push(bgLine(236, `  ${fg256(244, item)}`, width));
+  }
+  if (error) {
+    lines.push(bgLine(236, "", width));
+    lines.push(bgLine(236, `  ${fg256(203, error)}`, width));
+  }
+  lines.push(bgLine(236, "", width));
+  return lines;
+}
+
+function renderGoalSetupValuePanel(title: string, detail: string[], error: string | undefined, width = terminalWidth()): string[] {
+  const lines = [
+    bgLine(236, "", width),
+    bgLine(236, `  ${fg256(75, title)}`, width),
+  ];
+  for (const item of detail) {
+    for (const chunk of wrapPlainText(oneLine(item), Math.max(12, width - 4))) {
+      lines.push(bgLine(236, `  ${fg256(244, chunk)}`, width));
+    }
+  }
+  if (error) {
+    lines.push(bgLine(236, "", width));
+    lines.push(bgLine(236, `  ${fg256(203, error)}`, width));
+  }
+  lines.push(bgLine(236, "", width));
+  return lines;
+}
+
+function compactLoopReviewEvidence(value: JsonObject): string {
+  const keys = Object.keys(value).sort();
+  if (!keys.length) {
+    return "recorded";
+  }
+  return keys
+    .slice(0, 6)
+    .map((key) => `${key}=${compactLoopReviewEvidenceValue(value[key])}`)
+    .join(" · ");
+}
+
+function compactLoopReviewEvidenceValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    return truncateToWidth(oneLine(value), 60);
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.length}]`;
+  }
+  if (typeof value === "object") {
+    return "{...}";
+  }
+  return String(value);
+}
+
+function loopReviewApproveDescription(action: GoalReflectionDecision): string {
+  switch (action) {
+    case "expand":
+      return "apply the staged decision and start the proposed loop task";
+    case "done":
+      return "apply the staged decision and complete the loop";
+    case "blocked":
+      return "apply the staged decision and pause with the recorded blocker";
+  }
+}
+
+function parseGoalModeArgs(args: string): ParsedGoalModeOptions | undefined {
+  const parsedFlags = parseGoalStartArgs(args);
+  const parts = parsedFlags.objective.split(/\s+/).filter(Boolean);
   let kind: GoalKind = "task";
   let approach: GoalApproachChoice = "auto";
   let targetHours: number | undefined;
+  if (!parts.length) {
+    if (parsedFlags.hil_policy || parsedFlags.owner || parsedFlags.review_owner) {
+      return {
+        kind,
+        strategy: undefined,
+        objective: "",
+        hil_policy: parsedFlags.hil_policy,
+        owner: parsedFlags.owner,
+        review_owner: parsedFlags.review_owner,
+      };
+    }
+    return undefined;
+  }
   const first = parts[0]?.toLowerCase();
   if (first === "auto") {
     parts.shift();
@@ -4605,6 +6973,9 @@ function parseGoalModeArgs(args: string): ParsedGoalModeOptions | undefined {
       kind,
       strategy: undefined,
       objective: parts.join(" ").trim(),
+      hil_policy: parsedFlags.hil_policy,
+      owner: parsedFlags.owner,
+      review_owner: parsedFlags.review_owner,
     };
   }
   const maybeApproach = parts[0]?.toLowerCase();
@@ -4623,6 +6994,9 @@ function parseGoalModeArgs(args: string): ParsedGoalModeOptions | undefined {
     kind,
     strategy: goalStrategyInputForApproach(approach, targetHours),
     objective: parts.join(" ").trim(),
+    hil_policy: parsedFlags.hil_policy,
+    owner: parsedFlags.owner,
+    review_owner: parsedFlags.review_owner,
   };
 }
 
@@ -4670,6 +7044,53 @@ function goalPanelStrategy(goal: GoalRecord): string {
     goalApproachName(strategy),
     strategy.target_hours !== undefined ? formatGoalCampaignHours(strategy.target_hours) : undefined,
   ].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function goalPanelReviewSummary(goal: GoalRecord): string {
+  const pending = goal.pending_review_decision;
+  if (!pending) {
+    return goal.hil_policy === "review" ? "manual" : "auto";
+  }
+  return [
+    `pending ${pending.action}`,
+    `loop task ${pending.source_horizon_generation}`,
+    pending.summary,
+  ].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function goalPanelProposedStepsSummary(goal: GoalRecord): string {
+  const steps = goal.pending_review_decision?.steps ?? [];
+  const first = steps[0]?.title;
+  return `${steps.length} step${steps.length === 1 ? "" : "s"}${first ? ` · ${first}` : ""}`;
+}
+
+function goalPanelVerificationSummary(verification: GoalLoopVerification): string {
+  return [
+    verification.provider,
+    verification.verifier_role,
+    verification.verdict,
+    verification.confidence,
+    verification.horizon_generation !== undefined ? `loop task ${verification.horizon_generation}` : undefined,
+    goalPanelMetricSummary(verification.metrics),
+    verification.failure_reason,
+  ].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function goalPanelMetricSummary(metrics: JsonObject | undefined): string | undefined {
+  if (!metrics) {
+    return undefined;
+  }
+  const primary = typeof metrics.primary_metric === "string" ? metrics.primary_metric : undefined;
+  const metric = typeof metrics.metric === "number" || typeof metrics.metric === "string" ? String(metrics.metric) : undefined;
+  if (primary && metric) {
+    return `${primary} ${metric}`;
+  }
+  return metric;
+}
+
+function goalPanelSkillSnapshotSummary(snapshot: { skill_count: number; skills: Array<{ id: string }> }): string {
+  const ids = snapshot.skills.map((skill) => skill.id).slice(0, 4);
+  return `${snapshot.skill_count} enabled${ids.length ? ` · ${ids.join(", ")}` : ""}${snapshot.skill_count > ids.length ? ", ..." : ""}`;
 }
 
 function goalPanelCandidates(goal: GoalRecord): string {
@@ -4725,7 +7146,28 @@ function goalPanelReflectionsSummary(reflections: GoalReflectionSnapshot[]): str
   if (!latest) {
     return "none";
   }
-  return `${reflections.length} recorded · latest ${latest.decision} · horizon ${latest.generation}`;
+  return `${reflections.length} recorded · latest ${latest.decision} · loop task ${latest.generation}`;
+}
+
+function goalPanelAttemptsSummary(attempts: GoalLoopAttempt[]): string {
+  const counts = new Map<string, number>();
+  for (const attempt of attempts) {
+    counts.set(attempt.status, (counts.get(attempt.status) ?? 0) + 1);
+  }
+  const parts = [
+    `${attempts.length} total`,
+    countWithLabel(counts.get("completed"), "completed"),
+    countWithLabel(counts.get("running"), "running"),
+    countWithLabel(counts.get("failed"), "failed"),
+  ].filter((part): part is string => Boolean(part));
+  const latest = attempts.at(-1);
+  const latestClass = latest?.request_class ?? "run";
+  const latestLabel = latest ? `latest ${latestClass}${latest.visibility === "internal" ? " internal" : ""}` : undefined;
+  return [...parts, latestLabel].filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function countWithLabel(count: number | undefined, label: string): string | undefined {
+  return count ? `${count} ${label}` : undefined;
 }
 
 function renderGoalPanelHorizons(horizons: GoalHorizonSnapshot[], width: number, reflections: GoalReflectionSnapshot[] = []): string[] {
@@ -4741,7 +7183,7 @@ function renderGoalPanelHorizons(horizons: GoalHorizonSnapshot[], width: number,
         lines.push(...renderGoalPanelHorizonStep(step, stepIndex === horizon.steps.length - 1, width));
       }
     } else {
-      lines.push(`${fg256(244, "└─")} ${fg256(244, "-")} ${fg256(244, "no sub-goals")}`);
+      lines.push(`${fg256(244, "└─")} ${fg256(244, "-")} ${fg256(244, "no steps")}`);
     }
     for (const reflection of reflectionsByGeneration.get(horizon.generation) ?? []) {
       lines.push(...renderGoalPanelHorizonReflection(reflection, width));
@@ -4757,7 +7199,7 @@ function renderGoalHorizonHeading(horizon: GoalHorizonSnapshot, width: number): 
   const marker = horizon.current ? fg256(75, "◆") : fg256(244, "◇");
   const markerPlain = "◇ ";
   const title = horizon.title ? ` · ${horizon.title}` : "";
-  const text = `Horizon ${horizon.generation}${horizon.current ? " current" : ""}${title}`;
+  const text = `Loop task ${horizon.generation}${horizon.current ? " current" : ""}${title}`;
   const room = Math.max(12, width - visibleWidth(markerPlain));
   const chunks = wrapPlainText(oneLine(text), room);
   const continuation = " ".repeat(visibleWidth(markerPlain));
@@ -4768,7 +7210,7 @@ function isSameGoalHorizonTitle(summary: string, title: string | undefined): boo
   if (!title) {
     return false;
   }
-  const normalizedSummary = summary.replace(/^horizon\s+\d+\s*(?:[·:.-])\s*/i, "").trim();
+  const normalizedSummary = summary.replace(/^(?:horizon|loop task)\s+\d+\s*(?:[·:.-])\s*/i, "").trim();
   return normalizedSummary === title;
 }
 
@@ -4793,14 +7235,14 @@ function appendGoalTreeText(lines: string[], prefixPlain: string, text: string, 
 
 function renderGoalPanelHorizonReflection(reflection: GoalReflectionSnapshot, width: number): string[] {
   const text = reflection.decision === "done" ? "" : reflection.summary ?? reflection.blocker ?? "";
-  const prefixPlain = `│  reflection ${reflection.decision}${text ? " · " : ""}`;
-  const prefix = `${fg256(244, "│  ")}${fg256(39, "reflection")} ${goalReflectionDecisionLabel(reflection.decision)}${text ? fg256(244, " · ") : ""}`;
+  const prefixPlain = `│  decision ${reflection.decision}${text ? " · " : ""}`;
+  const prefix = `${fg256(244, "│  ")}${fg256(39, "decision")} ${goalReflectionDecisionLabel(reflection.decision)}${text ? fg256(244, " · ") : ""}`;
   if (!text) {
     return [prefix.trimEnd()];
   }
   const room = Math.max(12, width - visibleWidth(prefixPlain));
   const chunks = wrapPlainText(oneLine(text), room);
-  const continuation = `${fg256(244, "│  ")}${" ".repeat(visibleWidth(`reflection ${reflection.decision} · `))}`;
+  const continuation = `${fg256(244, "│  ")}${" ".repeat(visibleWidth(`decision ${reflection.decision} · `))}`;
   return chunks.map((chunk, index) => (index === 0 ? `${prefix}${fg256(250, chunk)}` : `${continuation}${fg256(250, chunk)}`));
 }
 
@@ -4829,7 +7271,7 @@ function renderGoalPanelHorizonStep(step: GoalHorizonSnapshot["steps"][number], 
 
 function goalHorizonProgressSummary(horizon: GoalHorizonSnapshot): string {
   if (!horizon.steps.length) {
-    return "0 sub-goals";
+    return "0 steps";
   }
   const order = ["completed", "in_progress", "blocked", "pending", "skipped"];
   const labels: Record<string, string> = {
@@ -5220,6 +7662,8 @@ function terminalInputTokens(value: string, pasteState?: TerminalPasteState): st
     "\u001b[1~",
     "\u001b[3~",
     "\u001b[4~",
+    "\u001b[5~",
+    "\u001b[6~",
   ];
   for (let index = 0; index < value.length;) {
     if (pasteState?.pending !== undefined) {
@@ -5616,6 +8060,758 @@ function titleFromPrompt(prompt: string): string {
   return firstLine ? `daemon:${truncateToWidth(firstLine, 48)}` : "daemon task";
 }
 
+function requiredText(value: string | undefined, name: string): string {
+  if (!value) {
+    throw new Error(`Missing ${name}`);
+  }
+  return value;
+}
+
+function parseAutomationFlags(args: string[]): { isolation?: AutomationIsolation; review_policy?: AutomationReviewPolicy; args: string[] } {
+  let isolation: AutomationIsolation | undefined;
+  let reviewPolicy: AutomationReviewPolicy | undefined;
+  const output: string[] = [];
+  for (const arg of args) {
+    if (arg === "--worktree") {
+      isolation = "worktree";
+    } else if (arg === "--active-checkout") {
+      isolation = "active_checkout";
+    } else if (arg === "--review") {
+      reviewPolicy = "review";
+    } else if (arg === "--auto") {
+      reviewPolicy = "auto";
+    } else {
+      output.push(arg);
+    }
+  }
+  return { isolation, review_policy: reviewPolicy, args: output };
+}
+
+function parseInboxPromoteFlags(args: string[]): { isolation?: LoopInboxPromotionIsolation; item_id?: string } {
+  let isolation: LoopInboxPromotionIsolation | undefined;
+  const output: string[] = [];
+  for (const arg of args) {
+    if (arg === "--worktree") {
+      isolation = "worktree";
+    } else if (arg === "--active-checkout") {
+      isolation = "active_checkout";
+    } else {
+      output.push(arg);
+    }
+  }
+  return { isolation, item_id: output[0] };
+}
+
+function parseInboxRouteAddFlags(args: string[]): {
+  route_id?: string;
+  assignee: string;
+  note?: string;
+  kind?: LoopInboxItemKind;
+  source?: string;
+  priority?: LoopInboxPriority;
+} {
+  const owner = args[0]?.trim();
+  if (!owner) {
+    throw new Error("Usage: /inbox route add <owner> --kind <kind>|--source <source>|--priority <priority> [--id route_id] [note]");
+  }
+  let rest = args.slice(1);
+  const id = consumeInlineFlagValue(rest, "--id");
+  rest = id.rest;
+  const kind = consumeInlineFlagValue(rest, "--kind");
+  rest = kind.rest;
+  const source = consumeInlineFlagValue(rest, "--source");
+  rest = source.rest;
+  const priority = consumeInlineFlagValue(rest, "--priority");
+  rest = priority.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown inbox route option: ${unknown}`);
+  }
+  return {
+    route_id: id.value,
+    assignee: owner,
+    note: rest.join(" "),
+    kind: parseInboxKindFlag(kind.value),
+    source: source.value,
+    priority: parseInboxPriorityFlag(priority.value),
+  };
+}
+
+function parseOptRunFlags(args: string[]): { replay: boolean; proposal_id?: string } {
+  let replay = false;
+  let proposalId: string | undefined;
+  for (const arg of args) {
+    if (arg === "--replay") {
+      replay = true;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`Unknown self-improve run option: ${arg}`);
+    }
+    if (proposalId) {
+      throw new Error(`Unexpected self-improve run argument: ${arg}`);
+    }
+    proposalId = arg;
+  }
+  return { replay, proposal_id: proposalId };
+}
+
+function parseInboxKindFlag(value: string | undefined): LoopInboxItemKind | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    value === "goal_review"
+    || value === "goal_blocker"
+    || value === "goal_paused"
+    || value === "verification_failure"
+    || value === "stale_work"
+    || value === "automation_review"
+    || value === "action_review"
+    || value === "discovery_candidate"
+    || value === "daemon_job"
+    || value === "skill_proposal"
+    || value === "self_improve_replay"
+  ) {
+    return value;
+  }
+  throw new Error(`Unknown inbox item kind: ${value}`);
+}
+
+function parseInboxPriorityFlag(value: string | undefined): LoopInboxPriority | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === "high" || value === "medium" || value === "low") {
+    return value;
+  }
+  throw new Error(`Unknown inbox priority: ${value}`);
+}
+
+function parseInboxViewArgs(args: string[]): { args: string[]; includeDone: boolean; includeMuted: boolean; assignee?: string; onlyUnassigned?: boolean } {
+  const output: string[] = [];
+  let includeDone = false;
+  let includeMuted = false;
+  let assignee: string | undefined;
+  let onlyUnassigned = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--all" || arg === "all") {
+      includeDone = true;
+      includeMuted = true;
+      continue;
+    }
+    if (arg === "--muted" || arg === "muted") {
+      includeMuted = true;
+      continue;
+    }
+    if (arg === "--unassigned") {
+      onlyUnassigned = true;
+      continue;
+    }
+    if (arg === "--assignee") {
+      assignee = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (arg?.startsWith("--assignee=")) {
+      assignee = arg.slice("--assignee=".length);
+      continue;
+    }
+    if (arg) {
+      output.push(arg);
+    }
+  }
+  if (assignee) {
+    onlyUnassigned = false;
+  }
+  return { args: output, includeDone, includeMuted, assignee, onlyUnassigned };
+}
+
+function routeSelectorLabel(route: { kind?: string; source?: string; priority?: string }): string {
+  const selectors = [
+    route.kind ? `kind:${route.kind}` : undefined,
+    route.source ? `source:${route.source}` : undefined,
+    route.priority ? `priority:${route.priority}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+  return selectors.length ? ` · ${selectors.join(" ")}` : "";
+}
+
+function inboxFilterLabel(parsed: { assignee?: string; onlyUnassigned?: boolean; includeMuted?: boolean }): string | undefined {
+  if (parsed.assignee) {
+    return fg256(244, `owner:${parsed.assignee}`);
+  }
+  if (parsed.onlyUnassigned) {
+    return fg256(244, "unassigned");
+  }
+  if (parsed.includeMuted) {
+    return fg256(244, "including muted");
+  }
+  return undefined;
+}
+
+function parseDiscoveryConnectorFlags(args: string[]): { repo?: string; labels?: string[]; limit?: number } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const labels = consumeRepeatedFlagValues(rest, "--label");
+  rest = labels.rest;
+  const limit = consumeInlineFlagValue(rest, "--limit");
+  rest = limit.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  let parsedLimit: number | undefined;
+  if (limit.value !== undefined) {
+    const value = Number.parseInt(limit.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--limit requires a positive integer");
+    }
+    parsedLimit = value;
+  }
+  return {
+    repo: repo.value,
+    labels: dedupeDiscoveryLabels(labels.values.map(parseDiscoveryGitHubLabel)),
+    limit: parsedLimit,
+  };
+}
+
+function parseDiscoveryAssignedConnectorFlags(args: string[]): { repo?: string; assignee?: string; labels?: string[]; limit?: number } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const assignee = consumeInlineFlagValue(rest, "--assignee");
+  rest = assignee.rest;
+  const labels = consumeRepeatedFlagValues(rest, "--label");
+  rest = labels.rest;
+  const limit = consumeInlineFlagValue(rest, "--limit");
+  rest = limit.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  let parsedLimit: number | undefined;
+  if (limit.value !== undefined) {
+    const value = Number.parseInt(limit.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--limit requires a positive integer");
+    }
+    parsedLimit = value;
+  }
+  return {
+    repo: repo.value,
+    assignee: assignee.value,
+    labels: dedupeDiscoveryLabels(labels.values.map(parseDiscoveryGitHubLabel)),
+    limit: parsedLimit,
+  };
+}
+
+function parseDiscoveryDeploymentFlags(args: string[]): { repo?: string; environment?: string; ref?: string; limit?: number } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const environment = consumeInlineFlagValue(rest, "--environment");
+  rest = environment.rest;
+  const ref = consumeInlineFlagValue(rest, "--ref");
+  rest = ref.rest;
+  const limit = consumeInlineFlagValue(rest, "--limit");
+  rest = limit.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  let parsedLimit: number | undefined;
+  if (limit.value !== undefined) {
+    const value = Number.parseInt(limit.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--limit requires a positive integer");
+    }
+    parsedLimit = value;
+  }
+  return {
+    repo: repo.value,
+    environment: environment.value,
+    ref: ref.value,
+    limit: parsedLimit,
+  };
+}
+
+function parseDiscoveryNotificationFlags(args: string[]): { repo?: string; participating?: boolean; limit?: number } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const limit = consumeInlineFlagValue(rest, "--limit");
+  rest = limit.rest;
+  const participating = rest.includes("--participating");
+  rest = rest.filter((arg) => arg !== "--participating");
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  let parsedLimit: number | undefined;
+  if (limit.value !== undefined) {
+    const value = Number.parseInt(limit.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--limit requires a positive integer");
+    }
+    parsedLimit = value;
+  }
+  return {
+    repo: repo.value,
+    participating,
+    limit: parsedLimit,
+  };
+}
+
+function parseDiscoveryHttpFlags(args: string[]): { url?: string; status?: number; timeout_ms?: number } {
+  let rest = [...args];
+  const status = consumeInlineFlagValue(rest, "--status");
+  rest = status.rest;
+  const timeout = consumeInlineFlagValue(rest, "--timeout-ms");
+  rest = timeout.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  if (rest.length > 1) {
+    throw new Error(`Unexpected discovery argument: ${rest[1]}`);
+  }
+  let parsedStatus: number | undefined;
+  if (status.value !== undefined) {
+    const value = Number.parseInt(status.value, 10);
+    if (!Number.isInteger(value) || value < 100 || value > 599) {
+      throw new Error("--status requires an integer from 100 to 599");
+    }
+    parsedStatus = value;
+  }
+  let parsedTimeout: number | undefined;
+  if (timeout.value !== undefined) {
+    const value = Number.parseInt(timeout.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--timeout-ms requires a positive integer");
+    }
+    parsedTimeout = value;
+  }
+  return {
+    url: rest[0],
+    status: parsedStatus,
+    timeout_ms: parsedTimeout,
+  };
+}
+
+function parseDiscoveryNpmPackageFlags(args: string[]): { package_name?: string; version?: string; tag?: string } {
+  let rest = [...args];
+  const version = consumeInlineFlagValue(rest, "--version");
+  rest = version.rest;
+  const tag = consumeInlineFlagValue(rest, "--tag");
+  rest = tag.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown discovery option: ${unknown}`);
+  }
+  if (rest.length > 1) {
+    throw new Error(`Unexpected discovery argument: ${rest[1]}`);
+  }
+  return {
+    package_name: rest[0],
+    version: version.value,
+    tag: tag.value,
+  };
+}
+
+function parseGitHubPrVerifierArgs(args: string[]): { pr: string; repo?: string } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
+  }
+  const pr = rest[0]?.trim();
+  if (!pr) {
+    throw new Error("Usage: /loop verify-github-pr <pr> [--repo owner/name]");
+  }
+  return { pr, repo: repo.value };
+}
+
+function parseGitHubReviewRequestVerifierArgs(args: string[]): { pr: string; repo?: string; reviewer?: string } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const reviewer = consumeInlineFlagValue(rest, "--reviewer");
+  rest = reviewer.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
+  }
+  const pr = rest[0]?.trim();
+  if (!pr) {
+    throw new Error("Usage: /loop verify-github-review-request <pr> [--repo owner/name] [--reviewer login]");
+  }
+  return { pr, repo: repo.value, reviewer: reviewer.value };
+}
+
+function parseGitHubIssueVerifierArgs(args: string[]): { issue: string; repo?: string } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
+  }
+  const issue = rest[0]?.trim();
+  if (!issue) {
+    throw new Error("Usage: /loop verify-github-issue-status <issue> [--repo owner/name]");
+  }
+  return { issue, repo: repo.value };
+}
+
+function parseGitHubNotificationVerifierArgs(args: string[]): { thread: string } {
+  const unknown = args.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub notification verifier option: ${unknown}`);
+  }
+  const thread = args[0]?.trim();
+  if (!thread) {
+    throw new Error("Usage: /loop verify-github-notification <thread_id>");
+  }
+  return { thread };
+}
+
+function parseGitHubRunVerifierArgs(args: string[]): { run: string; repo?: string; attempt?: number } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const attempt = consumeInlineFlagValue(rest, "--attempt");
+  rest = attempt.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
+  }
+  const run = rest[0]?.trim();
+  if (!run) {
+    throw new Error("Usage: /loop verify-github-run <run_id> [--repo owner/name] [--attempt N]");
+  }
+  let parsedAttempt: number | undefined;
+  if (attempt.value !== undefined) {
+    const value = Number.parseInt(attempt.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--attempt requires a positive integer");
+    }
+    parsedAttempt = value;
+  }
+  return { run, repo: repo.value, attempt: parsedAttempt };
+}
+
+function parseGitHubWorkflowVerifierArgs(args: string[]): { workflow: string; repo?: string; branch?: string; event?: string; commit?: string } {
+  let rest = [...args];
+  const workflow = consumeInlineFlagValue(rest, "--workflow");
+  rest = workflow.rest;
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const branch = consumeInlineFlagValue(rest, "--branch");
+  rest = branch.rest;
+  const event = consumeInlineFlagValue(rest, "--event");
+  rest = event.rest;
+  const commit = consumeInlineFlagValue(rest, "--commit");
+  rest = commit.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub workflow verifier option: ${unknown}`);
+  }
+  const targetWorkflow = workflow.value ?? rest[0]?.trim();
+  if (!targetWorkflow) {
+    throw new Error("Usage: /loop verify-github-workflow --workflow WORKFLOW [--repo owner/name] [--branch BRANCH] [--event EVENT] [--commit SHA]");
+  }
+  return {
+    workflow: targetWorkflow,
+    repo: repo.value,
+    branch: branch.value,
+    event: event.value,
+    commit: commit.value,
+  };
+}
+
+function parseGitHubDeploymentVerifierArgs(args: string[]): { repo: string; deployment_id?: string; environment?: string; ref?: string; expect?: string } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const deploymentId = consumeInlineFlagValue(rest, "--deployment-id");
+  rest = deploymentId.rest;
+  const environment = consumeInlineFlagValue(rest, "--environment");
+  rest = environment.rest;
+  const ref = consumeInlineFlagValue(rest, "--ref");
+  rest = ref.rest;
+  const expect = consumeInlineFlagValue(rest, "--expect");
+  rest = expect.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub deployment verifier option: ${unknown}`);
+  }
+  if (rest.length) {
+    throw new Error(`Unexpected GitHub deployment verifier argument: ${rest[0]}`);
+  }
+  if (!repo.value || (!deploymentId.value && !environment.value)) {
+    throw new Error("Usage: /loop verify-github-deployment --repo owner/name (--deployment-id ID|--environment ENV) [--ref REF] [--expect success|inactive|failure|any]");
+  }
+  return {
+    repo: repo.value,
+    deployment_id: deploymentId.value,
+    environment: environment.value,
+    ref: ref.value,
+    expect: parseGitHubDeploymentExpectedArg(expect.value),
+  };
+}
+
+function parseGitHubReleaseVerifierArgs(args: string[]): { tag: string; repo?: string; expect?: string } {
+  let rest = [...args];
+  const repo = consumeInlineFlagValue(rest, "--repo");
+  rest = repo.rest;
+  const expect = consumeInlineFlagValue(rest, "--expect");
+  rest = expect.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown GitHub release verifier option: ${unknown}`);
+  }
+  const tag = rest[0]?.trim();
+  if (!tag) {
+    throw new Error("Usage: /loop verify-github-release <tag> [--repo owner/name] [--expect published|draft|any]");
+  }
+  return { tag, repo: repo.value, expect: parseGitHubReleaseExpectedArg(expect.value) };
+}
+
+function parseGitHubReleaseExpectedArg(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "published" || normalized === "draft" || normalized === "any") {
+    return normalized;
+  }
+  throw new Error("--expect must be published, draft, or any");
+}
+
+function parseGitHubDeploymentExpectedArg(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "success" || normalized === "inactive" || normalized === "failure" || normalized === "any") {
+    return normalized;
+  }
+  throw new Error("--expect must be success, inactive, failure, or any");
+}
+
+function parseNpmPackageVerifierArgs(args: string[]): { package_name: string; version: string; tag?: string; timeout_ms?: number } {
+  let rest = [...args];
+  const version = consumeInlineFlagValue(rest, "--version");
+  rest = version.rest;
+  const tag = consumeInlineFlagValue(rest, "--tag");
+  rest = tag.rest;
+  const timeout = consumeInlineFlagValue(rest, "--timeout-ms");
+  rest = timeout.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown npm verifier option: ${unknown}`);
+  }
+  const packageName = rest[0]?.trim();
+  if (!packageName || !version.value?.trim()) {
+    throw new Error("Usage: /loop verify-npm-package <package> --version X [--tag latest] [--timeout-ms N]");
+  }
+  let parsedTimeout: number | undefined;
+  if (timeout.value !== undefined) {
+    const value = Number.parseInt(timeout.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--timeout-ms requires a positive integer");
+    }
+    parsedTimeout = value;
+  }
+  return {
+    package_name: packageName,
+    version: version.value,
+    tag: tag.value,
+    timeout_ms: parsedTimeout,
+  };
+}
+
+function parseHttpVerifierArgs(args: string[]): { url: string; status?: number; timeout_ms?: number } {
+  let rest = [...args];
+  const status = consumeInlineFlagValue(rest, "--status");
+  rest = status.rest;
+  const timeout = consumeInlineFlagValue(rest, "--timeout-ms");
+  rest = timeout.rest;
+  const unknown = rest.find((arg) => arg.startsWith("--"));
+  if (unknown) {
+    throw new Error(`Unknown HTTP verifier option: ${unknown}`);
+  }
+  const url = rest[0]?.trim();
+  if (!url) {
+    throw new Error("Usage: /loop verify-http <url> [--status N] [--timeout-ms N]");
+  }
+  let parsedStatus: number | undefined;
+  if (status.value !== undefined) {
+    const value = Number.parseInt(status.value, 10);
+    if (!Number.isInteger(value) || value < 100 || value > 599) {
+      throw new Error("--status requires an integer from 100 to 599");
+    }
+    parsedStatus = value;
+  }
+  let parsedTimeout: number | undefined;
+  if (timeout.value !== undefined) {
+    const value = Number.parseInt(timeout.value, 10);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("--timeout-ms requires a positive integer");
+    }
+    parsedTimeout = value;
+  }
+  return { url, status: parsedStatus, timeout_ms: parsedTimeout };
+}
+
+function parseInlineWorktreeFlags(args: string[]): {
+  args: string[];
+  baseRef?: string;
+  branch?: string;
+  path?: string;
+  force?: boolean;
+  dryRun?: boolean;
+  message?: string;
+  olderThanMs?: number;
+  all?: boolean;
+} {
+  let rest = [...args];
+  const base = consumeInlineFlagValue(rest, "--base");
+  rest = base.rest;
+  const branch = consumeInlineFlagValue(rest, "--branch");
+  rest = branch.rest;
+  const worktreePath = consumeInlineFlagValue(rest, "--path");
+  rest = worktreePath.rest;
+  const message = consumeInlineFlagValue(rest, "--message");
+  rest = message.rest;
+  const olderThan = consumeInlineFlagValue(rest, "--older-than");
+  rest = olderThan.rest;
+  const force = rest.includes("--force");
+  const dryRun = rest.includes("--dry-run");
+  const all = rest.includes("--all") || rest.includes("all");
+  rest = rest.filter((arg) => arg !== "--force" && arg !== "--dry-run" && arg !== "--all" && arg !== "all");
+  return {
+    args: rest,
+    baseRef: base.value,
+    branch: branch.value,
+    path: worktreePath.value,
+    force,
+    dryRun,
+    message: message.value,
+    olderThanMs: olderThan.value ? parseAutomationInterval(olderThan.value) : undefined,
+    all,
+  };
+}
+
+function consumeInlineFlagValue(args: string[], flag: string): { value?: string; rest: string[] } {
+  const index = args.indexOf(flag);
+  if (index < 0) {
+    return { rest: args };
+  }
+  const value = args[index + 1];
+  if (!value) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return { value, rest: [...args.slice(0, index), ...args.slice(index + 2)] };
+}
+
+function consumeRepeatedFlagValues(args: string[], flag: string): { values: string[]; rest: string[] } {
+  const values: string[] = [];
+  const rest: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === flag) {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error(`${flag} requires a value`);
+      }
+      values.push(value);
+      index += 1;
+    } else {
+      rest.push(arg);
+    }
+  }
+  return { values, rest };
+}
+
+function parseDiscoveryGitHubLabel(value: string): string {
+  const label = value.trim();
+  if (!label || /[\r\n]/.test(label)) {
+    throw new Error("--label requires a non-empty single-line label");
+  }
+  return label;
+}
+
+function dedupeDiscoveryLabels(labels: string[]): string[] | undefined {
+  if (!labels.length) {
+    return undefined;
+  }
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const label of labels) {
+    const key = label.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      output.push(label);
+    }
+  }
+  return output;
+}
+
+function formatAutomationInterval(intervalMs: number): string {
+  const day = 86_400_000;
+  const hour = 3_600_000;
+  const minute = 60_000;
+  if (intervalMs % day === 0) {
+    return `${intervalMs / day}d`;
+  }
+  if (intervalMs % hour === 0) {
+    return `${intervalMs / hour}h`;
+  }
+  if (intervalMs % minute === 0) {
+    return `${intervalMs / minute}m`;
+  }
+  return formatDuration(intervalMs);
+}
+
+function renderInboxItemLines(item: LoopInboxItem, index: number): string[] {
+  const markerColor = item.priority === "high" ? 203 : item.priority === "medium" ? 214 : 244;
+  const heading = [
+    `${String(index).padStart(2)}.`,
+    fg256(markerColor, item.priority.padEnd(6)),
+    item.status.padEnd(7),
+    item.kind,
+    truncateToWidth(oneLine(item.title), Math.max(20, terminalWidth() - 34)),
+  ].join(" ");
+  const details = [
+    item.session_id ? `session ${item.session_id.slice(0, 12)}` : undefined,
+    item.job_id ? `job ${item.job_id.slice(0, 12)}` : undefined,
+    item.run_id ? `run ${item.run_id.slice(0, 12)}` : undefined,
+    item.source ? `source ${item.source_label ?? item.source}` : undefined,
+    item.assignee ? `owner ${item.assignee}` : undefined,
+    item.routed_by ? `route ${item.routed_by}` : undefined,
+    item.muted ? `muted ${item.mute_key ?? "item"}` : undefined,
+    item.disposition ? item.disposition : undefined,
+    item.snoozed_until ? `until ${item.snoozed_until}` : undefined,
+    item.muted_until ? `until ${item.muted_until}` : undefined,
+    item.stale ? `stale ${item.stale_reason ?? "work"}${item.stale_age_ms !== undefined ? ` ${formatDuration(item.stale_age_ms)}` : ""}` : undefined,
+    item.detail ? truncateToWidth(oneLine(item.detail), Math.max(24, terminalWidth() - 8)) : undefined,
+    item.assignment_note ? truncateToWidth(oneLine(item.assignment_note), Math.max(24, terminalWidth() - 8)) : undefined,
+    item.routing_note && item.routing_note !== item.assignment_note ? truncateToWidth(oneLine(item.routing_note), Math.max(24, terminalWidth() - 8)) : undefined,
+    item.mute_note ? truncateToWidth(oneLine(item.mute_note), Math.max(24, terminalWidth() - 8)) : undefined,
+    item.disposition_note ? truncateToWidth(oneLine(item.disposition_note), Math.max(24, terminalWidth() - 8)) : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return [
+    `  ${heading}`,
+    ...(details.length ? [`    ${fg256(244, details.join(" · "))}`] : []),
+    ...(item.action ? [`    ${fg256(39, item.action)}`] : []),
+  ];
+}
+
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -5728,7 +8924,7 @@ function toolActivityAction(name: string, ok = true): string {
     case "todo_write":
       return `Updated todo${failed}`;
     case "goal":
-      return `Updated goal${failed}`;
+      return `Updated loop${failed}`;
     case "plan":
       return `Updated plan${failed}`;
     case "complete_step":
@@ -5754,6 +8950,10 @@ function compactToolSummary(summary: string): string {
   return summary
     .replace(/^Command exited\s+0$/i, "exited 0")
     .replace(/^Command exited\s+(\d+)$/i, "exited $1")
+    .replace(/^Goal horizon expanded/i, "Loop task expanded")
+    .replace(/^Goal reflection recorded/i, "Loop decision recorded")
+    .replace(/^Goal complete/i, "Loop complete")
+    .replace(/^Goal /i, "Loop ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -5781,6 +8981,30 @@ function checkbox(ok: boolean): string {
 
 function doctorMarker(ok: boolean): string {
   return ok ? `${fg256(48, "✓")} ` : `${fg256(244, "·")} `;
+}
+
+function buildDoctorToolsRegressionPrompt(): string {
+  return [
+    "Run a built-in tools regression in this current session and then report findings.",
+    "",
+    "Scope:",
+    "- Exercise representative built-in tools through real tool calls, not by reading code only.",
+    "- Cover read/search, file write/edit/patch, code intelligence, process management, git read-only tools, resources/session notes, skills, and any configured network or Omni tools that are safe and already configured.",
+    "- Treat unconfigured, gated, or externally unavailable capabilities as skipped, not failed.",
+    "- Subagent is optional: use it only if it is useful to verify child-session behavior without creating extra work.",
+    "",
+    "Safety and loop boundaries:",
+    "- Do not create, resume, complete, drop, or review a loop. If a loop is active, only inspect/update evidence when directly relevant.",
+    "- Do not run destructive shell commands or mutate user project files outside a temporary regression sandbox.",
+    "- If you need files, create them under .inferoa/tool-regression/ and remove temporary files before the final report when practical.",
+    "- Keep commands bounded with timeouts and avoid long-running package installs.",
+    "",
+    "Required final report:",
+    "- Passed checks, failed checks, skipped checks.",
+    "- Bugs or UX issues with concrete tool names and evidence.",
+    "- Improvement suggestions prioritized by impact.",
+    "- Any cleanup left behind.",
+  ].join("\n");
 }
 
 function permissionColor(permission: string): number {
@@ -5920,6 +9144,84 @@ function compactWorkspacePath(root: string): string {
     return `~${root.slice(home.length)}`;
   }
   return root;
+}
+
+function formatCompactNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+  }
+  if (absolute >= 1_000) {
+    return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(Math.trunc(value));
+}
+
+function compactRecordCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+  return entries.length ? entries.map(([key, count]) => `${key} ${count}`).join(" · ") : "none";
+}
+
+function formatConnectorActionOptions(action: { area: string; method?: string; review_event?: string; add_labels?: string[]; remove_labels?: string[]; delete_branch?: boolean; generate_notes?: boolean; draft?: boolean; verify_tag?: boolean; ref?: string; fields?: Array<{ key: string; value: string }>; dist_tag?: string; access?: string; provenance?: boolean }): string {
+  if (action.area === "pull_request") {
+    const method = action.review_event ? ` · ${action.review_event}` : action.method ? ` · ${action.method}` : "";
+    const labels = action.add_labels?.length || action.remove_labels?.length
+      ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
+      : "";
+    return `${method}${labels}${action.delete_branch ? " · delete branch" : ""}`;
+  }
+  if (action.area === "issue") {
+    return action.add_labels?.length || action.remove_labels?.length
+      ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
+      : "";
+  }
+  if (action.area === "workflow") {
+    return `${action.ref ? ` · ref ${action.ref}` : ""}${action.fields?.length ? ` · fields ${action.fields.length}` : ""}`;
+  }
+  if (action.area === "release") {
+    const draft = action.draft === true ? " · draft" : action.draft === false ? " · publish" : "";
+    return `${draft}${action.verify_tag ? " · verify tag" : ""}${action.generate_notes ? " · generate notes" : ""}`;
+  }
+  if (action.area === "package") {
+    return ` · tag ${action.dist_tag ?? "latest"}${action.access ? ` · ${action.access}` : ""}${action.provenance ? " · provenance" : ""}`;
+  }
+  return "";
+}
+
+function formatConnectorActionTarget(action: { area: string; repo?: string; number?: number; thread?: string; target_run_id?: string; workflow?: string; tag?: string }): string {
+  if (action.area === "notification") {
+    return action.thread ? `thread ${action.thread}` : "thread unknown";
+  }
+  if (action.area === "run") {
+    return action.repo && action.target_run_id ? `${action.repo} run ${action.target_run_id}` : "run unknown";
+  }
+  if (action.area === "workflow") {
+    return action.repo && action.workflow ? `${action.repo} workflow ${action.workflow}` : "workflow unknown";
+  }
+  if (action.area === "release") {
+    return action.repo && action.tag ? `${action.repo} release ${action.tag}` : "release unknown";
+  }
+  if (action.area === "package") {
+    return "current package";
+  }
+  return action.repo && action.number !== undefined ? `${action.repo}#${action.number}` : "target unknown";
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value * 1000) / 10}%`;
+}
+
+function formatOptionalPercent(value: number | undefined): string {
+  return value === undefined ? "n/a" : formatPercent(value);
+}
+
+function formatOptScore(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(2) : "n/a";
 }
 
 function moveCursorVertical(delta: number): void {

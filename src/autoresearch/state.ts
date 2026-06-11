@@ -97,7 +97,7 @@ export interface SetAutoresearchModeInput {
 
 export function readAutoresearchState(store: SessionStore, sessionId: string): AutoresearchState {
   let state: AutoresearchState = normalizeAutoresearchState({ enabled: false, experiments: [] });
-  for (const event of store.listEvents(sessionId)) {
+  for (const event of store.listEventsOfTypes(sessionId, ["autoresearch.control", "autoresearch.state"])) {
     if (event.type === "autoresearch.control") {
       state = applyControlEvent(state, event);
     } else if (event.type === "autoresearch.state") {
@@ -335,7 +335,7 @@ export function renderAutoresearchModeSection(state: AutoresearchState): string 
   if (!experiment) {
     return [
       "Research goal mode is active for this session.",
-      goal ? `Goal: ${escapeXmlText(goal)}` : "Goal: not specified yet",
+      goal ? `Loop: ${escapeXmlText(goal)}` : "Loop: not specified yet",
       "Phase 1: build a benchmark harness at ./autoresearch.sh.",
       "The harness must exit 0 for a valid run and print lines like METRIC name=value.",
       "After validating the harness, call init_experiment with the primary metric, direction, scope paths, and constraints.",
@@ -352,7 +352,7 @@ export function renderAutoresearchModeSection(state: AutoresearchState): string 
   const notes = truncateText(experiment.notes.trim(), AUTORESEARCH_PROMPT_NOTES_LIMIT).text;
   return [
     "Research goal mode is active for this session.",
-    goal ? `Goal: ${escapeXmlText(goal)}` : undefined,
+    goal ? `Loop: ${escapeXmlText(goal)}` : undefined,
     `Experiments: ${lifecycle.active} active; ${lifecycle.completed} completed; ${lifecycle.rejected} rejected`,
     `Active experiment: ${escapeXmlText(experiment.name)} (${experiment.status})`,
     `Primary metric: ${escapeXmlText(experiment.primary_metric)} (${escapeXmlText(experiment.metric_unit || "unitless")}; ${experiment.direction} is better)`,

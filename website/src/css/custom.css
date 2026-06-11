@@ -103,3 +103,15 @@ html[data-theme="dark"] .footer--light {
 .footer__copyright {
   color: rgba(17, 17, 17, 0.62);
 }
+
+#__blog-post-container.markdown .docusaurus-mermaid-container {
+  margin: 1.5rem auto;
+  overflow-x: auto;
+  text-align: center;
+}
+
+#__blog-post-container.markdown .docusaurus-mermaid-container > svg {
+  display: inline-block;
+  height: auto;
+  max-width: 100%;
+}

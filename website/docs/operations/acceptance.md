@@ -12,11 +12,14 @@ endpoint evidence, and multimodal resources.
 ```text
 /doctor status
 /doctor run
+/doctor tools
 ```
 
 The doctor view checks the configured coding endpoint, daemon state, tools, and
 optional Omni routes. Missing Omni endpoints are reported as optional
-capabilities, not as failures.
+capabilities, not as failures. `/doctor tools` queues an in-session agent
+regression of representative built-in tools and asks the agent to return a
+test report plus improvement suggestions.
 
 ## Release Runner
 

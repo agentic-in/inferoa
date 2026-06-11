@@ -305,11 +305,20 @@ export async function applyPatchTool(args: JsonObject, context: ToolExecutionCon
       if (code === 0) {
         resolve(ok("Patch applied", { stdout, diff: patch }));
       } else {
-        resolve(fail("patch_failed", stderr || `git apply exited ${code}`, { stdout, stderr, diff: patch }));
+        const message = formatPatchFailure(stderr || `git apply exited ${code}`);
+        resolve(fail("patch_failed", message, { stdout, stderr, diff: patch }));
       }
     });
     child.stdin.end(patch);
   });
+}
+
+function formatPatchFailure(message: string): string {
+  const trimmed = message.trim();
+  if (/corrupt patch|patch fragment without header|No valid patches|unrecognized input|does not exist in index/i.test(trimmed)) {
+    return `Patch is malformed or incomplete: ${trimmed}. Provide a complete unified diff with file headers and valid hunk line counts, or use edit_file for an exact single-file replacement.`;
+  }
+  return trimmed || "git apply failed";
 }
 
 export async function gitStatus(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {

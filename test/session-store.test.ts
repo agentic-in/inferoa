@@ -26,6 +26,8 @@ test("SessionStore persists sessions, locks, events, resources, and endpoint evi
       {
         mode: "direct",
         provider_id: "direct:vllm",
+        step_id: "step_store",
+        step_index: 2,
         request_class: "interactive",
         prompt_epoch_id: "pe_test",
         usage: { prompt_tokens: 10, cached_prompt_tokens: 5 },
@@ -38,10 +40,14 @@ test("SessionStore persists sessions, locks, events, resources, and endpoint evi
     assert.equal(endpointEvidence[0]?.run_id, "run");
     assert.equal(endpointEvidence[0]?.prompt_hash, "prompt");
     assert.equal(endpointEvidence[0]?.tool_schema_hash, "tools");
+    assert.equal(endpointEvidence[0]?.step_id, "step_store");
+    assert.equal(endpointEvidence[0]?.step_index, 2);
     assert.equal(endpointEvidence[0]?.request_class, "interactive");
     assert.equal(endpointEvidence[0]?.prompt_epoch_id, "pe_test");
     assert.equal(endpointEvidence[0]?.cache_hit_rate, 0.5);
     const endpointEvent = store.listEvents(session.session_id).find((event) => event.type === "endpoint.evidence.recorded");
+    assert.equal(endpointEvent?.data.step_id, "step_store");
+    assert.equal(endpointEvent?.data.step_index, 2);
     assert.equal(endpointEvent?.data.request_class, "interactive");
     assert.equal(endpointEvent?.data.prompt_epoch_id, "pe_test");
     assert.equal(endpointEvent?.data.cache_hit_rate, 0.5);

@@ -7,8 +7,18 @@ import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { SessionStore } from "../src/session/store.js";
 import { TuiApp } from "../src/tui/app.js";
 import { buildGoalWorkPrompt } from "../src/goals/supervisor-prompts.js";
+import { ToolRegistry } from "../src/tools/registry.js";
 import { stripAnsi } from "../src/tui/ansi.js";
-import { completeGoalAfterReflection, completeGoalReflection, createGoalState, replaceGoalPlanning, writeGoalState } from "../src/goals/state.js";
+import { createExperiment, logPendingRun, recordRun, writeAutoresearchState } from "../src/autoresearch/state.js";
+import {
+  completeGoalAfterReflection,
+  completeGoalReflection,
+  createGoalState,
+  readGoalState,
+  replaceGoalPlanning,
+  stageGoalReviewDecision,
+  writeGoalState,
+} from "../src/goals/state.js";
 
 test("clear starts a clean default session without prompting or rendering creation details", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-clear-session-"));
@@ -154,6 +164,49 @@ test("doctor view treats Omni as optional and omits release-only AMD checks", as
   }
 });
 
+test("doctor tools queues an in-session built-in tool regression prompt", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-doctor-tools-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const config = structuredClone(DEFAULT_CONFIG);
+    const workspace = { id: "w_doctor_tools", root: stateDir, alias: "doctor-tools" };
+    const tui = new TuiApp(
+      {
+        config,
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      renderDoctorView: (args: string) => Promise<void>;
+      renderLoopTranscriptPanel: (title: string, lines: string[]) => void;
+      enqueuePrompt: (prompt: string, options?: { renderPrompt?: boolean }) => void;
+    };
+    const panels: Array<{ title: string; lines: string[] }> = [];
+    const queued: Array<{ prompt: string; options?: { renderPrompt?: boolean } }> = [];
+    view.renderLoopTranscriptPanel = (title, lines) => {
+      panels.push({ title, lines });
+    };
+    view.enqueuePrompt = (prompt, options) => {
+      queued.push({ prompt, options });
+    };
+
+    await view.renderDoctorView("tools");
+
+    assert.equal(panels.at(-1)?.title, "Doctor Tools");
+    assert.match(stripAnsi(panels.at(-1)?.lines.join("\n") ?? ""), /queued built-in tool regression/i);
+    assert.equal(queued.length, 1);
+    assert.match(queued[0]?.prompt ?? "", /Run a built-in tools regression/);
+    assert.match(queued[0]?.prompt ?? "", /Required final report/);
+    assert.equal(queued[0]?.options?.renderPrompt, false);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("goal continuation queues a hidden foreground prompt instead of a daemon job panel", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-foreground-"));
   const store = await SessionStore.open(stateDir);
@@ -220,21 +273,31 @@ test("composer metadata reuses mode state while session events are unchanged", a
     const session = view.createModeSession("goal metadata cache");
     writeGoalState(store, session.session_id, createGoalState({ objective: "improve codebase quality" }), "run_goal");
     const originalListEvents = store.listEvents.bind(store);
+    const originalLatestEventId = store.latestEventId.bind(store);
     let listEventsCalls = 0;
+    let latestEventIdCalls = 0;
     (store as unknown as { listEvents: typeof store.listEvents }).listEvents = ((sessionId: string, limit?: number) => {
       listEventsCalls += 1;
       return originalListEvents(sessionId, limit);
     }) as typeof store.listEvents;
+    (store as unknown as { latestEventId: typeof store.latestEventId }).latestEventId = ((sessionId: string) => {
+      latestEventIdCalls += 1;
+      return originalLatestEventId(sessionId);
+    }) as typeof store.latestEventId;
 
     const first = view.composerMetadataRight();
     const callsAfterFirst = listEventsCalls;
+    const latestCallsAfterFirst = latestEventIdCalls;
     const second = view.composerMetadataRight();
     store.appendEvent({ session_id: session.session_id, type: "session.note", data: { note: "changed" } });
     const third = view.composerMetadataRight();
 
     assert.ok(first);
     assert.equal(second, first);
-    assert.equal(listEventsCalls, callsAfterFirst + 3);
+    assert.equal(callsAfterFirst, 0);
+    assert.equal(listEventsCalls, 0);
+    assert.equal(latestCallsAfterFirst, 1);
+    assert.equal(latestEventIdCalls, 1);
     assert.equal(third, first);
   } finally {
     store.close();
@@ -242,7 +305,52 @@ test("composer metadata reuses mode state while session events are unchanged", a
   }
 });
 
-test("bare goal command asks objective before goal type and approach setup", async () => {
+test("composer metadata does not scan long session history while typing", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-composer-long-session-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_composer_long_session", root: stateDir, alias: "composer-long-session" };
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      createModeSession: (title: string) => { session_id: string };
+      composerMetadataRight: () => string | undefined;
+    };
+    const session = view.createModeSession("long session metadata");
+    writeGoalState(store, session.session_id, createGoalState({ objective: "keep tui responsive for days" }), "run_goal");
+    for (let index = 0; index < 1000; index += 1) {
+      store.appendEvent({
+        session_id: session.session_id,
+        run_id: `run_${index}`,
+        type: "model.response.settled",
+        data: { usage: { total_tokens: index } },
+      });
+    }
+    const originalListEvents = store.listEvents.bind(store);
+    let listEventsCalls = 0;
+    (store as unknown as { listEvents: typeof store.listEvents }).listEvents = ((sessionId: string, limit?: number) => {
+      listEventsCalls += 1;
+      return originalListEvents(sessionId, limit);
+    }) as typeof store.listEvents;
+
+    const rendered = view.composerMetadataRight();
+
+    assert.ok(rendered);
+    assert.equal(listEventsCalls, 0);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("bare loop command asks objective before goal type and approach setup", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-setup-order-"));
   const store = await SessionStore.open(stateDir);
   try {
@@ -259,7 +367,7 @@ test("bare goal command asks objective before goal type and approach setup", asy
     const session = store.createSession(workspace, "goal setup order");
     const calls: string[] = [];
     const view = tui as unknown as {
-      renderGoalView: (args: string) => Promise<void>;
+      renderLoopControlView: (args: string) => Promise<void>;
       optionalSession: () => { session_id: string } | undefined;
       createModeSession: (title: string) => { session_id: string };
       chooseGoalSetup: () => Promise<object>;
@@ -280,7 +388,7 @@ test("bare goal command asks objective before goal type and approach setup", asy
       calls.push(`start:${objective}`);
     };
 
-    await view.renderGoalView("");
+    await view.renderLoopControlView("");
 
     assert.deepEqual(calls, ["objective", "setup", "start:Improve codebase"]);
   } finally {
@@ -289,12 +397,12 @@ test("bare goal command asks objective before goal type and approach setup", asy
   }
 });
 
-test("goal mode command starts a typed research approach", async () => {
+test("loop mode command starts a typed research approach with review policy", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-mode-command-"));
   const store = await SessionStore.open(stateDir);
   try {
     const workspace = { id: "w_goal_mode_command", root: stateDir, alias: "goal-mode-command" };
-    const session = store.createSession(workspace, "goal mode command");
+    const session = store.createSession(workspace, "loop mode command");
     const tui = new TuiApp(
       {
         config: structuredClone(DEFAULT_CONFIG),
@@ -304,12 +412,12 @@ test("goal mode command starts a typed research approach", async () => {
         runtime: {},
       } as never,
     );
-    const calls: Array<{ objective: string; options?: { kind?: string; strategy?: { mode?: string } } }> = [];
+    const calls: Array<{ objective: string; options?: { kind?: string; strategy?: { mode?: string }; hil_policy?: string } }> = [];
     const view = tui as unknown as {
-      renderGoalView: (args: string) => Promise<void>;
+      renderLoopControlView: (args: string) => Promise<void>;
       optionalSession: () => { session_id: string } | undefined;
       createModeSession: (title: string) => { session_id: string };
-      startGoal: (session: { session_id: string }, objective: string, options?: { kind?: string; strategy?: { mode?: string } }) => Promise<void>;
+      startGoal: (session: { session_id: string }, objective: string, options?: { kind?: string; strategy?: { mode?: string }; hil_policy?: string }) => Promise<void>;
     };
     view.optionalSession = () => undefined;
     view.createModeSession = () => session;
@@ -317,12 +425,13 @@ test("goal mode command starts a typed research approach", async () => {
       calls.push({ objective, options });
     };
 
-    await view.renderGoalView("mode research explore Improve scheduler latency");
+    await view.renderLoopControlView("mode research --review explore Improve scheduler latency");
 
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.objective, "Improve scheduler latency");
     assert.equal(calls[0]?.options?.kind, "research");
     assert.equal(calls[0]?.options?.strategy?.mode, "opportunistic");
+    assert.equal(calls[0]?.options?.hil_policy, "review");
   } finally {
     store.close();
     await rm(stateDir, { recursive: true, force: true });
@@ -353,10 +462,451 @@ test("mode objective composer cancels on interrupt instead of submitting exit te
       throw new Error("Input cancelled");
     };
 
-    await assert.rejects(() => view.askModeObjective("Goal objective"), /Input cancelled/);
+    await assert.rejects(() => view.askModeObjective("Loop objective"), /Input cancelled/);
 
     assert.equal(composerOptions?.suggestions, false);
     assert.equal(composerOptions?.cancelOnInterrupt, true);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("bare loop command accepts review policy flag", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-flag-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_review_flag", root: stateDir, alias: "goal-review-flag" };
+    const session = store.createSession(workspace, "goal review flag");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const calls: Array<{ objective: string; options?: { kind?: string; hil_policy?: string } }> = [];
+    const view = tui as unknown as {
+      renderLoopControlView: (args: string) => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      createModeSession: (title: string) => { session_id: string };
+      startGoal: (session: { session_id: string }, objective: string, options?: { kind?: string; hil_policy?: string }) => Promise<void>;
+    };
+    view.optionalSession = () => undefined;
+    view.createModeSession = () => session;
+    view.startGoal = async (_session, objective, options) => {
+      calls.push({ objective, options });
+    };
+
+    await view.renderLoopControlView("--review Improve codebase quality");
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.objective, "Improve codebase quality");
+    assert.equal(calls[0]?.options?.kind, "task");
+    assert.equal(calls[0]?.options?.hil_policy, "review");
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal review command applies a pending staged decision", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-command-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_review_command", root: stateDir, alias: "goal-review-command" };
+    const session = store.createSession(workspace, "goal review command");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    let goal = replaceGoalPlanning(createGoalState({ objective: "Review next horizon", hil_policy: "review" }), {
+      active_step_id: "first",
+      steps: [{ id: "first", title: "Complete first horizon", status: "completed" }],
+    });
+    goal = stageGoalReviewDecision(
+      goal,
+      {
+        decision: "expand",
+        summary: "Open the next horizon.",
+        steps: [{ id: "second", title: "Run the reviewed second horizon", status: "pending" }],
+        active_step_id: "second",
+      },
+      "run_review_reflection",
+    );
+    writeGoalState(store, session.session_id, goal, "run_review_reflection");
+
+    const panels: Array<{ title: string; body: string[] }> = [];
+    const view = tui as unknown as {
+      renderLoopControlView: (args: string) => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      renderLoopTranscriptPanel: (title: string, body: string[]) => void;
+      enqueueGoalContinuation: () => Promise<void>;
+    };
+    view.optionalSession = () => session;
+    view.renderLoopTranscriptPanel = (title, body) => {
+      panels.push({ title, body });
+    };
+    view.enqueueGoalContinuation = async () => {};
+
+    await view.renderLoopControlView("review approve");
+
+    const saved = readGoalState(store, session.session_id);
+    assert.equal(saved?.goal.status, "active");
+    assert.equal(saved?.goal.horizon_generation, 1);
+    assert.equal(saved?.goal.pending_review_decision, undefined);
+    assert.equal(saved?.goal.planning?.active_step_id, "second");
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.review.resolved"), true);
+    const plain = stripAnsi(panels.at(-1)?.body.join("\n") ?? "");
+    assert.match(plain, /review manual/);
+    assert.match(plain, /Loop task 1 current/);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("foreground goal supervisor prompts pending HIL review between runs", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-autoprompt-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.model_setup.base_url = "http://127.0.0.1:1/v1";
+    config.model_setup.model = "test-model";
+    const workspace = { id: "w_goal_review_autoprompt", root: stateDir, alias: "goal-review-autoprompt" };
+    const session = store.createSession(workspace, "goal review autoprompt");
+    const goal = replaceGoalPlanning(createGoalState({ objective: "Review between runs", hil_policy: "review" }), {
+      active_step_id: "first",
+      steps: [{ id: "first", title: "Complete first horizon", status: "completed" }],
+    });
+    writeGoalState(store, session.session_id, goal, "goal_init");
+    const tui = new TuiApp(
+      {
+        config,
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const registry = new ToolRegistry(config, workspace, store);
+    let prompted = 0;
+    const view = tui as unknown as {
+      drainForegroundGoalSupervisor: () => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      submitPrompt: (prompt: string, options: { requestClass?: string; visibility?: string; runId?: string }) => Promise<{ run_id: string }>;
+      promptPendingGoalReviewIfNeeded: (session: { session_id: string }) => Promise<void>;
+      renderGoalSupervisorRecord: () => void;
+    };
+    view.optionalSession = () => session;
+    view.renderGoalSupervisorRecord = () => {};
+    view.submitPrompt = async (_prompt, options) => {
+      if (options.requestClass === "reflection") {
+        await registry.call(
+          {
+            id: "review_reflect",
+            name: "goal",
+            arguments: {
+              op: "reflect",
+              decision: "expand",
+              summary: "Open the next reviewed horizon.",
+              steps: [{ id: "second", title: "Second reviewed horizon", status: "pending" }],
+              active_step_id: "second",
+            },
+          },
+          { session_id: session.session_id, run_id: options.runId, request_class: "reflection", visibility: "internal" },
+        );
+      }
+      return { run_id: options.runId ?? "run_work" };
+    };
+    view.promptPendingGoalReviewIfNeeded = async () => {
+      prompted += 1;
+    };
+
+    await view.drainForegroundGoalSupervisor();
+
+    assert.equal(prompted, 1);
+    const saved = readGoalState(store, session.session_id);
+    assert.equal(saved?.goal.status, "paused");
+    assert.equal(saved?.goal.pending_review_decision?.action, "expand");
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("pending HIL review prompt shows details without auto-approving", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-inline-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_review_inline", root: stateDir, alias: "goal-review-inline" };
+    const session = store.createSession(workspace, "goal review inline");
+    let goal = replaceGoalPlanning(createGoalState({ objective: "Review next horizon inline", hil_policy: "review" }), {
+      active_step_id: "first",
+      steps: [{ id: "first", title: "Complete first horizon", status: "completed" }],
+    });
+    goal = stageGoalReviewDecision(
+      goal,
+      {
+        decision: "expand",
+        summary: "Open the inline reviewed horizon.",
+        verification_evidence: { verdict: "partial", reason: "current loop task exhausted" },
+        steps: [{ id: "second", title: "Run the inline reviewed horizon", status: "pending" }],
+        active_step_id: "second",
+      },
+      "run_review_reflection",
+    );
+    writeGoalState(store, session.session_id, goal, "run_review_reflection");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const records: string[] = [];
+    const transcripts: string[] = [];
+    const view = tui as unknown as {
+      promptPendingGoalReviewIfNeeded: (session: { session_id: string }) => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      renderGoalSupervisorRecord: (title: string, detail: string) => void;
+      writeTranscript: (text: string) => void;
+    };
+    view.optionalSession = () => session;
+    view.renderGoalSupervisorRecord = (title, detail) => {
+      records.push(`${title}: ${detail}`);
+    };
+    view.writeTranscript = (text) => {
+      transcripts.push(text);
+    };
+
+    await view.promptPendingGoalReviewIfNeeded(session);
+
+    const saved = readGoalState(store, session.session_id);
+    assert.equal(saved?.goal.status, "paused");
+    assert.equal(saved?.goal.horizon_generation, 0);
+    assert.equal(saved?.goal.pending_review_decision?.action, "expand");
+    assert.match(records.join("\n"), /Loop review: expand/);
+    const plain = stripAnsi(transcripts.join("\n"));
+    assert.match(plain, /Loop Review/);
+    assert.match(plain, /objective Review next horizon inline/);
+    assert.match(plain, /decision expand from loop task 0/);
+    assert.match(plain, /summary Open the inline reviewed horizon/);
+    assert.match(plain, /evidence .*verdict=partial/);
+    assert.match(plain, /Proposed next steps/);
+    assert.match(plain, /second .* Run the inline reviewed horizon/);
+    assert.match(plain, /\/loop review approve/);
+    assert.match(plain, /\/loop review revise <feedback>/);
+    assert.doesNotMatch(plain, /╭|╮|╰|╯/);
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.review.resolved"), false);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal resume refuses pending review decisions", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-resume-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_review_resume", root: stateDir, alias: "goal-review-resume" };
+    const session = store.createSession(workspace, "goal review resume");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const goal = stageGoalReviewDecision(
+      createGoalState({ objective: "Review blocked resume", hil_policy: "review" }),
+      {
+        decision: "blocked",
+        summary: "Needs a human decision.",
+        blocker: "manual review required",
+      },
+      "run_review_reflection",
+    );
+    writeGoalState(store, session.session_id, goal, "run_review_reflection");
+
+    const notices: string[] = [];
+    const view = tui as unknown as {
+      renderLoopControlView: (args: string) => Promise<void>;
+      optionalSession: () => { session_id: string } | undefined;
+      renderNotice: (message: string) => void;
+      renderLoopTranscriptPanel: () => void;
+    };
+    view.optionalSession = () => session;
+    view.renderNotice = (message) => {
+      notices.push(message);
+    };
+    view.renderLoopTranscriptPanel = () => {};
+
+    await view.renderLoopControlView("resume");
+
+    const saved = readGoalState(store, session.session_id);
+    assert.equal(saved?.goal.pending_review_decision?.action, "blocked");
+    assert.equal(saved?.goal.status, "paused");
+    assert.match(notices.join("\n"), /pending loop review/);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("inbox view renders in transcript flow without a framed panel", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-inbox-transcript-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_inbox_transcript", root: stateDir, alias: "inbox-transcript" };
+    const session = store.createSession(workspace, "inbox transcript");
+    const goal = stageGoalReviewDecision(
+      createGoalState({ objective: "Review inbox rendering", hil_policy: "review" }),
+      {
+        decision: "expand",
+        summary: "Needs inline inbox review.",
+        steps: [{ id: "next", title: "Continue inbox review", status: "pending" }],
+      },
+      "run_review_reflection",
+    );
+    writeGoalState(store, session.session_id, goal, "run_review_reflection");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const panels: Array<{ title: string; body: string[] }> = [];
+    const transcripts: Array<{ title: string; body: string[] }> = [];
+    const view = tui as unknown as {
+      renderInboxView: (args?: string) => Promise<void>;
+      renderPanel: (title: string, body: string[]) => void;
+      renderLoopTranscriptPanel: (title: string, body: string[]) => void;
+    };
+    view.renderPanel = (title, body) => {
+      panels.push({ title, body });
+    };
+    view.renderLoopTranscriptPanel = (title, body) => {
+      transcripts.push({ title, body });
+    };
+
+    await view.renderInboxView("");
+
+    assert.deepEqual(panels, []);
+    const latest = transcripts.at(-1);
+    assert.equal(latest?.title, "Loop Inbox");
+    const plain = stripAnsi(latest?.body.join("\n") ?? "");
+    assert.match(plain, /Open 1/);
+    assert.match(plain, /Review loop decision: expand/);
+    assert.match(plain, /Needs inline inbox review/);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("goal panel surfaces research metrics as verification", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-research-verification-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_goal_research_verification", root: stateDir, alias: "goal-research-verification" };
+    const session = store.createSession(workspace, "goal research verification");
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const goal = createGoalState({ objective: "Reduce latency", kind: "research" });
+    writeGoalState(store, session.session_id, goal, "run_goal");
+    let experiment = createExperiment({ name: "latency", goal: goal.goal.objective, primary_metric: "latency_ms", direction: "lower" });
+    experiment = recordRun(experiment, {
+      command: "npm test",
+      exit_code: 0,
+      duration_ms: 1200,
+      parsed_metrics: { latency_ms: 12.5 },
+      parsed_primary: 12.5,
+      asi: {},
+      completed_at: "2026-01-01T00:00:00.000Z",
+    });
+    experiment = logPendingRun(experiment, { status: "keep", metric: 12.5, description: "latency improved" });
+    writeAutoresearchState(
+      store,
+      session.session_id,
+      { enabled: true, goal: goal.goal.objective, active_experiment_name: "latency", experiments: [experiment] },
+      "run_experiment",
+    );
+
+    const panels: Array<{ title: string; body: string[] }> = [];
+    const view = tui as unknown as {
+      renderGoalPanel: (state: ReturnType<typeof createGoalState>) => void;
+      renderLoopTranscriptPanel: (title: string, body: string[]) => void;
+      optionalSession: () => { session_id: string } | undefined;
+    };
+    view.optionalSession = () => session;
+    view.renderLoopTranscriptPanel = (title, body) => {
+      panels.push({ title, body });
+    };
+
+    view.renderGoalPanel(goal);
+
+    const plain = stripAnsi(panels.at(-1)?.body.join("\n") ?? "");
+    assert.match(plain, /verification research .*pass .*hard .*latency_ms 12\.5/);
+  } finally {
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon status surfaces pending loop review pause reason", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-daemon-goal-review-status-"));
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_daemon_goal_review_status", root: stateDir, alias: "daemon-goal-review-status" };
+    const session = store.createSession(workspace, "daemon goal review status");
+    const job = store.createSupervisorJob(session.session_id, workspace.root, "Continue reviewed goal", { kind: "goal", metadata: {} });
+    store.updateSupervisorJob(job.job_id, { status: "paused", metadata: { pause_reason: "goal_review_pending" } });
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+      { stateDir },
+    );
+    const panels: Array<{ title: string; body: string[] }> = [];
+    const view = tui as unknown as {
+      renderDaemonStatusPanel: () => Promise<void>;
+      renderPanel: (title: string, body: string[]) => void;
+    };
+    view.renderPanel = (title, body) => {
+      panels.push({ title, body });
+    };
+
+    await view.renderDaemonStatusPanel();
+
+    const plain = stripAnsi(panels.at(-1)?.body.join("\n") ?? "");
+    assert.match(plain, /paused\s+goal/);
+    assert.match(plain, /goal_review_pending/);
   } finally {
     store.close();
     await rm(stateDir, { recursive: true, force: true });
@@ -383,7 +933,7 @@ test("goal show renders wrapped tree horizons without repeated command hints", a
     const view = tui as unknown as {
       renderGoalPanel: (state: ReturnType<typeof createGoalState>) => void;
       renderInlinePanel: (title: string, body: string[]) => void;
-      renderPanel: (title: string, body: string[]) => void;
+      renderLoopTranscriptPanel: (title: string, body: string[]) => void;
       optionalSession: () => { session_id: string } | undefined;
     };
     const longSummary =
@@ -414,7 +964,7 @@ test("goal show renders wrapped tree horizons without repeated command hints", a
         steps: [
           {
             id: "verify_build_and_test_full_suite",
-            title: "Verify build and test full suite across all three projects before calling the goal complete",
+            title: "Verify build and test full suite across all three projects before completing the loop",
             status: "in_progress",
           },
         ],
@@ -472,7 +1022,7 @@ test("goal show renders wrapped tree horizons without repeated command hints", a
 
     const panels: Array<{ title: string; body: string[] }> = [];
     view.optionalSession = () => session;
-    view.renderPanel = (title, body) => {
+    view.renderLoopTranscriptPanel = (title, body) => {
       panels.push({ title, body });
     };
 
@@ -480,22 +1030,22 @@ test("goal show renders wrapped tree horizons without repeated command hints", a
     view.renderGoalPanel(goal);
 
     const latest = panels.at(-1);
-    assert.equal(latest?.title, "Goal");
+    assert.equal(latest?.title, "Loop");
     const plain = stripAnsi(latest?.body.join("\n") ?? "");
     assert.match(plain, /^complete improve codebase/m);
     assert.doesNotMatch(plain, /complete \(paused\)/);
-    assert.match(plain, /reflections 2 recorded .*latest done/);
+    assert.match(plain, /decisions 2 recorded .*latest done/);
     assert.match(plain, /type task/);
     assert.match(plain, /approach auto/);
     assert.match(plain, /candidates 0 open .*0 done .*0 dismissed/);
-    assert.match(plain, /◇ Horizon 0 .*Initial audit and repair horizon/);
-    assert.match(plain, /◆ Horizon 1 current .*Found a second horizon/);
+    assert.match(plain, /◇ Loop task 0 .*Initial audit and repair horizon/);
+    assert.match(plain, /◆ Loop task 1 current .*Found a second horizon/);
     assert.match(plain, /├─ x explore_and_audit/);
     assert.match(plain, /└─ x verify_build_and_test_full_suite/);
-    assert.match(plain, /reflection expand .*Found a second horizon/);
-    assert.match(plain, /reflection done/);
-    assert.doesNotMatch(plain, /\/goal plan/);
-    assert.doesNotMatch(plain, /\/goal complete/);
+    assert.match(plain, /decision expand .*Found a second horizon/);
+    assert.match(plain, /decision done/);
+    assert.doesNotMatch(plain, /\/loop plan/);
+    assert.doesNotMatch(plain, /\/loop complete/);
     assert.match(plain, /fleet simulator verification\s+completed without truncation/);
     assert.doesNotMatch(plain, /release notes[\s\S]*prepared without hidden[\s\S]*tail text/);
 
@@ -504,7 +1054,7 @@ test("goal show renders wrapped tree horizons without repeated command hints", a
       inlineOutput += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
       return true;
     }) as typeof process.stdout.write;
-    view.renderInlinePanel("Goal", latest?.body ?? []);
+    view.renderInlinePanel("Loop", latest?.body ?? []);
 
     const rendered = stripAnsi(inlineOutput);
     assert.doesNotMatch(rendered, /…/);
@@ -646,7 +1196,7 @@ test("suppressed internal reflection renders tool trace without assistant text",
           tool_name: "goal",
           result: {
             ok: true,
-            summary: "Goal reflection recorded: improve docs wording",
+            summary: "Loop decision recorded: improve docs wording",
             data: {
               enabled: true,
               goal: {
@@ -691,7 +1241,7 @@ test("suppressed internal reflection renders tool trace without assistant text",
               tool_name: "goal",
               tool_call_id: toolCallId,
               ok: true,
-              summary: "Goal reflection recorded: improve docs wording",
+              summary: "Loop decision recorded: improve docs wording",
               duration_ms: 12,
             });
             return {
@@ -747,8 +1297,8 @@ test("suppressed internal reflection renders tool trace without assistant text",
     await view.submitPrompt("reflection", { renderPrompt: false, suppressTranscript: true, requestClass: "reflection", visibility: "internal" });
 
     const plain = stripAnsi(transcript.join(""));
-    assert.match(plain, /Recorded goal reflection/);
-    assert.match(plain, /done · horizon 1/);
+    assert.match(plain, /Recorded loop decision/);
+    assert.match(plain, /done · loop task 1/);
     assert.match(plain, /improve docs wording/);
     assert.doesNotMatch(plain, /hidden reflection assistant text/);
   } finally {
@@ -778,7 +1328,7 @@ test("goal supervisor completion record wraps summary and includes stats", async
     };
 
     view.renderGoalSupervisorRecord(
-      "Goal complete",
+      "Loop complete",
       [
         {
           label: "summary",
@@ -786,17 +1336,17 @@ test("goal supervisor completion record wraps summary and includes stats", async
         },
         {
           label: "stats",
-          text: "Goal achieved. 46 loops · 128 tool calls · 8m 59s · 4767746 tokens used.",
+          text: "Loop achieved. 46 loops · 128 tool calls · 8m 59s · 4767746 tokens used.",
         },
       ],
       48,
     );
 
     const plain = stripAnsi(transcript.join(""));
-    assert.match(plain, /Goal complete/);
+    assert.match(plain, /Loop complete/);
     assert.match(plain, /summary Improved docs wording/);
     assert.match(plain, /terminal edge/);
-    assert.match(plain, /stats Goal achieved\. 46 loops .*128 tool calls .*8m 59s .*4767746 tokens used/);
+    assert.match(plain, /stats Loop achieved\. 46 loops .*128 tool calls .*8m 59s .*4767746 tokens used/);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
@@ -824,11 +1374,11 @@ test("inline panels sanitize embedded newlines before writing background rows", 
       return true;
     }) as typeof process.stdout.write;
 
-    view.renderInlinePanel("Goal Supervisor", ["queued goal\nGoal objective: deep research"]);
+    view.renderInlinePanel("Loop Supervisor", ["queued goal\nLoop objective: deep research"]);
 
     const plainLines = stripAnsi(output).split("\n");
     assert.equal(plainLines.length, 5);
-    assert.match(plainLines[2] ?? "", /queued goal Goal objective: deep research/);
+    assert.match(plainLines[2] ?? "", /queued goal Loop objective: deep research/);
   } finally {
     process.stdout.write = originalStdoutWrite;
     await rm(stateDir, { recursive: true, force: true });

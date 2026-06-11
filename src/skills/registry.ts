@@ -44,7 +44,11 @@ export class SkillRegistry {
 
   async loadEnabled(descriptors?: SkillDescriptor[]): Promise<Skill[]> {
     descriptors ??= await this.discover();
-    const enabled = new Set(this.config.skills.enabled);
+    return this.loadSelected(descriptors, this.config.skills.enabled);
+  }
+
+  async loadSelected(descriptors: SkillDescriptor[], enabledNames: string[]): Promise<Skill[]> {
+    const enabled = new Set(enabledNames);
     const loaded: Skill[] = [];
     for (const descriptor of descriptors) {
       if (!enabled.has(descriptor.id) && !enabled.has(descriptor.name)) {

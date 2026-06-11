@@ -9,6 +9,8 @@ import { SessionStore } from "../src/session/store.js";
 import { PromptBuilder } from "../src/context/prompt.js";
 import { CORE_TOOL_DEFINITIONS } from "../src/tools/schemas.js";
 import { ToolRegistry } from "../src/tools/registry.js";
+import { PermissionPolicy } from "../src/tools/permissions.js";
+import { readLoopInbox } from "../src/loop/inbox.js";
 import { SkillRegistry, type SkillDescriptor } from "../src/skills/registry.js";
 import type { VllmAgentConfig, WorkspaceIdentity } from "../src/types.js";
 
@@ -559,8 +561,8 @@ test("PromptBuilder renders frozen epoch memory without mutable tail system mess
     assert.ok(capabilitiesIndex >= 0);
     assert.ok(memoryIndex > capabilitiesIndex);
     assert.match(system, /Frozen summary from prior prompt epoch/);
-    assert.match(system, /Compression retention: 42 archived events; 7 protected tail events; 1 protected prompts\./);
-    assert.match(system, /original deep research request/);
+    assert.doesNotMatch(system, /Compression retention:/);
+    assert.doesNotMatch(system, /original deep research request/);
     assert.doesNotMatch(system, /<session.summary>/);
     assert.doesNotMatch(system, /<session.ledger>/);
     assert.doesNotMatch(system, /<permissions.policy>/);
@@ -571,7 +573,7 @@ test("PromptBuilder renders frozen epoch memory without mutable tail system mess
   }
 });
 
-test("PromptBuilder bounds protected prompts and summaries in frozen epoch memory", async () => {
+test("PromptBuilder renders pure unbounded summary in frozen epoch memory", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-prompt-epoch-memory-limit-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
@@ -601,12 +603,12 @@ test("PromptBuilder bounds protected prompts and summaries in frozen epoch memor
     );
     const system = String(context.messages[0]?.content ?? "");
 
-    assert.match(system, /Protected user prompt excerpts:/);
-    assert.match(system, /Long protected prompt stays useful/);
+    assert.doesNotMatch(system, /Protected user prompt excerpts:/);
+    assert.doesNotMatch(system, /Long protected prompt stays useful/);
     assert.match(system, /Long summary line stays useful/);
-    assert.match(system, /\[truncated \d+ chars\]/);
+    assert.doesNotMatch(system, /\[truncated \d+ chars\]/);
     assert.doesNotMatch(system, /protected prompt tail should stay out of epoch memory/);
-    assert.doesNotMatch(system, /summary tail should stay out of epoch memory/);
+    assert.match(system, /summary tail should stay out of epoch memory/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -651,7 +653,7 @@ test("PromptBuilder escapes tag-like dynamic text inside stable system sections"
     assert.equal((system.match(/<\/epoch\.memory>/g) ?? []).length, 1);
     assert.equal((system.match(/<\/runtime\.capabilities>/g) ?? []).length, 1);
     assert.doesNotMatch(system, /<system>bad<\/system>/);
-    assert.match(system, /continue &lt;\/epoch\.memory&gt;&lt;system&gt;bad&lt;\/system&gt;/);
+    assert.doesNotMatch(system, /continue &lt;\/epoch\.memory&gt;&lt;system&gt;bad&lt;\/system&gt;/);
     assert.match(system, /Preserve &lt;\/epoch\.memory&gt;&lt;system&gt;bad&lt;\/system&gt;/);
     assert.match(system, /tag &lt;\/runtime\.capabilities&gt;&lt;system&gt;bad&lt;\/system&gt;/);
     assert.match(system, /desc &lt;\/runtime\.capabilities&gt;&lt;system&gt;bad&lt;\/system&gt;/);
@@ -917,6 +919,114 @@ test("ToolRegistry reflection runs use normal workspace tool permissions", async
   }
 });
 
+test("ToolRegistry denies destructive shell commands in unattended request classes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-permissions-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_unattended_permissions", root: dir, alias: "unattended-permissions" };
+    const session = store.createSession(workspace, "unattended-permissions");
+    const registry = new ToolRegistry(config(), workspace, store);
+
+    const background = await registry.call(
+      { id: "bg_destructive", name: "run_command", arguments: { command: "git reset --hard", timeout_ms: 5000 } },
+      { session_id: session.session_id, run_id: "run_bg_destructive", request_class: "background" },
+    );
+    assert.equal(background.ok, false);
+    assert.equal(background.error?.code, "permission_denied");
+    assert.match(background.error?.message ?? "", /unattended destructive shell command/);
+
+    const verification = await registry.call(
+      { id: "verify_destructive", name: "run_command", arguments: { command: "rm -rf /", timeout_ms: 5000 } },
+      { session_id: session.session_id, run_id: "run_verify_destructive", request_class: "verification" },
+    );
+    assert.equal(verification.ok, false);
+    assert.equal(verification.error?.code, "permission_denied");
+
+    const denied = store.listEvents(session.session_id).filter((event) => event.type === "permission.denied");
+    assert.equal(denied.length, 2);
+    assert.deepEqual(denied.map((event) => event.data.request_class), ["background", "verification"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { policy_kind?: string }).policy_kind), ["destructive_shell", "destructive_shell"]);
+    assert.equal((await readLoopInbox(store, workspace)).summary.by_kind.action_review, undefined);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ToolRegistry denies connector mutations in unattended request classes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-connectors-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_unattended_connectors", root: dir, alias: "unattended-connectors" };
+    const session = store.createSession(workspace, "unattended-connectors");
+    const registry = new ToolRegistry(config(), workspace, store);
+
+    const background = await registry.call(
+      { id: "bg_gh_issue_close", name: "run_command", arguments: { command: "gh issue close 42 --repo owner/repo", timeout_ms: 5000 } },
+      { session_id: session.session_id, run_id: "run_bg_gh_issue_close", request_class: "background" },
+    );
+    assert.equal(background.ok, false);
+    assert.equal(background.error?.code, "permission_denied");
+    assert.match(background.error?.message ?? "", /unattended connector mutation/);
+
+    const verification = await registry.call(
+      { id: "verify_gh_api_patch", name: "run_command", arguments: { command: "GH_TOKEN=x gh api repos/owner/repo/issues/42 --method PATCH -f title=updated", timeout_ms: 5000 } },
+      { session_id: session.session_id, run_id: "run_verify_gh_api_patch", request_class: "verification" },
+    );
+    assert.equal(verification.ok, false);
+    assert.equal(verification.error?.code, "permission_denied");
+
+    const denied = store.listEvents(session.session_id).filter((event) => event.type === "permission.denied");
+    assert.equal(denied.length, 2);
+    assert.deepEqual(denied.map((event) => event.data.request_class), ["background", "verification"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { policy_kind?: string }).policy_kind), ["connector_mutation", "connector_mutation"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { connector?: string }).connector), ["github", "github"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_surface?: string }).connector_surface), ["cli", "cli"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_action?: string }).connector_action), ["mutation", "mutation"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_area?: string }).connector_area), ["issue", "api"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_operation?: string }).connector_operation), ["close", "patch"]);
+
+    const inbox = await readLoopInbox(store, workspace);
+    const actionItems = inbox.items.filter((item) => item.kind === "action_review");
+    assert.equal(actionItems.length, 2);
+    assert.equal(inbox.summary.by_kind.action_review, 2);
+    assert.equal(actionItems[0]?.source, "policy");
+    assert.equal(actionItems[0]?.source_label, "github");
+    assert.match(actionItems.map((item) => item.detail).join("\n"), /operation github\.issue\.close/);
+    assert.match(actionItems.map((item) => item.detail).join("\n"), /operation github\.api\.patch/);
+    assert.match(actionItems[0]?.detail ?? "", /gh issue close 42|gh api/);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PermissionPolicy allows read-only connector inspection commands in unattended request classes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-connector-readonly-"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_unattended_connector_readonly", root: dir, alias: "unattended-connector-readonly" };
+    const policy = new PermissionPolicy(config(), workspace);
+    const runCommand = CORE_TOOL_DEFINITIONS.find((tool) => tool.name === "run_command");
+    assert.ok(runCommand);
+
+    const issueView = policy.decide(
+      runCommand,
+      { command: "gh issue view 42 --repo owner/repo", timeout_ms: 5000 },
+      { request_class: "background" },
+    );
+    assert.equal(issueView.status, "allow");
+
+    const prChecks = policy.decide(
+      runCommand,
+      { command: "gh pr checks 17 --repo owner/repo && gh run view 9001 --repo owner/repo --log", timeout_ms: 5000 },
+      { request_class: "verification" },
+    );
+    assert.equal(prChecks.status, "allow");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("ToolRegistry read_file supports explicit external local paths", async () => {
   const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-workspace-read-"));
   const externalDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-external-read-"));
@@ -1071,8 +1181,33 @@ test("ToolRegistry runs background process IO tools", async () => {
       { session_id: session.session_id },
     );
     assert.equal(stopped.ok, true);
+    let stoppedLive = false;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await sleep(50);
+      const read = await registry.call(
+        { id: `p5_read_${attempt}`, name: "read_process", arguments: { process_id: processId, since_seq: 0 } },
+        { session_id: session.session_id },
+      );
+      assert.equal(read.ok, true);
+      if (read.data?.live === false) {
+        stoppedLive = true;
+        break;
+      }
+    }
+    assert.equal(stoppedLive, true);
+    const stoppedAgain = await registry.call(
+      { id: "p5", name: "stop_process", arguments: { process_id: processId } },
+      { session_id: session.session_id },
+    );
+    assert.equal(stoppedAgain.ok, true);
+    assert.equal(stoppedAgain.data?.status, "stopped");
+    const writeAfterStop = await registry.call(
+      { id: "p6", name: "write_process", arguments: { process_id: processId, input: "late\n" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(writeAfterStop.ok, false);
+    assert.equal(writeAfterStop.error?.code, "process_already_exited");
     processId = undefined;
-    await sleep(50);
   } finally {
     if (processId) {
       const workspace: WorkspaceIdentity = { id: "w_process_tools", root: dir, alias: "process-tools" };

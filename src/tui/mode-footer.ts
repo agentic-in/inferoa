@@ -58,19 +58,22 @@ function renderGoalMode(state: GoalState | undefined, options: ModeFooterRenderO
   if (!state || !goal || (!state.enabled && goal.status !== "active" && goal.status !== "budget-limited" && goal.status !== "paused")) {
     return undefined;
   }
+  if (goal.pending_review_decision) {
+    return modeToken("Loop", `review ${goal.pending_review_decision.action}`);
+  }
   if (!state.enabled || goal.status === "paused") {
-    return modeToken("Goal", "paused");
+    return modeToken("Loop", "paused");
   }
   if (goal.status === "budget-limited") {
-    return modeToken("Goal", "budget");
+    return modeToken("Loop", "budget");
   }
   const detailParts = [
     goal.objective,
-    `horizon ${goal.horizon_generation}`,
+    `task ${goal.horizon_generation}`,
     goal.planning?.steps.length ? goalProgressLabel(goal.planning.steps.map((step) => step.status)) : "mode",
     formatDuration(goalDurationMs(goal) + activeRunElapsedMs(options)),
   ];
-  return modeTokenWithParts("Goal", detailParts);
+  return modeTokenWithParts("Loop", detailParts);
 }
 
 function goalProgressLabel(statuses: GoalStepStatus[]): string {

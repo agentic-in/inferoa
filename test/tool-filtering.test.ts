@@ -99,7 +99,8 @@ test("model-facing tool schemas use enums and omit legacy aliases", () => {
   assert.equal(byName.has("web_open"), true);
   assert.deepEqual(prop("web_open", "format")?.enum, ["text", "html"]);
 
-  assert.deepEqual(prop("goal", "op")?.enum, ["create", "get", "decompose", "update_plan", "update_step", "set_strategy", "update_ledger", "reflect", "resume", "complete", "drop"]);
+  assert.deepEqual(prop("goal", "op")?.enum, ["get", "decompose", "update_plan", "update_step", "set_strategy", "set_owner", "clear_owner", "set_review_owner", "clear_review_owner", "set_verifier_policy", "update_ledger", "reflect", "verify"]);
+  assert.doesNotMatch(JSON.stringify(prop("goal", "op")?.enum), /create|review_decision|resume|complete|drop/);
   assert.deepEqual(prop("goal", "status")?.enum, ["pending", "in_progress", "completed", "blocked", "skipped"]);
   assert.deepEqual(prop("goal", "decision")?.enum, ["expand", "done", "blocked"]);
   assert.equal(prop("goal", "open_candidates"), undefined);
@@ -123,4 +124,30 @@ test("model-facing tool schemas use enums and omit legacy aliases", () => {
   assert.equal(prop("video_generation", "duration")?.type, "number");
   assert.deepEqual(prop("video_generation", "mode")?.enum, ["async", "sync"]);
   assert.equal(prop("run_experiment", "timeout_seconds"), undefined);
+});
+
+test("ToolRegistry rejects arguments outside fixed tool schemas before execution", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-tool-schema-validation-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.omni.enabled = true;
+    config.omni.endpoints.image_generation = { base_url: "http://127.0.0.1:9/v1", model: "image-model" };
+    const workspace: WorkspaceIdentity = { id: "w_tool_schema_validation", root: dir, alias: "tool-schema-validation" };
+    const session = store.createSession(workspace, "tool-schema-validation");
+    const registry = new ToolRegistry(config, workspace, store);
+
+    const result = await registry.call(
+      { id: "bad_image_args", name: "image_generation", arguments: { prompt: "test", model: "override-model" } },
+      { session_id: session.session_id, run_id: "run_bad_image_args" },
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "invalid_tool_arguments");
+    assert.match(result.error?.message ?? "", /arguments\.model/);
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "permission.resolved"), false);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

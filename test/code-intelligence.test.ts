@@ -76,6 +76,18 @@ test("AST tools find and edit TypeScript functions", async () => {
     const firstMatch = (pythonImports.data?.matches as Array<{ line_text?: string; text?: string }>)[0];
     assert.equal(firstMatch?.line_text, "import os");
     assert.equal(firstMatch?.text, "import os");
+    const unsupportedLanguage = await registry.call(
+      { id: "tc4_unsupported", name: "ast_grep", arguments: { language: "go", path: "src/sample.ts", selector: "function:main" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(unsupportedLanguage.ok, false);
+    assert.equal(unsupportedLanguage.error?.code, "invalid_tool_arguments");
+    const directoryPath = await registry.call(
+      { id: "tc4_directory", name: "ast_grep", arguments: { language: "typescript", path: "src", selector: "function:name" } },
+      { session_id: session.session_id },
+    );
+    assert.equal(directoryPath.ok, false);
+    assert.equal(directoryPath.error?.code, "ast_path_must_be_file");
 
     const lspStatus = await registry.call({ id: "tc5", name: "lsp", arguments: { action: "status" } }, { session_id: session.session_id });
     assert.equal(lspStatus.ok, true);
@@ -95,7 +107,8 @@ test("AST tools find and edit TypeScript functions", async () => {
       { session_id: session.session_id },
     );
     assert.equal(legacyRename.ok, false);
-    assert.equal(legacyRename.error?.code, "lsp_rename_required");
+    assert.equal(legacyRename.error?.code, "invalid_tool_arguments");
+    assert.match(legacyRename.error?.message ?? "", /arguments\.action/);
     assert.match(await readFile(path.join(dir, "src", "rename.ts"), "utf8"), /greet/);
 
     const rename = await registry.call(

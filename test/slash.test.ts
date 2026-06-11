@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { stripAnsi } from "../src/tui/ansi.js";
-import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands } from "../src/tui/slash.js";
+import { parseSlashCommand, slashCommandWithSubcommands, slashSubcommands, suggestedSlashCommands } from "../src/tui/slash.js";
 import { renderUnknownSlashCommandNotice } from "../src/tui/slash-notice.js";
 
 test("slash parser uses clear as the fresh-session command", () => {
@@ -11,14 +11,18 @@ test("slash parser uses clear as the fresh-session command", () => {
   assert.equal(parsed.error, undefined);
 });
 
-test("slash parser supports goal chat commands and keeps research under goal", () => {
-  const goal = parseSlashCommand("/goal ship the feature");
-  assert.equal(goal.command?.name, "goal");
-  assert.equal(goal.args, "ship the feature");
-  assert.equal(goal.error, undefined);
+test("slash parser supports loop chat commands and removes goal", () => {
+  const legacyGoal = parseSlashCommand("/goal ship the feature");
+  assert.equal(legacyGoal.command, undefined);
+  assert.equal(legacyGoal.error, "Unrecognized command '/goal'. Type '/' for commands.");
 
-  const researchGoal = parseSlashCommand("/goal mode research reduce benchmark latency");
-  assert.equal(researchGoal.command?.name, "goal");
+  const loop = parseSlashCommand("/loop ship the feature");
+  assert.equal(loop.command?.name, "loop");
+  assert.equal(loop.args, "ship the feature");
+  assert.equal(loop.error, undefined);
+
+  const researchGoal = parseSlashCommand("/loop mode research reduce benchmark latency");
+  assert.equal(researchGoal.command?.name, "loop");
   assert.equal(researchGoal.args, "mode research reduce benchmark latency");
   assert.equal(researchGoal.error, undefined);
 
@@ -50,6 +54,11 @@ test("slash parser exposes tokenmaxxing and keeps old savings aliases", () => {
   const tokenmaxxing = parseSlashCommand("/tokenmaxxing");
   assert.equal(tokenmaxxing.command?.name, "tokenmaxxing");
   assert.equal(tokenmaxxing.error, undefined);
+
+  const tokenmaxxingSignals = parseSlashCommand("/tokenmaxxing signals");
+  assert.equal(tokenmaxxingSignals.command?.name, "tokenmaxxing");
+  assert.equal(tokenmaxxingSignals.args, "signals");
+  assert.equal(tokenmaxxingSignals.error, undefined);
 
   const activity = parseSlashCommand("/activity");
   assert.equal(activity.command?.name, "tokenmaxxing");
@@ -109,10 +118,22 @@ test("unknown slash command notice is short and neutral", () => {
 });
 
 test("slash registry exposes chat subcommands for completion", () => {
+  assert.deepEqual(
+    suggestedSlashCommands().map((item) => item.name),
+    ["setup", "model", "system", "access", "skills", "loop", "inbox", "self-improve", "plan", "tokenmaxxing", "context", "tools", "sessions", "worktree", "doctor", "help", "clear", "resume", "exit"],
+  );
   assert.equal(slashCommandWithSubcommands("/tools"), "tools");
   assert.equal(slashCommandWithSubcommands("/daemon"), "daemon");
+  assert.equal(slashCommandWithSubcommands("/automation"), "automation");
+  assert.equal(slashCommandWithSubcommands("/discovery"), "discovery");
+  assert.equal(slashCommandWithSubcommands("/worktree"), "worktree");
   assert.equal(slashCommandWithSubcommands("/doctor"), "doctor");
-  assert.equal(slashCommandWithSubcommands("/goal"), "goal");
+  assert.equal(slashCommandWithSubcommands("/goal"), undefined);
+  assert.equal(slashCommandWithSubcommands("/loop"), "loop");
+  assert.equal(slashCommandWithSubcommands("/inbox"), "inbox");
+  assert.equal(slashCommandWithSubcommands("/opt"), undefined);
+  assert.equal(parseSlashCommand("/opt").error, "Unrecognized command '/opt'. Type '/' for commands.");
+  assert.equal(slashCommandWithSubcommands("/self-improve"), "self-improve");
   assert.equal(slashCommandWithSubcommands("/plan"), "plan");
   assert.equal(slashCommandWithSubcommands("/autoresearch"), undefined);
   assert.equal(slashCommandWithSubcommands("/sessions"), "sessions");
@@ -129,23 +150,45 @@ test("slash registry exposes chat subcommands for completion", () => {
     ["/daemon status", "/daemon queue", "/daemon attach", "/daemon detach", "/daemon cancel"],
   );
   assert.deepEqual(
-    slashSubcommands("doctor").map((item) => item.value),
-    ["/doctor status", "/doctor run"],
+    slashSubcommands("automation").map((item) => item.value),
+    ["/automation", "/automation add", "/automation add --review", "/automation run-due", "/automation pause", "/automation resume", "/automation remove"],
   );
   assert.deepEqual(
-    slashSubcommands("goal").map((item) => item.value),
+    slashSubcommands("discovery").map((item) => item.value),
+    ["/discovery", "/discovery add", "/discovery add-git", "/discovery add-github-issues", "/discovery add-github-assigned-issues", "/discovery add-github-prs", "/discovery add-github-assigned-prs", "/discovery add-github-review-requests", "/discovery add-github-notifications", "/discovery add-github-ci", "/discovery add-github-draft-releases", "/discovery add-github-deployments", "/discovery add-http", "/discovery add-npm-package", "/discovery run-due", "/discovery pause", "/discovery resume", "/discovery remove"],
+  );
+  assert.deepEqual(
+    slashSubcommands("worktree").map((item) => item.value),
+    ["/worktree", "/worktree health", "/worktree adopt"],
+  );
+  assert.deepEqual(
+    slashSubcommands("doctor").map((item) => item.value),
+    ["/doctor status", "/doctor run", "/doctor tools"],
+  );
+  assert.deepEqual(
+    slashSubcommands("loop").map((item) => item.value),
     [
-      "/goal show",
-      "/goal mode auto",
-      "/goal mode research",
-      "/goal mode focus",
-      "/goal mode explore",
-      "/goal mode timebox",
-      "/goal pause",
-      "/goal resume",
-      "/goal complete",
-      "/goal drop",
+      "/loop status",
+      "/loop health",
+      "/loop mode auto",
+      "/loop mode research",
+      "/loop mode focus",
+      "/loop mode explore",
+      "/loop mode timebox",
+      "/loop review",
+      "/loop verify",
+      "/loop pause",
+      "/loop resume",
+      "/loop drop",
     ],
+  );
+  assert.deepEqual(
+    slashSubcommands("self-improve").map((item) => item.value),
+    ["/self-improve status", "/self-improve propose", "/self-improve run --replay", "/self-improve report", "/self-improve adopt"],
+  );
+  assert.deepEqual(
+    slashSubcommands("inbox").map((item) => item.value),
+    ["/inbox", "/inbox all", "/inbox resolve", "/inbox dismiss", "/inbox promote"],
   );
   assert.deepEqual(
     slashSubcommands("plan").map((item) => item.value),

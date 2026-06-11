@@ -29,7 +29,7 @@ export interface PlanCreateInput {
 }
 
 export function readPlanState(store: SessionStore, sessionId: string): PlanState | undefined {
-  const event = latestPlanEvent(store.listEvents(sessionId));
+  const event = store.latestEventOfTypes(sessionId, ["plan.updated"]);
   if (!event) {
     return undefined;
   }

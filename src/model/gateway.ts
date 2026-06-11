@@ -496,6 +496,8 @@ export class ModelGateway {
     return {
       mode: this.config.model_setup.mode,
       provider_id: providerId(this.config),
+      step_id: request.step_id,
+      step_index: request.step_index,
       base_url: this.config.model_setup.base_url,
       model: response.model ?? request.model,
       usage: response.usage,

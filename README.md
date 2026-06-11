@@ -15,7 +15,7 @@
 </p>
 
 Prompting is no longer the whole interface. The frontier is **Loop
-Engineering**: give the model a goal, feedback, verification, memory, and tools,
+Engineering**: give the model an objective, feedback, verification, memory, and tools,
 then let it self-correct until the work is proven.
 
 But every loop is also an inference workload. As turns accumulate, prompt
@@ -29,20 +29,20 @@ Engineering**:
   cache, multimodal endpoints, and self-hosted model paths.
 - **Tokenmaxxing**: each turn is shaped to preserve cacheable prefixes, bound
   mutable context, expose token pressure, and pick the right inference path.
-- **Loop Engineering**: `/goal` runs durable recursive loops that inspect, edit,
-  test, verify, reflect, remember, and continue across horizons.
+- **Loop Engineering**: `/loop` runs durable recursive loops that inspect, edit,
+  test, verify, decide, remember, and continue across loop tasks.
 
 ## Loop is All You Need
 
 <div align="center">
-  <p><strong>Goal Mode</strong></p>
-  <img src="website/static/gif/goal.gif" alt="Inferoa goal mode" width="860" />
+  <p><strong>Loop Mode</strong></p>
+  <img src="website/static/gif/loop.gif" alt="Inferoa loop mode" width="860" />
   <p><strong>Code Index</strong></p>
   <img src="website/static/gif/welcome.gif" alt="Inferoa code index" width="860" />
   <p><strong>Plan Mode</strong></p>
   <img src="website/static/gif/plan.gif" alt="Inferoa plan mode" width="860" />
-  <p><strong>Auto Research</strong></p>
-  <img src="website/static/gif/research.gif" alt="Inferoa research goal" width="860" />
+  <p><strong>Loop Research</strong></p>
+  <img src="website/static/gif/research.gif" alt="Inferoa research loop" width="860" />
 </div>
 
 ## Why Inferoa
@@ -55,8 +55,8 @@ Inferoa = **Infer**(Inference-native)**o**(Tokenmaxxing Loop)**a**(Agent Harness
 
 Inferoa gives that loop an inference-native runtime:
 
-- **Goal/rubric driven work**: `/goal` carries an objective across horizons,
-  reflection, recovery, and completion evidence instead of stopping after the
+- **Loop/rubric driven work**: `/loop` carries an objective across loop tasks,
+  verification, decisions, recovery, and completion evidence instead of stopping after the
   next answer.
 - **Independent feedback surfaces**: plans, tests, tool results, research
   metrics, and completion evidence give the loop something concrete to improve
@@ -77,8 +77,8 @@ the inference stack:
 
 | Surface | Substrate | Inferoa role | Tokenmaxxing target |
 | --- | --- | --- | --- |
-| Loop Engineering | [Inferoa Goal Mode](https://github.com/agentic-in/inferoa) | Recursive long-horizon goals, horizons, reflection, completion evidence, and recovery | Keep the engineering loop running until the work is proven |
-| Agent Harness | [Inferoa](https://github.com/agentic-in/inferoa) | Sessions, tools, plans, goals, resources, evidence, and prefix-cache discipline | Give the loop a durable runtime while preserving reusable prompt prefixes |
+| Loop Engineering | [Loop Mode](https://github.com/agentic-in/inferoa) | Recursive long-horizon loops, loop tasks, attempts, verification, decisions, completion evidence, and recovery | Keep the engineering loop running until the work is proven |
+| Agent Harness | [Inferoa](https://github.com/agentic-in/inferoa) | Sessions, tools, plans, loops, resources, evidence, and prefix-cache discipline | Give the loop a durable runtime while preserving reusable prompt prefixes |
 | Context Optimization | [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph), [RTK](https://github.com/rtk-ai/rtk) | Select evidence and shrink mutable context without losing task continuity | Spend fewer prompt and tool-output tokens |
 | Intelligent routing | [vLLM Semantic Router](https://github.com/vllm-project/semantic-router) | Choose model paths by cost, safety, privacy, capability, and session pressure | Avoid one expensive path for every turn |
 | Model Serving | [vLLM Engine](https://github.com/vllm-project/vllm), [vLLM Omni](https://github.com/vllm-project/vllm-omni) | Use high-throughput, memory-efficient serving and multimodal endpoints while respecting inference-engine optimization rules | Control cost, safety, privacy, and data sovereignty when an external frontier model is unnecessary |
@@ -115,10 +115,10 @@ session and submit it as the first user turn:
 inferoa "Inspect this repository and list the test entrypoints."
 ```
 
-Start a recursive long-horizon goal from inside the TUI:
+Start a recursive long-horizon loop from inside the TUI:
 
 ```text
-/goal Improve this repository and prove it with tests.
+/loop Improve this repository and prove it with tests.
 ```
 
 Run a single non-interactive request without opening the TUI:
@@ -142,8 +142,8 @@ inferoa --print "Summarize the README in one paragraph."
 
 Use these commands as the task grows:
 
-- `/goal` starts a recursive long-horizon goal: Inferoa keeps the objective,
-  horizons, evidence, and reflection loop active until the work is proven.
+- `/loop` starts a recursive long-horizon loop: Inferoa keeps the objective,
+  loop tasks, attempts, verification evidence, and decisions active until the work is proven.
 - `/plan` turns ambiguous scope into an inspectable plan before execution.
 - `/tokenmaxxing` shows token and cost pressure across prefix-cache reuse,
   context savings, recent turn usage, and model-selection pressure.

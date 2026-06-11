@@ -89,7 +89,7 @@ test("activity view renders goal completion reports as native metrics", () => {
       event("goal.completion_report", {
         goal_objective: "Ship the native long-horizon flow with stable cache-aware evidence cards",
         completion_summary: "Verified final state and committed changes.",
-        report: "Goal achieved. 2 loops · 7 tool calls · 1m 08s · 340 tokens used.",
+        report: "Loop achieved. 2 tool loops · 7 tool calls · 1m 08s · 340 tokens used.",
         tool_rounds: 2,
         tool_calls: 7,
         tokens: 340,
@@ -101,15 +101,15 @@ test("activity view renders goal completion reports as native metrics", () => {
   const plain = stripAnsi(lines.join("\n"));
 
   assert.match(plain, /objective Ship the native long-horizon flow/);
-  assert.match(plain, /goal complete .*loops 2 .*tools 7 .*time 1m 8s .*tokens 340/);
+  assert.match(plain, /loop complete .*loops 2 .*tools 7 .*time 1m 8s .*tokens 340/);
   assert.match(plain, /summary Verified final state and committed changes/);
-  assert.match(plain, /Goal achieved/);
+  assert.match(plain, /Loop achieved/);
   assert.doesNotMatch(plain, /[{}"]/);
   assert.doesNotMatch(plain, /goal_objective|tool_rounds|tool_calls|duration_ms/);
   assert.ok(lines.every((line) => visibleWidth(line) <= 180));
 });
 
-test("activity view renders horizon expansion as a native event", () => {
+test("activity view renders loop task expansion as a native event", () => {
   const lines = renderSessionActivityLines(
     [
       event("goal.horizon.expanded", {
@@ -124,7 +124,7 @@ test("activity view renders horizon expansion as a native event", () => {
   );
   const plain = stripAnsi(lines.join("\n"));
 
-  assert.match(plain, /goal horizon started .*horizon 2 .*previous 1 .*steps 3 .*active verify/);
+  assert.match(plain, /loop task started .*task 2 .*previous 1 .*steps 3 .*active verify/);
   assert.doesNotMatch(plain, /previous_horizon_generation|horizon_generation|step_count|active_step_id/);
   assert.ok(lines.every((line) => visibleWidth(line) <= 120));
 });

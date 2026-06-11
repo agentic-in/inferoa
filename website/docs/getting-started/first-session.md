@@ -29,11 +29,11 @@ inferoa "Inspect this package and add a missing docs build check."
 ## Use Modes Deliberately
 
 - Use plain chat for small questions and one-turn inspections.
-- Run [`/goal`](../workflows/goal-mode.md) when you want to start a recursive
-  long-horizon goal.
+- Run [`/loop`](../workflows/loop-mode.md) when you want to start a recursive
+  long-horizon loop.
 - Use [`/plan set`](../workflows/plan-mode.md) when scope is ambiguous and you
   want a plan before execution.
-- Use `/goal mode research` when the task is experiment-shaped and needs repeated
+- Use `/loop mode research` when the task is experiment-shaped and needs repeated
   measurement.
 - Use `/doctor status` when checking the local endpoint setup before a session.
 
@@ -63,16 +63,16 @@ Open the session picker from the TUI:
 
 Or run the top-level `/resume` slash command to attach to a previous session.
 The resumed session keeps its workspace identity and event log; you can keep
-using `/goal`, `/plan`, `/goal mode research`, and the rest of the TUI surfaces
+using `/loop`, `/plan`, `/loop mode research`, and the rest of the TUI surfaces
 without losing continuity.
 
 ## Next Steps
 
-- [Goal mode](../workflows/goal-mode.md) is the loop-engineering surface for
-  recursive long-horizon goals.
+- [Loop mode](../workflows/loop-mode.md) is the loop-engineering surface for
+  recursive long-horizon loops.
 - [Plan mode](../workflows/plan-mode.md) turns ambiguous scope into an
   inspectable plan before execution begins.
-- Research goals under [Goal mode](../workflows/goal-mode.md) run
+- Research loops under [Loop mode](../workflows/loop-mode.md) run
   benchmark-style iteration when the task depends on repeated measurement.
 - [Coding workflow](../workflows/coding-workflow.md) describes the recommended
   inspect-edit-verify loop for repository work.

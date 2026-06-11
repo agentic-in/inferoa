@@ -86,6 +86,9 @@ test("TUI tool renderer formats shell, diff, and todo cards", async () => {
     const plain = stripAnsi(output);
     assert.match(plain, /Ran printf ok · exited 0/);
     assert.doesNotMatch(plain, /Ran command/);
+    assert.doesNotMatch(plain, /\bcmd printf ok\b/);
+    assert.doesNotMatch(plain, /\bcwd \./);
+    assert.doesNotMatch(plain, /\n\s*exit 0\b/);
     assert.match(output, /Applied patch/);
     assert.match(output, /Updated todo/);
     assert.match(output, /Wrote file/);
@@ -189,6 +192,8 @@ test("TUI tool renderer hides failed basic file read, write, and list cards", as
     assert.doesNotMatch(plain, /\/missing/);
     assert.match(plain, /Read file .*visible\.md/);
     assert.match(plain, /Ran failed false · exited 1/);
+    assert.doesNotMatch(plain, /\bcmd false\b/);
+    assert.doesNotMatch(plain, /No display data/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -329,7 +334,7 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
           tool_name: "goal",
           result: {
             ok: true,
-            summary: "Goal complete: Ship mode",
+            summary: "Loop complete: Ship mode",
             data: {
               goal: {
                 objective: "Ship mode",
@@ -360,7 +365,7 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
                   steps: [{ id: "verify", title: "Run verification", status: "in_progress" }],
                 },
               ],
-              completion_budget_report: "Goal achieved. 1 loop · 2 tool calls · 3s · 34 tokens used.",
+              completion_budget_report: "Loop achieved. 1 tool loop · 2 tool calls · 3s · 34 tokens used.",
               remaining_tokens: null,
             },
           },
@@ -410,7 +415,7 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
           tool_name: "goal",
           result: {
             ok: true,
-            summary: "Goal horizon expanded: Ship mode",
+            summary: "Loop task expanded: Ship mode",
             data: {
               goal: {
                 objective: "Ship mode",
@@ -624,21 +629,21 @@ test("TUI tool renderer formats goal, plan, and autoresearch tools as native mod
     const rendered = renderToolCards(events, store, { collapseCompact: false });
     const plain = stripAnsi(rendered.join("\n"));
     const goalBlock = plain.slice(0, plain.indexOf("Initialized experiment failed"));
-    assert.match(goalBlock, /Completed goal · Ship mode · complete/);
-    assert.match(goalBlock, /Updated goal step · verify · completed/);
+    assert.match(goalBlock, /Completed loop · Ship mode · complete/);
+    assert.match(goalBlock, /Updated loop step · verify · completed/);
     assert.match(goalBlock, /step verify · completed/);
-    assert.match(goalBlock, /Expanded goal horizon · expand · horizon 2/);
+    assert.match(goalBlock, /Expanded loop task · expand · loop task 2/);
     assert.match(goalBlock, /summary Done/);
     assert.doesNotMatch(goalBlock, /objective Ship mode/);
     assert.doesNotMatch(goalBlock, /loops 1 · tools 2/);
-    assert.match(goalBlock, /report Goal achieved\. 1 loop · 2 tool calls · 3s · 34 tokens used\./);
-    assert.match(goalBlock, /horizon 0/);
-    assert.match(goalBlock, /sub-goal .*inspect Inspect flow/);
-    assert.match(goalBlock, /horizon 1 .*Verification pass .*current/);
-    assert.match(goalBlock, /sub-goal .*\* verify Run verification/);
-    assert.match(goalBlock, /plan 1 completed · 1 in progress/);
-    assert.match(goalBlock, /now \* verify Run verification/);
-    assert.match(plain, /Updated goal failed · Blocked goal · active/);
+    assert.match(goalBlock, /report Loop achieved\. 1 tool loop · 2 tool calls · 3s · 34 tokens used\./);
+    assert.match(goalBlock, /loop task 0/);
+    assert.match(goalBlock, /step .*inspect Inspect flow/);
+    assert.match(goalBlock, /loop task 1 .*Verification pass .*current/);
+    assert.match(goalBlock, /step .*\* verify Run verification/);
+    assert.match(goalBlock, /task plan 1 completed · 1 in progress/);
+    assert.match(goalBlock, /active step \* verify Run verification/);
+    assert.match(plain, /Updated loop failed · Blocked goal · active/);
     assert.match(plain, /goal_incomplete_plan: Cannot complete goal with unfinished internal plan steps: verify/);
     assert.match(plain, /Initialized experiment failed · harness exited 2; missing METRIC latency_ms=value/);
     assert.match(plain, /goal recover harness/);

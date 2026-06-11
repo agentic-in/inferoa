@@ -5,14 +5,14 @@ import useBaseUrl from "@docusaurus/useBaseUrl";
 import styles from "./index.module.css";
 
 const modules = [
-  ["01", "Loop Engineering", "Design the goal, feedback, verifier, memory, tools, and stop condition instead of hand-steering every prompt."],
-  ["02", "Tokenmaxxing", "Keep each turn cache-aware, context-bounded, route-conscious, and measurable as the horizon grows."],
+  ["01", "Loop Engineering", "Design the objective, feedback, verifier, memory, tools, and stop condition instead of hand-steering every prompt."],
+  ["02", "Tokenmaxxing", "Keep each turn cache-aware, context-bounded, route-conscious, and measurable as the loop grows."],
   ["03", "Inference-native runtime", "Expose context windows, prefix cache, model paths, endpoint signals, and serving constraints to the loop."],
-  ["04", "Proof-oriented loops", "Use plans, tests, tool evidence, research metrics, reflection, and completion reports to decide when to stop."],
+  ["04", "Proof-oriented loops", "Use plans, tests, tool evidence, research metrics, verification, decisions, and completion reports to decide when to stop."],
 ];
 
 const stackFlow = [
-  ["Goal Loop", "recursive horizons + reflection"],
+  ["Loop Mode", "loop tasks + verification"],
   ["Agent Harness", "sessions, tools, evidence"],
   ["Tokenmaxxing", "prefix, context, routing"],
   ["vLLM Serving", "Engine + Omni"],
@@ -25,9 +25,9 @@ const sessionDemos = [
     image: "/gif/welcome.gif",
   },
   {
-    title: "Goal Mode",
-    body: "Run /goal to start a long-horizon recursive goal with horizons, evidence, and reflection.",
-    image: "/gif/goal.gif",
+    title: "Loop Mode",
+    body: "Run /loop to start a long-horizon recursive loop with loop tasks, attempts, evidence, and decisions.",
+    image: "/gif/loop.gif",
   },
   {
     title: "Plan Mode",
@@ -35,8 +35,8 @@ const sessionDemos = [
     image: "/gif/plan.gif",
   },
   {
-    title: "Research Goals",
-    body: "Benchmark runs, failures, fixes, and metrics stay inside the goal reflection loop.",
+    title: "Research Loops",
+    body: "Benchmark runs, failures, fixes, and metrics stay inside the loop decision flow.",
     image: "/gif/research.gif",
   },
 ];
@@ -231,14 +231,14 @@ export default function Home(): JSX.Element {
         <meta property="og:title" content="Inferoa | Inference-native Tokenmaxxing Agent Harness for Loop Engineering" />
         <meta
           property="og:description"
-          content="Run recursive long-horizon goals while tokenmaxxing prefix cache, context optimization, vLLM Semantic Router, vLLM serving, Omni, RTK, and CodeGraph."
+          content="Run recursive long-horizon loops while tokenmaxxing prefix cache, context optimization, vLLM Semantic Router, vLLM serving, Omni, RTK, and CodeGraph."
         />
         <meta property="og:image" content={shareImage} />
         <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content="Inferoa | Inference-native Tokenmaxxing Agent Harness for Loop Engineering" />
         <meta
           name="twitter:description"
-          content="Run recursive long-horizon goals while tokenmaxxing prefix cache, context optimization, vLLM Semantic Router, vLLM serving, Omni, RTK, and CodeGraph."
+          content="Run recursive long-horizon loops while tokenmaxxing prefix cache, context optimization, vLLM Semantic Router, vLLM serving, Omni, RTK, and CodeGraph."
         />
         <meta name="twitter:image" content={shareImage} />
       </Head>
@@ -336,7 +336,7 @@ export default function Home(): JSX.Element {
                 changing goals, tool failures, repeated model calls, context
                 limits, memory needs, verifier signals, and proof through
                 tests. The goal is to co-design the{" "}
-                <strong>agent harness, goal loop, and inference stack</strong>{" "}
+                <strong>agent harness, loop controller, and inference stack</strong>{" "}
                 so every turn spends{" "}
                 <strong>context, cache, route choice, and serving capacity</strong>{" "}
                 deliberately.
@@ -345,8 +345,8 @@ export default function Home(): JSX.Element {
             <div className={styles.loopCards} aria-label="Inference loop design points">
               <article>
                 <span>01</span>
-                <strong>Goal and rubric feedback</strong>
-                <p>One durable outcome expands through horizons, evidence, reflection, recovery, and completion reports.</p>
+                <strong>Loop and rubric feedback</strong>
+                <p>One durable outcome expands through loop tasks, evidence, decisions, recovery, and completion reports.</p>
               </article>
               <article>
                 <span>02</span>

@@ -38,6 +38,16 @@ const goalCandidate = objectSchema(
   ["title"],
 );
 
+const goalCommandVerifier = objectSchema(
+  {
+    id: string("Optional stable verifier id. If omitted, one is derived from the command."),
+    command: string("Exact shell command that should be treated as a command verifier when run with run_command."),
+    cwd: string("Optional workspace-relative cwd. If omitted, the command matches from any workspace cwd."),
+    required: boolean("Whether this command verifier must pass before goal completion. Defaults to true."),
+  },
+  ["command"],
+);
+
 const clarifyChoice = objectSchema(
   {
     id: string("Optional stable choice id."),
@@ -216,32 +226,38 @@ const DEFINITIONS = [
   },
   {
     name: "goal",
-    description: "Manage goal-mode state. Use op to create, inspect, plan, update steps, set strategy, update the candidate ledger, reflect, resume, complete, or drop the active goal.",
+    description: "Update active loop work: inspect, plan/update steps, manage strategy/ledger/verifier policy, record reflection, or record verification. Creation, review, resume, completion, and drop stay in /loop.",
     permission: "read",
     parameters: objectSchema(
       {
-        op: stringEnum("Goal operation.", ["create", "get", "decompose", "update_plan", "update_step", "set_strategy", "update_ledger", "reflect", "resume", "complete", "drop"]),
-        objective: string("Goal objective. Required for op=create."),
-        token_budget: number("Optional positive token budget for op=create."),
-        kind: stringEnum("Goal type for op=create.", ["task", "research"]),
-        approach: stringEnum("Goal approach for op=create or op=set_strategy. Omit for auto.", ["focus", "explore", "timebox"]),
+        op: stringEnum("Goal operation.", ["get", "decompose", "update_plan", "update_step", "set_strategy", "set_owner", "clear_owner", "set_review_owner", "clear_review_owner", "set_verifier_policy", "update_ledger", "reflect", "verify"]),
+        owner: string("Explicit goal owner for op=set_owner. Empty or op=clear_owner clears owner; do not infer owner from objective text."),
+        review_owner: string("Explicit human review owner for op=set_review_owner. Empty or op=clear_review_owner clears review owner; do not infer owner from objective or review text."),
+        approach: stringEnum("Goal approach for op=set_strategy.", ["focus", "explore", "timebox"]),
         inferred: boolean("Whether the approach was inferred automatically. Use true for auto and false for selected approach."),
         target_hours: number("Optional timebox budget in hours. Do not expose target horizon counts to users."),
         rationale: string("Short rationale for the selected strategy."),
+        command_verifiers: { type: "array", description: "Command verifier policy for op=set_verifier_policy. Only exact matching run_command calls become command verification records.", items: goalCommandVerifier },
         open: { type: "array", description: "Open candidate ledger entries for op=update_ledger.", items: goalCandidate },
         done: { type: "array", description: "Completed candidate ledger entries for op=update_ledger.", items: goalCandidate },
         rejected: { type: "array", description: "Rejected candidate ledger entries for op=update_ledger.", items: goalCandidate },
-        steps: { type: "array", description: "Concrete internal goal steps for op=create, decompose, update_plan, or op=reflect with decision=expand. Required when decision=expand.", items: goalStep },
-        active_step_id: string("Optional active step id for op=create, decompose, update_plan, update_step, or reflect expand."),
+        steps: { type: "array", description: "Concrete internal loop task steps for op=decompose, op=update_plan, or op=reflect with decision=expand. Required when decision=expand.", items: goalStep },
+        active_step_id: string("Optional active step id for op=decompose, update_plan, update_step, or reflect expand."),
         step_id: string("Required when op=update_step. If updating the active step, pass the current active_step_id value as step_id; when omitted, the tool falls back to the active step if one is set."),
         title: string("Optional replacement title or title for a newly inserted step when op=update_step."),
         status: stringEnum("Step status for op=update_step.", ["pending", "in_progress", "completed", "blocked", "skipped"]),
         notes: string("Optional notes for op=update_step. Empty string clears notes."),
         evidence: jsonObject("Optional structured step evidence for op=update_step."),
         decision: stringEnum("Reflection decision for op=reflect in an internal reflection run only. decision=expand requires concrete steps.", ["expand", "done", "blocked"]),
+        provider: stringEnum("Verification provider for op=verify. checker requires a verification run.", ["checker", "human", "command"]),
+        verdict: stringEnum("Verification verdict for op=verify.", ["pass", "fail", "partial", "blocked", "unknown"]),
+        confidence: stringEnum("Verification confidence for op=verify.", ["hard", "soft", "mixed"]),
         verification_evidence: jsonObject("Structured verification evidence for op=reflect with decision=done in an internal reflection run."),
+        evidence_resource_uri: string("Optional resource URI with captured verification evidence for op=verify."),
+        metrics: jsonObject("Optional structured metrics for op=verify."),
+        failure_reason: string("Optional failure reason for op=verify."),
         blocker: string("Optional blocker details for op=reflect with decision=blocked in an internal reflection run."),
-        summary: string("Completion summary for op=complete, or reason for op=drop."),
+        summary: string("Reflection, planning, verification, or ledger summary."),
       },
       ["op"],
     ),
@@ -473,6 +489,18 @@ const DEFINITIONS = [
         tags: { type: "array", items: string("Tag.") },
       },
       ["note"],
+    ),
+  },
+  {
+    name: "subagent",
+    description: "Delegate a scoped task to a child sub-agent from the current session. If a loop is active, loop context is attached; otherwise the sub-agent runs as a focused child session and returns concrete evidence to this run.",
+    permission: "read",
+    parameters: objectSchema(
+      {
+        task: string("Concrete delegated task. Include enough context, expected evidence, and boundaries for the child sub-agent to work independently."),
+        isolation: stringEnum("Optional isolation. Use session by default; use worktree only when the delegated task may edit files independently.", ["session", "worktree"]),
+      },
+      ["task"],
     ),
   },
   {

@@ -21,6 +21,7 @@ import {
   writeGoalState,
 } from "../src/goals/state.js";
 import { runGoalSupervisor } from "../src/goals/supervisor.js";
+import { readGoalLoopView } from "../src/loop/projection.js";
 import { readPlanState } from "../src/plans/state.js";
 import { SessionStore } from "../src/session/store.js";
 import { CORE_TOOL_DEFINITIONS } from "../src/tools/schemas.js";
@@ -84,13 +85,13 @@ test("goal reflection prompt treats completed plans as a hypothesis, not a bound
   assert.doesNotMatch(prompt, /decision=continue/i);
 });
 
-test("goal creation starts with a visible Horizon 0 orientation and no frontier fields", () => {
+test("goal creation starts with a visible Loop task 0 orientation and no frontier fields", () => {
   const state = createGoalState({ objective: "Improve codebase" });
   const goal = state.goal as Record<string, any>;
 
   assert.equal(goal.horizon_generation, 0);
   assert.equal("frontier_generation" in goal, false);
-  assert.equal(goal.planning?.summary, "Horizon 0 · Orientation");
+  assert.equal(goal.planning?.summary, "Loop task 0 · Orientation");
   assert.equal(goal.planning?.active_step_id, "read_objective_and_constraints");
   assert.deepEqual(
     goal.planning?.steps.map((step: { id: string; title: string; status: string }) => [step.id, step.title, step.status]),
@@ -116,7 +117,7 @@ test("opportunistic goals cannot complete while high or medium ledger candidates
     const session = store.createSession(workspace, "goal-ledger-gate");
     const registry = new ToolRegistry(config(), workspace, store);
     let state = replaceGoalPlanning(createGoalState({ objective: "Improve codebase broadly" }), {
-      summary: "Horizon 0 · Orientation",
+      summary: "Loop task 0 · Orientation",
       steps: [{ id: "orientation", title: "Orientation complete", status: "completed" }],
     });
     const seededGoal = state.goal as any;
@@ -136,7 +137,7 @@ test("opportunistic goals cannot complete while high or medium ledger candidates
 
     const blocked = await registry.call(
       { id: "goal_complete_blocked_by_ledger", name: "goal", arguments: { op: "complete", summary: "Done despite open candidate.", force: true } },
-      { session_id: session.session_id, run_id: "run_complete" },
+      { session_id: session.session_id, run_id: "run_complete", control_plane: true },
     );
 
     assert.equal(blocked.ok, false);
@@ -163,7 +164,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
         name: "goal",
         arguments: { op: "create", objective: "Ship <fast> mode", token_budget: 200 },
       },
-      { session_id: session.session_id, run_id: "run_goal" },
+      { session_id: session.session_id, run_id: "run_goal", control_plane: true },
     );
 
     assert.equal(created.ok, true, JSON.stringify(created));
@@ -194,7 +195,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
 
     const completed = await registry.call(
       { id: "goal_2", name: "goal", arguments: { op: "complete", summary: "Shipped prompt and tool wiring." } },
-      { session_id: session.session_id, run_id: "run_goal" },
+      { session_id: session.session_id, run_id: "run_goal", control_plane: true },
     );
 
     assert.equal(completed.ok, true, JSON.stringify(completed));
@@ -208,6 +209,73 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
     );
     assert.doesNotMatch(String(after.messages[0]?.content ?? ""), /<goal.mode>/);
     assert.equal(findContextMessage(after.messages, "<goal.mode>"), "");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal owner is explicit state and appears in goal prompt context", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-owner-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_owner", root: dir, alias: "goal-owner" };
+    const session = store.createSession(workspace, "goal owner");
+    const registry = new ToolRegistry(config(), workspace, store);
+
+    const created = await registry.call(
+      {
+        id: "goal_owner_create",
+        name: "goal",
+        arguments: { op: "create", objective: "Ship owner policy", owner: "alice", review_owner: "carol" },
+      },
+      { session_id: session.session_id, run_id: "run_goal_owner", control_plane: true },
+    );
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(readGoalState(store, session.session_id)?.goal.owner, "alice");
+    assert.equal(readGoalState(store, session.session_id)?.goal.review_owner, "carol");
+    assert.match(created.summary, /Owner: alice/);
+    assert.match(created.summary, /Review owner: carol/);
+
+    const context = new PromptBuilder(config(), store, workspace).build(
+      store.getSession(session.session_id)!,
+      "continue",
+      CORE_TOOL_DEFINITIONS,
+    );
+    assert.match(findContextMessage(context.messages, "<goal.mode>"), /loop owner: alice/);
+    assert.match(findContextMessage(context.messages, "<goal.mode>"), /loop review owner: carol/);
+
+    const reassigned = await registry.call(
+      { id: "goal_owner_set", name: "goal", arguments: { op: "set_owner", owner: "bob" } },
+      { session_id: session.session_id, run_id: "run_goal_owner_set" },
+    );
+    assert.equal(reassigned.ok, true, JSON.stringify(reassigned));
+    assert.equal(readGoalState(store, session.session_id)?.goal.owner, "bob");
+    assert.match(reassigned.summary, /Owner: bob/);
+
+    const reviewReassigned = await registry.call(
+      { id: "goal_review_owner_set", name: "goal", arguments: { op: "set_review_owner", review_owner: "dave" } },
+      { session_id: session.session_id, run_id: "run_goal_review_owner_set" },
+    );
+    assert.equal(reviewReassigned.ok, true, JSON.stringify(reviewReassigned));
+    assert.equal(readGoalState(store, session.session_id)?.goal.review_owner, "dave");
+    assert.match(reviewReassigned.summary, /Review owner: dave/);
+
+    const reviewCleared = await registry.call(
+      { id: "goal_review_owner_clear", name: "goal", arguments: { op: "clear_review_owner" } },
+      { session_id: session.session_id, run_id: "run_goal_review_owner_clear" },
+    );
+    assert.equal(reviewCleared.ok, true, JSON.stringify(reviewCleared));
+    assert.equal(readGoalState(store, session.session_id)?.goal.review_owner, undefined);
+    assert.doesNotMatch(reviewCleared.summary, /Review owner:/);
+
+    const cleared = await registry.call(
+      { id: "goal_owner_clear", name: "goal", arguments: { op: "clear_owner" } },
+      { session_id: session.session_id, run_id: "run_goal_owner_clear" },
+    );
+    assert.equal(cleared.ok, true, JSON.stringify(cleared));
+    assert.equal(readGoalState(store, session.session_id)?.goal.owner, undefined);
+    assert.doesNotMatch(cleared.summary, /Owner:/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -420,7 +488,7 @@ test("approved plans attach to an active goal and remain in goal context", async
 
     const goal = await registry.call(
       { id: "gp_1", name: "goal", arguments: { op: "create", objective: "Ship offline retry mode" } },
-      { session_id: session.session_id, run_id: "run_gp" },
+      { session_id: session.session_id, run_id: "run_gp", control_plane: true },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
 
@@ -534,7 +602,7 @@ test("approved plan body is bounded in goal context without losing stored body",
 
     const goal = await registry.call(
       { id: "gpb_1", name: "goal", arguments: { op: "create", objective: "Ship bounded plan context" } },
-      { session_id: session.session_id, run_id: "run_gpb" },
+      { session_id: session.session_id, run_id: "run_gpb", control_plane: true },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
 
@@ -561,7 +629,7 @@ test("approved plan body is bounded in goal context without losing stored body",
 
     const goalState = readGoalState(store, session.session_id);
     assert.equal(goalState?.goal.plan?.body, longBody);
-    assert.equal(goalState?.goal.planning?.summary, "Horizon 0 · Orientation");
+    assert.equal(goalState?.goal.planning?.summary, "Loop task 0 · Orientation");
 
     const context = new PromptBuilder(config(), store, workspace).build(
       store.getSession(session.session_id)!,
@@ -588,7 +656,7 @@ test("approved plan checkboxes seed goal planning status", async () => {
 
     const goal = await registry.call(
       { id: "gpc_1", name: "goal", arguments: { op: "create", objective: "Ship resilient planning" } },
-      { session_id: session.session_id, run_id: "run_gpc" },
+      { session_id: session.session_id, run_id: "run_gpc", control_plane: true },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
 
@@ -655,7 +723,7 @@ test("goal tool maintains native decomposition and dynamic step updates", async 
 
     const goal = await registry.call(
       { id: "gd_1", name: "goal", arguments: { op: "create", objective: "Stabilize long-running research work" } },
-      { session_id: session.session_id, run_id: "run_gd" },
+      { session_id: session.session_id, run_id: "run_gd", control_plane: true },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
 
@@ -677,7 +745,7 @@ test("goal tool maintains native decomposition and dynamic step updates", async 
       { session_id: session.session_id, run_id: "run_gd" },
     );
     assert.equal(decomposed.ok, true, JSON.stringify(decomposed));
-    assert.match(decomposed.summary, /Plan: 1 in progress · 2 pending/);
+    assert.match(decomposed.summary, /Task plan: 1 in progress · 2 pending/);
 
     const afterDecompose = readGoalState(store, session.session_id);
     assert.equal(afterDecompose?.goal.planning?.active_step_id, "runtime-accounting");
@@ -739,7 +807,7 @@ test("goal tool maintains native decomposition and dynamic step updates", async 
 
     const prematureComplete = await registry.call(
       { id: "gd_4", name: "goal", arguments: { op: "complete", summary: "Done too early." } },
-      { session_id: session.session_id, run_id: "run_gd" },
+      { session_id: session.session_id, run_id: "run_gd", control_plane: true },
     );
     assert.equal(prematureComplete.ok, false);
     assert.equal(prematureComplete.error?.code, "goal_incomplete_plan");
@@ -789,14 +857,14 @@ test("goal completion requires a summary and accepts long summaries", async () =
 
     const goal = await registry.call(
       { id: "gs_1", name: "goal", arguments: { op: "create", objective: "Finish with evidence" } },
-      { session_id: session.session_id, run_id: "run_gs" },
+      { session_id: session.session_id, run_id: "run_gs", control_plane: true },
     );
     assert.equal(goal.ok, true, JSON.stringify(goal));
     await completeGoalOrientation(registry, session.session_id, "run_gs_orientation");
 
     const missingSummary = await registry.call(
       { id: "gs_2", name: "goal", arguments: { op: "complete" } },
-      { session_id: session.session_id, run_id: "run_gs" },
+      { session_id: session.session_id, run_id: "run_gs", control_plane: true },
     );
     assert.equal(missingSummary.ok, false);
     assert.equal(missingSummary.error?.code, "goal_summary_required");
@@ -817,7 +885,7 @@ test("goal completion requires a summary and accepts long summaries", async () =
     const longSummary = `${"Verified final state. ".repeat(80)}accepted`;
     const completed = await registry.call(
       { id: "gs_2b", name: "goal", arguments: { op: "complete", summary: longSummary } },
-      { session_id: session.session_id, run_id: "run_gs" },
+      { session_id: session.session_id, run_id: "run_gs", control_plane: true },
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
     assert.equal(readGoalState(store, session.session_id)?.goal.status, "complete");
@@ -846,14 +914,14 @@ test("goal reflection gates completion and can expand a new horizon generation",
           steps: [{ id: "first", title: "First horizon", status: "completed" }],
         },
       },
-      { session_id: session.session_id, run_id: "run_ga" },
+      { session_id: session.session_id, run_id: "run_ga", control_plane: true },
     );
     assert.equal(created.ok, true, JSON.stringify(created));
     assert.equal(readGoalState(store, session.session_id)?.goal.horizon_generation, 0);
 
     const blockedComplete = await registry.call(
       { id: "ga_complete_early", name: "goal", arguments: { op: "complete", summary: "Done too early." } },
-      { session_id: session.session_id, run_id: "run_ga" },
+      { session_id: session.session_id, run_id: "run_ga", control_plane: true },
     );
     assert.equal(blockedComplete.ok, false);
     assert.equal(blockedComplete.error?.code, "goal_reflection_required");
@@ -941,10 +1009,92 @@ test("goal reflection gates completion and can expand a new horizon generation",
 
     const completed = await registry.call(
       { id: "ga_complete", name: "goal", arguments: { op: "complete", summary: "Verified no more horizon." } },
-      { session_id: session.session_id, run_id: "run_ga_complete" },
+      { session_id: session.session_id, run_id: "run_ga_complete", control_plane: true },
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
     assert.equal(readGoalState(store, session.session_id)?.goal.status, "complete");
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("goal review policy stages reflection decisions until approved", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-review-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_review", root: dir, alias: "goal-review" };
+    const session = store.createSession(workspace, "goal-review");
+    const registry = new ToolRegistry(config(), workspace, store);
+
+    const created = await registry.call(
+      {
+        id: "review_create",
+        name: "goal",
+        arguments: {
+          op: "create",
+          objective: "Review horizon expansion",
+          hil_policy: "review",
+          steps: [{ id: "first", title: "First horizon", status: "completed" }],
+        },
+      },
+      { session_id: session.session_id, run_id: "run_review_create", control_plane: true },
+    );
+    assert.equal(created.ok, true, JSON.stringify(created));
+
+    const reflected = await registry.call(
+      {
+        id: "review_reflect",
+        name: "goal",
+        arguments: {
+          op: "reflect",
+          decision: "expand",
+          summary: "Proposed reviewed horizon.",
+          steps: [{ id: "second", title: "Second reviewed horizon", status: "pending" }],
+        },
+      },
+      { session_id: session.session_id, run_id: "run_review_reflect", request_class: "reflection", visibility: "internal" },
+    );
+    assert.equal(reflected.ok, true, JSON.stringify(reflected));
+    let goal = readGoalState(store, session.session_id)?.goal;
+    assert.equal(goal?.status, "paused");
+    assert.equal(goal?.hil_policy, "review");
+    assert.equal(goal?.horizon_generation, 0);
+    assert.equal(goal?.pending_review_decision?.action, "expand");
+    assert.equal(goal?.pending_review_decision?.steps?.[0]?.id, "second");
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded"), false);
+
+    const viewBefore = readGoalLoopView(store, session.session_id);
+    assert.equal(viewBefore.pending_review_decision?.action, "expand");
+    assert.equal(viewBefore.current_horizon?.generation, 0);
+
+    const resumeBlocked = await registry.call(
+      { id: "review_resume", name: "goal", arguments: { op: "resume" } },
+      { session_id: session.session_id, run_id: "run_review_resume", control_plane: true },
+    );
+    assert.equal(resumeBlocked.ok, false);
+    assert.equal(resumeBlocked.error?.code, "goal_review_pending");
+
+    const approved = await registry.call(
+      { id: "review_approve", name: "goal", arguments: { op: "review_decision", review_decision: "approve" } },
+      { session_id: session.session_id, run_id: "run_review_approve", control_plane: true },
+    );
+    assert.equal(approved.ok, true, JSON.stringify(approved));
+    goal = readGoalState(store, session.session_id)?.goal;
+    assert.equal(goal?.status, "active");
+    assert.equal(goal?.horizon_generation, 1);
+    assert.equal(goal?.planning?.active_step_id, "second");
+    assert.equal(goal?.pending_review_decision, undefined);
+
+    const viewAfter = readGoalLoopView(store, session.session_id);
+    assert.equal(viewAfter.current_horizon?.generation, 1);
+    assert.equal(viewAfter.reflections.at(-1)?.decision, "expand");
+    const reflectionVerification = viewAfter.verifications.find((record) => record.provider === "reflection");
+    const humanVerification = viewAfter.verifications.find((record) => record.provider === "human");
+    assert.equal(reflectionVerification?.verdict, "partial");
+    assert.equal(humanVerification?.verdict, "partial");
+    assert.equal(humanVerification?.confidence, "hard");
+    assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.review.resolved"), true);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -977,7 +1127,7 @@ test("internal reflection plan updates become horizon expansion decisions", asyn
       { session_id: session.session_id, run_id: "run_reflection_update_plan", request_class: "reflection", visibility: "internal" },
     );
     assert.equal(expanded.ok, true, JSON.stringify(expanded));
-    assert.match(expanded.summary, /Goal horizon expanded/);
+    assert.match(expanded.summary, /Loop task expanded/);
     const afterExpand = readGoalState(store, session.session_id)?.goal;
     assert.equal(afterExpand?.horizon_generation, 1);
     assert.equal(afterExpand?.last_reflection_decision, "expand");
@@ -1052,7 +1202,7 @@ test("goal supervisor activity labels include the current horizon generation", a
         return { run_id: "run_work" };
       },
     });
-    assert.deepEqual(workLabels, ["Continuing goal horizon 0"]);
+    assert.deepEqual(workLabels, ["Continuing loop task 0"]);
 
     const reflectionSession = store.createSession(workspace, "goal-reflection-horizon");
     writeGoalState(
@@ -1073,7 +1223,7 @@ test("goal supervisor activity labels include the current horizon generation", a
         return { run_id: request.runId ?? "run_reflection" };
       },
     });
-    assert.deepEqual(reflectionLabels, ["Reflecting goal horizon 0"]);
+    assert.deepEqual(reflectionLabels, ["Reflecting loop task 0"]);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -1110,7 +1260,7 @@ test("goal supervisor treats accounting-only updates as no horizon progress", as
     });
 
     assert.equal(result.status, "waiting");
-    assert.equal(result.reason, "last supervisor turn did not update the horizon");
+    assert.equal(result.reason, "last supervisor turn did not update the loop task");
     assert.deepEqual(runIds, ["run_usage_0"]);
     assert.equal(readGoalState(store, session.session_id)?.goal.planning?.active_step_id, "active");
   } finally {
@@ -1143,7 +1293,7 @@ test("goal supervisor explains empty model turns as no goal progress", async () 
     });
 
     assert.equal(result.status, "waiting");
-    assert.equal(result.reason, "model returned an empty goal turn; no horizon progress was recorded");
+    assert.equal(result.reason, "model returned an empty loop turn; no loop task progress was recorded");
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -1158,7 +1308,7 @@ test("goal supervisor expands the next horizon when a done reflection leaves led
     const session = store.createSession(workspace, "goal-ledger-auto-expand");
     const registry = new ToolRegistry(config(), workspace, store);
     const state = replaceGoalPlanning(createGoalState({ objective: "Improve codebase broadly" }), {
-      summary: "Horizon 0 · Orientation",
+      summary: "Loop task 0 · Orientation",
       steps: [{ id: "orientation", title: "Orientation complete", status: "completed" }],
     });
     const goal = state.goal as any;
@@ -1190,7 +1340,7 @@ test("goal supervisor expands the next horizon when a done reflection leaves led
     });
 
     assert.equal(result.status, "waiting");
-    assert.equal(result.reason, "last supervisor turn did not update the horizon");
+    assert.equal(result.reason, "last supervisor turn did not update the loop task");
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.horizon_generation, 1);
@@ -1211,7 +1361,7 @@ test("completing a horizon step reconciles the matching open ledger candidate", 
     const session = store.createSession(workspace, "goal-ledger-step-reconcile");
     const registry = new ToolRegistry(config(), workspace, store);
     const state = replaceGoalPlanning(createGoalState({ objective: "Improve tests" }), {
-      summary: "Horizon 1 · Candidate work",
+      summary: "Loop task 1 · Candidate work",
       steps: [{ id: "tests", title: "Audit integration tests", status: "in_progress" }],
     });
     const goal = state.goal as any;
@@ -1255,7 +1405,7 @@ test("campaign goals checkpoint instead of completing when target time is reache
     const session = store.createSession(workspace, "goal-campaign-checkpoint");
     const registry = new ToolRegistry(config(), workspace, store);
     const state = replaceGoalPlanning(createGoalState({ objective: "Run a campaign", strategy: { mode: "campaign", inferred: false, target_hours: 0.001 } }), {
-      summary: "Horizon 1 · Campaign work",
+      summary: "Loop task 1 · Campaign work",
       steps: [{ id: "done", title: "Completed campaign slice", status: "completed" }],
     });
     state.goal.time_used_ms = 10_000;
@@ -1304,7 +1454,7 @@ test("goal reflection decisions require an internal reflection run context", asy
     const registry = new ToolRegistry(config(), workspace, store);
     const created = await registry.call(
       { id: "gac_create", name: "goal", arguments: { op: "create", objective: "Reject visible reflection spoofing" } },
-      { session_id: session.session_id, run_id: "run_gac" },
+      { session_id: session.session_id, run_id: "run_gac", control_plane: true },
     );
     assert.equal(created.ok, true, JSON.stringify(created));
 
@@ -1336,7 +1486,7 @@ test("goal reflection decisions require an internal reflection run context", asy
   }
 });
 
-test("internal reflection complete call records a done reflection decision", async () => {
+test("internal reflection complete call is rejected in favor of reflect decision", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-reflection-complete-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
@@ -1353,7 +1503,22 @@ test("internal reflection complete call records a done reflection decision", asy
       { session_id: session.session_id, run_id: "run_reflection_complete", request_class: "reflection", visibility: "internal" },
     );
 
-    assert.equal(reflectionComplete.ok, true, JSON.stringify(reflectionComplete));
+    assert.equal(reflectionComplete.ok, false);
+    assert.equal(reflectionComplete.error?.code, "invalid_tool_arguments");
+    const reflected = await registry.call(
+      {
+        id: "reflection_done",
+        name: "goal",
+        arguments: {
+          op: "reflect",
+          decision: "done",
+          summary: "Reflection found no remaining horizon.",
+          verification_evidence: { summary: "Reflection found no remaining horizon." },
+        },
+      },
+      { session_id: session.session_id, run_id: "run_reflection_complete", request_class: "reflection", visibility: "internal" },
+    );
+    assert.equal(reflected.ok, true, JSON.stringify(reflected));
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.reflection_status, "completed");
@@ -1381,7 +1546,7 @@ test("goal completion force cannot bypass the internal reflection gate", async (
 
     const blocked = await registry.call(
       { id: "force_complete_without_reflection", name: "goal", arguments: { op: "complete", summary: "Forced visible completion.", force: true } },
-      { session_id: session.session_id, run_id: "run_force_complete" },
+      { session_id: session.session_id, run_id: "run_force_complete", control_plane: true },
     );
 
     assert.equal(blocked.ok, false);
@@ -1413,7 +1578,7 @@ test("goal completion force cannot bypass unfinished horizon steps", async () =>
 
     const blocked = await registry.call(
       { id: "force_complete_with_unfinished_plan", name: "goal", arguments: { op: "complete", summary: "Forced visible completion.", force: true } },
-      { session_id: session.session_id, run_id: "run_force_complete" },
+      { session_id: session.session_id, run_id: "run_force_complete", control_plane: true },
     );
 
     assert.equal(blocked.ok, false);
@@ -1435,7 +1600,7 @@ test("internal reflection raw history is excluded from prompt replay while refle
     const registry = new ToolRegistry(config(), workspace, store);
     await registry.call(
       { id: "gap_create", name: "goal", arguments: { op: "create", objective: "Reflection prompt hygiene" } },
-      { session_id: session.session_id, run_id: "run_gap" },
+      { session_id: session.session_id, run_id: "run_gap", control_plane: true },
     );
     store.appendEvent({
       session_id: session.session_id,
@@ -1502,7 +1667,7 @@ test("goal completion reports persist cumulative usage totals", async () => {
     writeGoalState(store, session.session_id, complete, "run_goal_complete");
 
     const report = recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
-    assert.match(report?.report ?? "", /5 loops .*9 tool calls .*20s .*123 tokens used/);
+    assert.match(report?.report ?? "", /5 tool loops .*9 tool calls .*20s .*123 tokens used/);
     recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
 
     const events = store.listEvents(session.session_id).filter((event) => event.type === "goal.completion_report");
@@ -1547,7 +1712,7 @@ test("goal completion reports include the horizon count", async () => {
     writeGoalState(store, session.session_id, complete, "run_goal_complete");
 
     const report = recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
-    assert.match(report?.report ?? "", /2 horizons/);
+    assert.match(report?.report ?? "", /2 loop tasks/);
 
     const event = store.listEvents(session.session_id).find((item) => item.type === "goal.completion_report");
     assert.equal(event?.data.horizons, 2);
@@ -1579,7 +1744,7 @@ test("goal completion reports preserve sub-second duration", async () => {
     writeGoalState(store, session.session_id, complete, "run_goal_complete");
 
     const report = recordGoalCompletionReport(store, session.session_id, "run_goal_complete");
-    assert.match(report?.report ?? "", /1 loop .*1 tool call .*450ms .*7 tokens used/);
+    assert.match(report?.report ?? "", /1 tool loop .*1 tool call .*450ms .*7 tokens used/);
 
     const events = store.listEvents(session.session_id).filter((event) => event.type === "goal.completion_report");
     assert.equal(events.length, 1);
@@ -1755,7 +1920,7 @@ test("research goal completion requires logged metric evidence", async () => {
 
     const blocked = await registry.call(
       { id: "research_complete_blocked", name: "goal", arguments: { op: "complete", summary: "Done without metrics." } },
-      { session_id: session.session_id, run_id: "run_research_complete" },
+      { session_id: session.session_id, run_id: "run_research_complete", control_plane: true },
     );
     assert.equal(blocked.ok, false);
     assert.equal(blocked.error?.code, "goal_research_evidence_required");
@@ -1777,7 +1942,7 @@ test("research goal completion requires logged metric evidence", async () => {
 
     const completed = await registry.call(
       { id: "research_complete", name: "goal", arguments: { op: "complete", summary: "Done with metric evidence." } },
-      { session_id: session.session_id, run_id: "run_research_complete" },
+      { session_id: session.session_id, run_id: "run_research_complete", control_plane: true },
     );
     assert.equal(completed.ok, true, JSON.stringify(completed));
     assert.equal(readGoalState(store, session.session_id)?.goal.status, "complete");
@@ -2202,7 +2367,7 @@ test("mode context renderers escape tag-like dynamic text", async () => {
 
     await registry.call(
       { id: "esc_goal_1", name: "goal", arguments: { op: "create", objective: "Stabilize <prefix> cache", kind: "research" } },
-      { session_id: session.session_id, run_id: "run_escape" },
+      { session_id: session.session_id, run_id: "run_escape", control_plane: true },
     );
     await registry.call(
       {

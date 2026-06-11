@@ -50,6 +50,8 @@ export const LSP_REGISTRY: LanguageSpec[] = [
   { id: "haskell", extensions: [".hs"], root_markers: ["stack.yaml", "*.cabal"], commands: ["haskell-language-server-wrapper"] },
 ];
 
+const AST_LANGUAGES = new Set(["typescript", "javascript", "tsx", "jsx", "python"]);
+
 export async function lspTool(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const action = String(args.action);
   if (action === "status") {
@@ -106,8 +108,15 @@ export async function lspRenameTool(args: JsonObject, context: ToolExecutionCont
 export async function astGrep(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const rel = String(args.path);
   const file = resolveInside(context.workspace.root, rel);
-  const text = await fs.readFile(file, "utf8");
   const language = String(args.language);
+  if (!AST_LANGUAGES.has(language)) {
+    return fail("unsupported_ast_language", `ast_grep supports TypeScript/JavaScript and Python only; unsupported language: ${language}`);
+  }
+  const source = await readAstFile(file, rel, "ast_grep");
+  if ("failure" in source) {
+    return source.failure;
+  }
+  const text = source.text;
   const selector = String(args.selector);
   const limit = typeof args.limit === "number" ? Math.max(1, Math.min(args.limit, 500)) : 100;
   const matches = language.startsWith("python")
@@ -119,8 +128,15 @@ export async function astGrep(args: JsonObject, context: ToolExecutionContext): 
 export async function astEdit(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const rel = String(args.path);
   const file = resolveInside(context.workspace.root, rel);
-  const text = await fs.readFile(file, "utf8");
   const language = String(args.language);
+  if (!AST_LANGUAGES.has(language)) {
+    return fail("unsupported_ast_language", `ast_edit supports TypeScript/JavaScript and Python only; unsupported language: ${language}`);
+  }
+  const source = await readAstFile(file, rel, "ast_edit");
+  if ("failure" in source) {
+    return source.failure;
+  }
+  const text = source.text;
   const selector = String(args.selector);
   const operation = String(args.operation);
   const rawContent = typeof args.content === "string" ? args.content : "";
@@ -161,6 +177,18 @@ export async function astEdit(args: JsonObject, context: ToolExecutionContext): 
     match: match as never,
     diff: simpleUnifiedDiff(rel, text, updated, false),
   });
+}
+
+async function readAstFile(file: string, rel: string, toolName: string): Promise<{ text: string } | { failure: ToolResult }> {
+  try {
+    const stat = await fs.stat(file);
+    if (!stat.isFile()) {
+      return { failure: fail("ast_path_must_be_file", `${toolName} requires a file path; use glob, file_search, or list_dir for directories: ${rel}`) };
+    }
+    return { text: await fs.readFile(file, "utf8") };
+  } catch (error) {
+    return { failure: fail("ast_file_read_failed", error instanceof Error ? error.message : String(error)) };
+  }
 }
 
 function tsMatches(text: string, selector: string, rel: string, scriptKind: ts.ScriptKind): JsonObject[] {

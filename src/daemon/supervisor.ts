@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config/config.js";
 import { resolveWorkspace } from "../session/workspace.js";
-import { SessionStore, type SupervisorJob } from "../session/store.js";
+import { SessionStore, type AutomationSchedule, type DiscoverySchedule, type ManagedWorktree, type SupervisorJob } from "../session/store.js";
 import { Runtime } from "../runtime.js";
 import type { JsonObject } from "../types.js";
 import { homeStateDir, pathExists } from "../util/fs.js";
@@ -12,12 +12,17 @@ import { randomId } from "../util/hash.js";
 import { readGoalState } from "../goals/state.js";
 import { buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
 import { DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS, runGoalSupervisor } from "../goals/supervisor.js";
+import { enqueueDueAutomationSchedules } from "../loop/automation.js";
+import { createLoopWorktree, loopWorktreeRunTarget } from "../loop/worktree.js";
+import { runDueDiscoverySchedules } from "../loop/discovery.js";
 
 export interface DaemonStatus {
   pid?: number;
   alive: boolean;
   pid_file: string;
   jobs: SupervisorJob[];
+  schedules: AutomationSchedule[];
+  discovery_schedules: DiscoverySchedule[];
 }
 
 export function daemonPidFile(stateDir?: string): string {
@@ -68,6 +73,8 @@ export async function daemonStatus(stateDir?: string): Promise<DaemonStatus> {
       alive: pid ? processAlive(pid) : false,
       pid_file: pidFile,
       jobs: store.listSupervisorJobs(),
+      schedules: store.listAutomationSchedules(),
+      discovery_schedules: store.listDiscoverySchedules(),
     };
   } finally {
     store.close();
@@ -101,6 +108,61 @@ export async function queueDaemonRun(options: {
   }
 }
 
+export async function queueDaemonRunInWorktree(options: {
+  stateDir?: string;
+  workspaceRoot: string;
+  sessionId?: string;
+  prompt: string;
+  title?: string;
+  configPath?: string;
+  baseRef?: string;
+  branch?: string;
+  path?: string;
+}): Promise<{ worktree: ManagedWorktree; job: SupervisorJob }> {
+  const configPath = daemonConfigPath(options.workspaceRoot, options.stateDir, options.configPath);
+  const { config } = await loadConfig(options.workspaceRoot, configPath);
+  const workspace = await resolveWorkspace(options.workspaceRoot, config, options.workspaceRoot);
+  const store = await SessionStore.open(options.stateDir);
+  try {
+    const existingSession = options.sessionId ? store.getSession(options.sessionId) ?? store.findSessionByPrefix(workspace.id, options.sessionId) : undefined;
+    if (options.sessionId && !existingSession) {
+      throw new Error(`Unknown session for daemon run: ${options.sessionId}`);
+    }
+    const worktree = await createLoopWorktree(store, workspace, {
+      base_ref: options.baseRef,
+      branch: options.branch,
+      path: options.path,
+      metadata: { purpose: "daemon_run" },
+    });
+    const target = loopWorktreeRunTarget(worktree, workspace);
+    const session = existingSession ?? store.createSession(workspace, options.title ?? `daemon:${options.prompt.slice(0, 40)}`);
+    const metadata = metadataWithConfigPath(
+      {
+        isolation: "worktree",
+        worktree_id: worktree.worktree_id,
+        worktree_path: worktree.path,
+        worktree_branch: worktree.branch,
+        base_ref: worktree.base_ref,
+      },
+      configPath,
+    );
+    const job = store.createSupervisorJob(session.session_id, target.workspace_root, options.prompt, { metadata });
+    store.updateManagedWorktree(worktree.worktree_id, {
+      session_id: session.session_id,
+      job_id: job.job_id,
+      metadata: { ...worktree.metadata, session_id: session.session_id, job_id: job.job_id },
+    });
+    store.appendEvent({
+      session_id: session.session_id,
+      type: "loop.worktree.assigned",
+      data: worktreeEventData(worktree, job),
+    });
+    return { worktree: store.getManagedWorktree(worktree.worktree_id) ?? worktree, job };
+  } finally {
+    store.close();
+  }
+}
+
 export async function queueDaemonGoal(options: {
   stateDir?: string;
   workspaceRoot: string;
@@ -127,6 +189,69 @@ export async function queueDaemonGoal(options: {
       goal_id: goal.goal.id,
       metadata: metadataWithConfigPath({ max_iterations: options.maxIterations ?? 1000 }, configPath),
     });
+  } finally {
+    store.close();
+  }
+}
+
+export async function queueDaemonGoalInWorktree(options: {
+  stateDir?: string;
+  workspaceRoot: string;
+  sessionId: string;
+  prompt?: string;
+  maxIterations?: number;
+  configPath?: string;
+  baseRef?: string;
+  branch?: string;
+  path?: string;
+}): Promise<{ worktree: ManagedWorktree; job: SupervisorJob }> {
+  const configPath = daemonConfigPath(options.workspaceRoot, options.stateDir, options.configPath);
+  const { config } = await loadConfig(options.workspaceRoot, configPath);
+  const workspace = await resolveWorkspace(options.workspaceRoot, config, options.workspaceRoot);
+  const store = await SessionStore.open(options.stateDir);
+  try {
+    const session = store.getSession(options.sessionId) ?? store.findSessionByPrefix(workspace.id, options.sessionId);
+    if (!session) {
+      throw new Error(`Unknown session for daemon goal: ${options.sessionId}`);
+    }
+    const goal = readGoalState(store, session.session_id);
+    if (!goal || goal.goal.status === "complete" || goal.goal.status === "dropped") {
+      throw new Error("No active goal is available for daemon supervision.");
+    }
+    const worktree = await createLoopWorktree(store, workspace, {
+      base_ref: options.baseRef,
+      branch: options.branch,
+      path: options.path,
+      metadata: { purpose: "daemon_goal", goal_id: goal.goal.id },
+    });
+    const target = loopWorktreeRunTarget(worktree, workspace);
+    const metadata = metadataWithConfigPath(
+      {
+        max_iterations: options.maxIterations ?? 1000,
+        isolation: "worktree",
+        worktree_id: worktree.worktree_id,
+        worktree_path: worktree.path,
+        worktree_branch: worktree.branch,
+        base_ref: worktree.base_ref,
+      },
+      configPath,
+    );
+    const job = store.createSupervisorJob(session.session_id, target.workspace_root, options.prompt ?? buildGoalWorkPrompt(goal.goal), {
+      kind: "goal",
+      goal_id: goal.goal.id,
+      metadata,
+    });
+    store.updateManagedWorktree(worktree.worktree_id, {
+      session_id: session.session_id,
+      job_id: job.job_id,
+      metadata: { ...worktree.metadata, session_id: session.session_id, job_id: job.job_id },
+    });
+    store.appendEvent({
+      session_id: session.session_id,
+      type: "loop.worktree.assigned",
+      data: worktreeEventData(worktree, job),
+    });
+    return { worktree: store.getManagedWorktree(worktree.worktree_id) ?? worktree, job };
   } finally {
     store.close();
   }
@@ -233,6 +358,8 @@ export async function serveDaemon(options: { stateDir?: string; once?: boolean }
   await fs.writeFile(pidFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }, null, 2));
   try {
     while (true) {
+      await runDueDiscoverySchedules(store);
+      await enqueueDueAutomationSchedules(store);
       const queued = [...store.listSupervisorJobs("queued"), ...store.listSupervisorJobs("detached")];
       for (const job of queued) {
         const latest = store.getSupervisorJob(job.job_id);
@@ -275,21 +402,40 @@ async function runJob(store: SessionStore, job: SupervisorJob, stateDir?: string
     const { config } = await loadConfig(job.workspace_root, configPathFromMetadata(job.metadata));
     const workspace = await resolveWorkspace(job.workspace_root, config, job.workspace_root);
     const runtime = new Runtime(config, workspace, store);
+    const requestClass = job.metadata.request_class === "verification" ? "verification" : "background";
+    if (requestClass === "verification") {
+      store.appendEvent({
+        session_id: job.session_id,
+        run_id: runId,
+        type: "goal.verification.requested",
+        data: {
+          suite_id: stringMeta(job.metadata.suite_id),
+          goal_id: stringMeta(job.metadata.goal_id) ?? stringMeta(job.metadata.parent_goal_id),
+          horizon_generation: numberMeta(job.metadata.horizon_generation, numberMeta(job.metadata.parent_horizon_generation, 0)),
+          role: stringMeta(job.metadata.verifier_role),
+          source: "daemon",
+        },
+      });
+    }
     await runtime.run({
       prompt: job.prompt,
       session_id: job.session_id,
+      run_id: runId,
       client_id: `daemon:${process.pid}`,
       owner_kind: "daemon",
-      request_class: "background",
+      request_class: requestClass,
+      visibility: requestClass === "verification" ? "internal" : undefined,
     });
     let after = store.getSupervisorJob(job.job_id);
-    if (after?.status !== "cancel_requested") {
-      await runGoalSupervisor({
+    let goalOutcome: Awaited<ReturnType<typeof runGoalSupervisor>> | undefined;
+    if (after?.status !== "cancel_requested" && job.metadata.skip_goal_supervisor !== true) {
+      goalOutcome = await runGoalSupervisor({
         store,
         sessionId: job.session_id,
         supervisor: "daemon",
         maxIterations: numberMeta(job.metadata.goal_max_iterations, DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS),
         workRequestClass: "background",
+        autoVerifyCompletion: true,
         shouldContinue: () => {
           const latest = store.getSupervisorJob(job.job_id);
           return Boolean(latest && latest.status !== "cancel_requested" && latest.status !== "cancelled");
@@ -310,6 +456,17 @@ async function runJob(store: SessionStore, job: SupervisorJob, stateDir?: string
     if (after?.status === "cancel_requested") {
       store.updateSupervisorJob(job.job_id, { status: "cancelled" });
       store.appendEvent({ session_id: job.session_id, run_id: runId, type: "daemon.job.cancelled", data: { job_id: job.job_id } });
+    } else if (goalOutcome && goalOutcome.status !== "complete" && goalOutcome.status !== "idle") {
+      store.updateSupervisorJob(job.job_id, {
+        status: goalOutcome.status === "blocked" ? "blocked" : "paused",
+        metadata: { ...after?.metadata, pause_reason: goalOutcome.reason ?? goalOutcome.status },
+      });
+      store.appendEvent({
+        session_id: job.session_id,
+        run_id: goalOutcome.run_id ?? runId,
+        type: "goal.supervisor.paused",
+        data: { job_id: job.job_id, goal_id: goalOutcome.goal_id, status: goalOutcome.status, reason: goalOutcome.reason },
+      });
     } else {
       store.updateSupervisorJob(job.job_id, { status: "complete" });
       store.appendEvent({ session_id: job.session_id, run_id: runId, type: "daemon.job.complete", data: { job_id: job.job_id } });
@@ -345,6 +502,7 @@ async function runGoalJob(store: SessionStore, job: SupervisorJob, stateDir?: st
       supervisor: "daemon",
       maxIterations: numberMeta(job.metadata.max_iterations, DEFAULT_GOAL_SUPERVISOR_MAX_ITERATIONS),
       workRequestClass: "background",
+      autoVerifyCompletion: true,
       shouldContinue: () => {
         const latest = store.getSupervisorJob(job.job_id);
         return Boolean(latest && latest.status !== "cancel_requested" && latest.status !== "cancelled");
@@ -415,6 +573,10 @@ function numberMeta(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
 }
 
+function stringMeta(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function daemonConfigPath(workspaceRoot: string, stateDir: string | undefined, configPath: string | undefined): string | undefined {
   if (configPath) {
     return path.resolve(workspaceRoot, configPath);
@@ -428,6 +590,17 @@ function metadataWithConfigPath(metadata: JsonObject, configPath: string | undef
 
 function configPathFromMetadata(metadata: JsonObject): string | undefined {
   return typeof metadata.config_path === "string" && metadata.config_path.trim() ? metadata.config_path : undefined;
+}
+
+function worktreeEventData(worktree: ManagedWorktree, job: SupervisorJob): JsonObject {
+  return {
+    worktree_id: worktree.worktree_id,
+    worktree_path: worktree.path,
+    worktree_branch: worktree.branch,
+    base_ref: worktree.base_ref,
+    job_id: job.job_id,
+    job_kind: job.kind,
+  };
 }
 
 function processAlive(pid: number): boolean {

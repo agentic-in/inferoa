@@ -124,19 +124,19 @@ function renderActivityEvent(event: SessionEvent): string[] {
       ].filter(Boolean);
       const report = labeled("report", compactInlineString(data.report, 160));
       return [
-        `${stamp} · ${fg256(39, "goal")} complete${parts.length ? ` · ${parts.join(" · ")}` : ""}`,
+        `${stamp} · ${fg256(39, "loop")} complete${parts.length ? ` · ${parts.join(" · ")}` : ""}`,
         detail.length ? `${fg256(244, "  ")}${detail.join(" · ")}` : undefined,
         report ? `${fg256(244, "  ")}${report}` : undefined,
       ].filter((line): line is string => Boolean(line));
     }
     case "goal.horizon.expanded": {
       const parts = [
-        labeled("horizon", data.horizon_generation),
+        labeled("task", data.horizon_generation),
         labeled("previous", data.previous_horizon_generation),
         labeled("steps", data.step_count),
         labeled("active", data.active_step_id),
       ].filter(Boolean);
-      return [`${stamp} · ${fg256(39, "goal horizon started")}${parts.length ? ` · ${parts.join(" · ")}` : ""}`];
+      return [`${stamp} · ${fg256(39, "loop task started")}${parts.length ? ` · ${parts.join(" · ")}` : ""}`];
     }
     case "run.completed":
     case "run.stopped":

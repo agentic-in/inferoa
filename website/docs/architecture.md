@@ -3,14 +3,16 @@ id: architecture
 title: Architecture
 ---
 
-Inferoa is organized around loop engineering on the tokenmaxxing path:
+Inferoa is organized around loop engineering on the tokenmaxxing path. For the
+full glossary and concept relationships, see
+[System concepts](./concepts/system-concepts.md).
 
 ```mermaid
 flowchart TB
   subgraph Harness["Loop engineering harness"]
     Sessions["Durable sessions"]
     Goals["Recursive goals"]
-    Plans["Plans and research goals"]
+    Plans["Plans and research loops"]
     Tools["Tool schemas"]
     Evidence["Evidence ledger"]
   end
@@ -37,12 +39,12 @@ flowchart TB
 
 ## Agent Harness
 
-The harness owns durable sessions, recursive goals, plans, research state,
+The harness owns durable sessions, recursive loops, plans, research state,
 tool traces, managed resources, recovery, and verification. These are not just
 UI features; they define the state that long-horizon inference has to preserve.
 
-Goal mode is the loop-engineering surface: it keeps the outcome, horizons,
-candidate work, evidence, reflection, and completion report active while the
+Loop mode is the loop-engineering surface: it keeps the outcome, loop tasks,
+candidate work, evidence, decisions, and completion report active while the
 agent continues working.
 
 ## Prefix Cache Discipline

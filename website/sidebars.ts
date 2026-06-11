@@ -18,13 +18,13 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "Core Concepts",
       collapsed: false,
-      items: ["concepts/tokenmaxxing", "concepts/context-optimization", "concepts/prefix-cache"],
+      items: ["concepts/system-concepts", "concepts/tokenmaxxing", "concepts/context-optimization", "concepts/prefix-cache"],
     },
     {
       type: "category",
       label: "Workflows",
       collapsed: false,
-      items: ["workflows/goal-mode", "workflows/plan-mode", "workflows/coding-workflow", "workflows/daemon-jobs"],
+      items: ["workflows/loop-mode", "workflows/plan-mode", "workflows/coding-workflow", "workflows/daemon-jobs"],
     },
     {
       type: "category",

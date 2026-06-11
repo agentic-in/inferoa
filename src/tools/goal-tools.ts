@@ -2,7 +2,10 @@ import type { JsonObject, ToolResult } from "../types.js";
 import { fail, ok } from "../util/limit.js";
 import type { ToolExecutionContext } from "./context.js";
 import {
+  blockGoalForReview,
+  clearGoalPendingReviewDecision,
   cloneGoalState,
+  completeGoalAfterReflection,
   completeGoalReflection,
   completionBudgetReport,
   createGoalState,
@@ -13,11 +16,17 @@ import {
   incompleteGoalPlanningMessage,
   goalPlanningProgressSummary,
   parseGoalReflectionDecision,
+  parseGoalHilPolicy,
   parseGoalStepStatus,
+  recordGoalCompletionReport,
   readGoalHorizons,
   readGoalState,
   replaceGoalPlanning,
+  setGoalVerifierPolicy,
+  setGoalOwner,
+  setGoalReviewOwner,
   setGoalStrategy,
+  stageGoalReviewDecision,
   updateGoalPlanningStep,
   updateGoalLedger,
   validateTokenBudget,
@@ -29,11 +38,31 @@ import {
   type GoalStrategyMode,
   type GoalState,
   type GoalKind,
+  type GoalCommandVerifierInput,
 } from "../goals/state.js";
 import { readAutoresearchState, researchCompletionBlockMessage, setAutoresearchMode } from "../autoresearch/state.js";
+import {
+  humanReviewVerificationVerdict,
+  goalVerifierPolicyCompletionBlockMessage,
+  recordGoalVerification,
+  reflectionVerificationVerdict,
+} from "../loop/verification.js";
+import type { GoalLoopVerificationConfidence, GoalLoopVerificationProvider, GoalLoopVerificationVerdict } from "../loop/types.js";
+
+const CONTROL_PLANE_GOAL_OPS = new Set(["create", "review_decision", "resume", "complete", "drop"]);
 
 export async function goalTool(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const op = stringArg(args.op) ?? "get";
+  if (CONTROL_PLANE_GOAL_OPS.has(op) && !context.control_plane) {
+    return fail(
+      "goal_control_plane_required",
+      `goal op=${op} is a loop control-plane action. Use /loop for user-facing loop creation, review, resume, completion, or drop.`,
+    );
+  }
+  const verificationOperation = handleVerificationGoalOperation(op, context);
+  if (verificationOperation) {
+    return verificationOperation;
+  }
   const reflectionOperation = handleInternalReflectionGoalOperation(op, args, context);
   if (reflectionOperation) {
     return reflectionOperation;
@@ -51,8 +80,22 @@ export async function goalTool(args: JsonObject, context: ToolExecutionContext):
         return updateGoalStep(args, context);
       case "reflect":
         return recordGoalReflection(args, context);
+      case "verify":
+        return recordGoalVerificationTool(args, context);
+      case "review_decision":
+        return reviewGoalDecision(args, context);
       case "set_strategy":
         return updateGoalStrategy(args, context);
+      case "set_owner":
+        return updateGoalOwner(args, context);
+      case "clear_owner":
+        return updateGoalOwner({ owner: "" }, context);
+      case "set_review_owner":
+        return updateGoalReviewOwner(args, context);
+      case "clear_review_owner":
+        return updateGoalReviewOwner({ review_owner: "" }, context);
+      case "set_verifier_policy":
+        return updateGoalVerifierPolicy(args, context);
       case "update_ledger":
         return updateLedger(args, context);
       case "resume":
@@ -69,11 +112,31 @@ export async function goalTool(args: JsonObject, context: ToolExecutionContext):
   }
 }
 
+interface GoalVerificationReflectionInput {
+  decision: string;
+  summary?: string;
+  verification_evidence?: JsonObject;
+  blocker?: string;
+}
+
+function handleVerificationGoalOperation(op: string, context: ToolExecutionContext): ToolResult | undefined {
+  if (context.request_class !== "verification") {
+    return undefined;
+  }
+  if (op === "get" || op === "verify") {
+    return undefined;
+  }
+  const state = readGoalState(context.store, context.session_id);
+  return state
+    ? failGoalWithState(state, "goal_verification_read_only", "Verification runs can only inspect goal state or record goal op=verify.")
+    : fail("goal_missing", "No goal to verify.");
+}
+
 function handleInternalReflectionGoalOperation(op: string, args: JsonObject, context: ToolExecutionContext): ToolResult | undefined {
   if (!isInternalReflectionContext(context)) {
     return undefined;
   }
-  if (op === "get" || op === "reflect" || op === "complete" || op === "update_ledger") {
+  if (op === "get" || op === "reflect" || op === "update_ledger") {
     return undefined;
   }
   if (op === "decompose" || op === "update_plan") {
@@ -117,9 +180,16 @@ function createGoal(args: JsonObject, context: ToolExecutionContext): ToolResult
   if (args.kind !== undefined && !kind) {
     return fail("goal_kind_invalid", "kind must be task or research");
   }
+  const hilPolicy = parseGoalHilPolicy(args.hil_policy);
+  if (args.hil_policy !== undefined && !hilPolicy) {
+    return fail("goal_hil_policy_invalid", "hil_policy must be auto or review");
+  }
   let state = createGoalState({
     objective,
+    owner: stringArg(args.owner),
+    review_owner: stringArg(args.review_owner),
     kind,
+    hil_policy: hilPolicy,
     token_budget: tokenBudget,
     strategy: mode
       ? {
@@ -190,7 +260,7 @@ function updateGoalPlan(args: JsonObject, context: ToolExecutionContext, op: str
   } else {
     return fail("goal_steps_required", "steps are required before goal planning can be updated");
   }
-  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), steps ? "Goal decomposed" : "Goal plan updated", context);
+  return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), steps ? "Loop decomposed" : "Loop plan updated", context);
 }
 
 function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolResult {
@@ -218,7 +288,7 @@ function updateGoalStep(args: JsonObject, context: ToolExecutionContext): ToolRe
       evidence: objectArg(args.evidence),
       active_step_id: stringArg(args.active_step_id),
     });
-    return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal step updated", context);
+    return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Loop step updated", context);
   } catch (error) {
     return failGoalWithState(state, "goal_step_update_failed", error instanceof Error ? error.message : String(error));
   }
@@ -243,6 +313,64 @@ function updateGoalStrategy(args: JsonObject, context: ToolExecutionContext): To
     rationale: stringArg(args.rationale),
   });
   return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal strategy updated", context);
+}
+
+function updateGoalOwner(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to assign.");
+  }
+  if (state.goal.status === "complete" || state.goal.status === "dropped") {
+    return fail("goal_closed", `Cannot update owner for a ${state.goal.status} goal.`);
+  }
+  const owner = stringArg(args.owner)?.trim();
+  const next = setGoalOwner(state, owner);
+  const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
+  return describeGoal(saved, saved.goal.owner ? "Loop owner set" : "Loop owner cleared", context);
+}
+
+function updateGoalReviewOwner(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to assign for review.");
+  }
+  if (state.goal.status === "complete" || state.goal.status === "dropped") {
+    return fail("goal_closed", `Cannot update review owner for a ${state.goal.status} goal.`);
+  }
+  const owner = stringArg(args.review_owner)?.trim();
+  const next = setGoalReviewOwner(state, owner);
+  const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
+  return describeGoal(saved, saved.goal.review_owner ? "Loop review owner set" : "Loop review owner cleared", context);
+}
+
+function updateGoalVerifierPolicy(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to update.");
+  }
+  if (state.goal.status === "complete" || state.goal.status === "dropped") {
+    return fail("goal_closed", `Cannot update a ${state.goal.status} goal.`);
+  }
+  const commandVerifiers = commandVerifiersArg(args.command_verifiers);
+  if (!commandVerifiers) {
+    return failGoalWithState(state, "goal_verifier_policy_required", "command_verifiers is required for op=set_verifier_policy.");
+  }
+  try {
+    const next = setGoalVerifierPolicy(state, { command_verifiers: commandVerifiers });
+    const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
+    context.store.appendEvent({
+      session_id: context.session_id,
+      run_id: context.run_id,
+      type: "goal.verifier_policy.updated",
+      data: {
+        goal_id: saved.goal.id,
+        command_verifier_count: saved.goal.verifier_policy?.command_verifiers.length ?? 0,
+      },
+    });
+    return describeGoal(saved, "Goal verifier policy updated", context);
+  } catch (error) {
+    return failGoalWithState(state, "goal_verifier_policy_failed", error instanceof Error ? error.message : String(error));
+  }
 }
 
 function updateLedger(args: JsonObject, context: ToolExecutionContext): ToolResult {
@@ -281,18 +409,36 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
     return failGoalWithState(state, "goal_reflection_decision_required", "decision is required for op=reflect and must be expand, done, or blocked");
   }
   try {
-    const next = completeGoalReflection(
-      state,
-      {
-        decision,
-        summary: stringArg(args.summary),
-        verification_evidence: objectArg(args.verification_evidence) ?? objectArg(args.evidence),
-        blocker: stringArg(args.blocker),
-        steps: stepsArg(args.steps),
-        active_step_id: stringArg(args.active_step_id),
-      },
-      context.run_id ?? "",
-    );
+    const input = {
+      decision,
+      summary: stringArg(args.summary),
+      verification_evidence: objectArg(args.verification_evidence) ?? objectArg(args.evidence),
+      blocker: stringArg(args.blocker),
+      steps: stepsArg(args.steps),
+      active_step_id: stringArg(args.active_step_id),
+    };
+    if (state.goal.hil_policy === "review") {
+      const next = stageGoalReviewDecision(state, input, context.run_id ?? "");
+      const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
+      context.store.appendEvent({
+        session_id: context.session_id,
+        run_id: context.run_id,
+        type: "goal.review.pending",
+        data: {
+          goal_id: saved.goal.id,
+          pending_decision_id: saved.goal.pending_review_decision?.id,
+          source_horizon_generation: state.goal.horizon_generation,
+          action: decision,
+          summary: saved.goal.pending_review_decision?.summary,
+          verification_evidence: saved.goal.pending_review_decision?.verification_evidence,
+          blocker: saved.goal.pending_review_decision?.blocker,
+          step_count: saved.goal.pending_review_decision?.steps?.length ?? 0,
+        },
+      });
+      appendReflectionVerificationRecord(context, state, saved, input);
+      return describeGoal(saved, "Goal review pending", context);
+    }
+    const next = completeGoalReflection(state, input, context.run_id ?? "");
     const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
     context.store.appendEvent({
       session_id: context.session_id,
@@ -308,6 +454,7 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
         blocker: saved.goal.blocker,
       },
     });
+    appendReflectionVerificationRecord(context, state, saved, input);
     if (decision === "expand") {
       context.store.appendEvent({
         session_id: context.session_id,
@@ -322,10 +469,222 @@ function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): 
         },
       });
     }
-    return describeGoal(saved, decision === "expand" ? "Goal horizon expanded" : "Goal reflection recorded", context);
+    return describeGoal(saved, decision === "expand" ? "Loop task expanded" : "Loop decision recorded", context);
   } catch (error) {
     return failGoalWithState(state, "goal_reflection_failed", error instanceof Error ? error.message : String(error));
   }
+}
+
+function recordGoalVerificationTool(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to verify.");
+  }
+  const verdict = parseVerificationVerdictArg(args.verdict ?? args.decision);
+  if (!verdict) {
+    return failGoalWithState(state, "goal_verification_verdict_required", "verdict is required for op=verify and must be pass, fail, partial, blocked, or unknown.");
+  }
+  const provider = parseVerificationProviderArg(args.provider) ?? (context.request_class === "verification" ? "checker" : "human");
+  if (provider === "reflection" || provider === "research") {
+    return failGoalWithState(state, "goal_verification_provider_reserved", "Use op=reflect for reflection verification and autoresearch tools for research verification.");
+  }
+  if (provider === "checker" && context.request_class !== "verification") {
+    return failGoalWithState(state, "goal_checker_requires_verification_run", "checker verification must be recorded from a verification run.");
+  }
+  const confidence = parseVerificationConfidenceArg(args.confidence) ?? (provider === "command" ? "hard" : "soft");
+  const record = recordGoalVerification(context.store, context.session_id, {
+    provider,
+    verdict,
+    confidence,
+    goal_id: state.goal.id,
+    horizon_generation: state.goal.horizon_generation,
+    run_id: context.run_id,
+    evidence: objectArg(args.evidence) ?? objectArg(args.verification_evidence),
+    evidence_resource_uri: stringArg(args.evidence_resource_uri),
+    metrics: objectArg(args.metrics),
+    summary: stringArg(args.summary),
+    failure_reason: stringArg(args.failure_reason) ?? stringArg(args.blocker),
+  }, context.run_id);
+  return ok(`Recorded ${provider} verification: ${verdict}`, { verification: record as unknown as JsonObject });
+}
+
+function reviewGoalDecision(args: JsonObject, context: ToolExecutionContext): ToolResult {
+  const state = readGoalState(context.store, context.session_id);
+  if (!state) {
+    return fail("goal_missing", "No goal to review.");
+  }
+  const pending = state.goal.pending_review_decision;
+  if (!pending) {
+    return failGoalWithState(state, "goal_review_missing", "No pending goal review decision.");
+  }
+  const decision = parseReviewDecisionArg(args.review_decision ?? args.decision);
+  if (!decision) {
+    return failGoalWithState(state, "goal_review_decision_required", "review_decision must be approve, reject, revise, or block");
+  }
+  const feedback = stringArg(args.feedback) ?? stringArg(args.summary);
+  try {
+    if (decision === "approve") {
+      return approveGoalReviewDecision(state, context);
+    }
+    const next =
+      decision === "block"
+        ? blockGoalForReview(state, feedback)
+        : clearGoalPendingReviewDecision(state, feedback);
+    const saved = writeGoalState(context.store, context.session_id, next, context.run_id);
+    appendGoalReviewResolvedEvent(context, state, decision, feedback);
+    return describeGoal(saved, decision === "block" ? "Goal review blocked" : "Goal review revised", context);
+  } catch (error) {
+    return failGoalWithState(state, "goal_review_failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function approveGoalReviewDecision(state: GoalState, context: ToolExecutionContext): ToolResult {
+  const pending = state.goal.pending_review_decision;
+  if (!pending) {
+    return failGoalWithState(state, "goal_review_missing", "No pending goal review decision.");
+  }
+  const reflectionInput = {
+    decision: pending.action,
+    summary: pending.summary,
+    verification_evidence: pending.verification_evidence,
+    blocker: pending.blocker,
+    steps: pending.steps,
+    active_step_id: pending.active_step_id,
+  };
+  const reflected = completeGoalReflection(state, reflectionInput, pending.source_run_id ?? context.run_id ?? "");
+  if (pending.action === "done") {
+    if (reflected.goal.kind === "research") {
+      const researchMessage = researchCompletionBlockMessage(readAutoresearchState(context.store, context.session_id));
+      if (researchMessage) {
+        return failGoalWithState(state, "goal_research_evidence_required", researchMessage);
+      }
+    }
+    const verifierMessage = goalVerifierPolicyCompletionBlockMessage(context.store, context.session_id, reflected.goal, {
+      request_class: context.request_class,
+    });
+    if (verifierMessage) {
+      return failGoalWithState(state, "goal_verifier_policy_required", verifierMessage);
+    }
+    const completed = completeGoalAfterReflection(reflected, reflected.goal.last_reflection_summary);
+    const saved = writeGoalState(context.store, context.session_id, completed, context.run_id);
+    appendApprovedReflectionEvents(context, state, saved, pending);
+    appendGoalReviewResolvedEvent(context, state, "approve");
+    if (saved.goal.kind === "research") {
+      setAutoresearchMode(context.store, context.session_id, { mode: "off", goal: saved.goal.objective }, context.run_id);
+    }
+    recordGoalCompletionReport(context.store, context.session_id, context.run_id ?? pending.source_run_id ?? "");
+    return describeGoal(saved, "Loop complete", context);
+  }
+  if (pending.action === "blocked") {
+    const blocked = blockGoalForReview(reflected, pending.blocker ?? pending.summary);
+    const saved = writeGoalState(context.store, context.session_id, blocked, context.run_id);
+    appendApprovedReflectionEvents(context, state, saved, pending);
+    appendGoalReviewResolvedEvent(context, state, "approve");
+    return describeGoal(saved, "Goal blocked", context);
+  }
+  reflected.enabled = true;
+  reflected.goal.status = "active";
+  const saved = writeGoalState(context.store, context.session_id, reflected, context.run_id);
+  appendApprovedReflectionEvents(context, state, saved, pending);
+  appendGoalReviewResolvedEvent(context, state, "approve");
+  return describeGoal(saved, "Loop task expanded", context);
+}
+
+function appendApprovedReflectionEvents(
+  context: ToolExecutionContext,
+  previous: GoalState,
+  saved: GoalState,
+  pending: NonNullable<GoalRecord["pending_review_decision"]>,
+): void {
+  context.store.appendEvent({
+    session_id: context.session_id,
+    run_id: context.run_id,
+    type: "goal.reflection.completed",
+    data: {
+      goal_id: saved.goal.id,
+      source_horizon_generation: pending.source_horizon_generation,
+      horizon_generation: saved.goal.horizon_generation,
+      decision: pending.action,
+      summary: saved.goal.last_reflection_summary,
+      verification_evidence: saved.goal.verification_evidence,
+      blocker: saved.goal.blocker,
+      reviewed: true,
+      source_run_id: pending.source_run_id,
+    },
+  });
+  if (pending.action === "expand") {
+    context.store.appendEvent({
+      session_id: context.session_id,
+      run_id: context.run_id,
+      type: "goal.horizon.expanded",
+      data: {
+        goal_id: saved.goal.id,
+        previous_horizon_generation: previous.goal.horizon_generation,
+        horizon_generation: saved.goal.horizon_generation,
+        step_count: saved.goal.planning?.steps.length ?? 0,
+        active_step_id: saved.goal.planning?.active_step_id,
+        reviewed: true,
+      },
+    });
+  }
+}
+
+function appendGoalReviewResolvedEvent(
+  context: ToolExecutionContext,
+  state: GoalState,
+  decision: "approve" | "reject" | "revise" | "block",
+  feedback?: string,
+): void {
+  const pending = state.goal.pending_review_decision;
+  context.store.appendEvent({
+    session_id: context.session_id,
+    run_id: context.run_id,
+    type: "goal.review.resolved",
+    data: {
+      goal_id: state.goal.id,
+      pending_decision_id: pending?.id,
+      action: pending?.action,
+      decision,
+      feedback,
+    },
+  });
+  const verdict = humanReviewVerificationVerdict(decision, pending?.action);
+  recordGoalVerification(context.store, context.session_id, {
+    provider: "human",
+    verdict,
+    confidence: "hard",
+    goal_id: state.goal.id,
+    horizon_generation: pending?.source_horizon_generation ?? state.goal.horizon_generation,
+    run_id: context.run_id,
+    source_run_id: pending?.source_run_id,
+    evidence: {
+      pending_decision_id: pending?.id,
+      proposed_action: pending?.action,
+      decision,
+      feedback,
+    },
+    summary: feedback,
+    failure_reason: decision === "approve" ? undefined : feedback,
+  }, context.run_id);
+}
+
+function appendReflectionVerificationRecord(
+  context: ToolExecutionContext,
+  previous: GoalState,
+  saved: GoalState,
+  input: GoalVerificationReflectionInput,
+): void {
+  recordGoalVerification(context.store, context.session_id, {
+    provider: "reflection",
+    verdict: reflectionVerificationVerdict(input.decision),
+    confidence: "soft",
+    goal_id: saved.goal.id,
+    horizon_generation: previous.goal.horizon_generation,
+    run_id: context.run_id,
+    evidence: input.verification_evidence,
+    summary: input.summary,
+    failure_reason: input.blocker,
+  }, context.run_id);
 }
 
 function resumeGoal(context: ToolExecutionContext): ToolResult {
@@ -338,6 +697,9 @@ function resumeGoal(context: ToolExecutionContext): ToolResult {
   }
   if (state.goal.status === "dropped") {
     return fail("goal_dropped", "Cannot resume a dropped goal.");
+  }
+  if (state.goal.pending_review_decision) {
+    return failGoalWithState(state, "goal_review_pending", "Resolve the pending goal review decision before resuming.");
   }
   const next = cloneGoalState(state);
   next.enabled = true;
@@ -356,6 +718,9 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   }
   if (status === "complete" && state.goal.status === "complete") {
     return fail("goal_complete", "Goal is already complete.");
+  }
+  if (status === "complete" && state.goal.pending_review_decision) {
+    return failGoalWithState(state, "goal_review_pending", "Resolve the pending goal review decision before completing the goal.");
   }
   const summary = stringArg(args.summary)?.trim();
   if (status === "complete" && !summary) {
@@ -392,6 +757,12 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
         return failGoalWithState(state, "goal_research_evidence_required", researchMessage);
       }
     }
+    const verifierMessage = goalVerifierPolicyCompletionBlockMessage(context.store, context.session_id, state.goal, {
+      request_class: context.request_class,
+    });
+    if (verifierMessage) {
+      return failGoalWithState(state, "goal_verifier_policy_required", verifierMessage);
+    }
   }
   const next = cloneGoalState(state);
   if (summary) {
@@ -404,7 +775,7 @@ function finishGoal(args: JsonObject, context: ToolExecutionContext, status: "co
   if (saved.goal.kind === "research") {
     setAutoresearchMode(context.store, context.session_id, { mode: "off", goal: saved.goal.objective }, context.run_id);
   }
-  return describeGoal(saved, status === "complete" ? "Goal complete" : "Goal dropped", context);
+  return describeGoal(saved, status === "complete" ? "Loop complete" : "Loop dropped", context);
 }
 
 function isInternalReflectionContext(context: ToolExecutionContext): boolean {
@@ -422,7 +793,7 @@ function failGoalWithState(state: GoalState, code: string, message: string, extr
 
 function describeGoal(state: GoalState | undefined, summary: string, context?: ToolExecutionContext): ToolResult {
   if (!state) {
-    return ok("No goal set.", { goal: null });
+    return ok("No loop set.", { goal: null });
   }
   const goal = state.goal;
   const horizons = context ? readGoalHorizons(context.store, context.session_id, goal.id) : [];
@@ -444,6 +815,12 @@ function describeGoal(state: GoalState | undefined, summary: string, context?: T
 
 function goalSummary(prefix: string, goal: GoalRecord): string {
   const lines = [`${prefix}: ${goal.objective}`, `Type: ${goal.kind}`, `Status: ${goal.status}`];
+  if (goal.owner) {
+    lines.push(`Owner: ${goal.owner}`);
+  }
+  if (goal.review_owner) {
+    lines.push(`Review owner: ${goal.review_owner}`);
+  }
   if (goal.token_budget !== undefined || goal.tokens_used > 0) {
     lines.push(
       goal.token_budget === undefined
@@ -455,15 +832,15 @@ function goalSummary(prefix: string, goal: GoalRecord): string {
     lines.push(`Time: ${formatGoalDuration(goal)}`);
   }
   if (goal.planning) {
-    lines.push(`Horizon: ${goal.horizon_generation}`);
-    lines.push(`Plan: ${goalPlanningProgressSummary(goal.planning)}`);
+    lines.push(`Loop task: ${goal.horizon_generation}`);
+    lines.push(`Task plan: ${goalPlanningProgressSummary(goal.planning)}`);
     const active = goal.planning.active_step_id ? goal.planning.steps.find((step) => step.id === goal.planning!.active_step_id) : undefined;
     if (active) {
       lines.push(`Active step: ${active.id} ${active.title}`);
     }
   }
   if (goal.last_reflection_decision) {
-    lines.push(`Last reflection: ${goal.last_reflection_decision}${goal.last_reflection_summary ? ` - ${goal.last_reflection_summary}` : ""}`);
+    lines.push(`Last decision: ${goal.last_reflection_decision}${goal.last_reflection_summary ? ` - ${goal.last_reflection_summary}` : ""}`);
   }
   if (goal.status === "complete" && goal.summary) {
     lines.push(`Completion summary: ${goal.summary}`);
@@ -506,6 +883,46 @@ function parseGoalStrategyModeArg(value: unknown): GoalStrategyMode | undefined 
 
 function parseGoalKindArg(value: unknown): GoalKind | undefined {
   return value === "task" || value === "research" ? value : undefined;
+}
+
+function parseReviewDecisionArg(value: unknown): "approve" | "reject" | "revise" | "block" | undefined {
+  return value === "approve" || value === "reject" || value === "revise" || value === "block" ? value : undefined;
+}
+
+function parseVerificationProviderArg(value: unknown): GoalLoopVerificationProvider | undefined {
+  return value === "checker" || value === "human" || value === "command" || value === "reflection" || value === "research" ? value : undefined;
+}
+
+function parseVerificationVerdictArg(value: unknown): GoalLoopVerificationVerdict | undefined {
+  return value === "pass" || value === "fail" || value === "partial" || value === "blocked" || value === "unknown" ? value : undefined;
+}
+
+function parseVerificationConfidenceArg(value: unknown): GoalLoopVerificationConfidence | undefined {
+  return value === "hard" || value === "soft" || value === "mixed" ? value : undefined;
+}
+
+function commandVerifiersArg(value: unknown): GoalCommandVerifierInput[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const verifiers: GoalCommandVerifierInput[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const data = item as Record<string, unknown>;
+    const command = stringArg(data.command)?.trim();
+    if (!command) {
+      continue;
+    }
+    verifiers.push({
+      id: stringArg(data.id),
+      command,
+      cwd: stringArg(data.cwd),
+      required: data.required === false ? false : true,
+    });
+  }
+  return verifiers;
 }
 
 function parseGoalCandidateValueArg(value: unknown): GoalCandidateValue | undefined {

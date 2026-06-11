@@ -127,13 +127,15 @@ test("run_command foreground uses RTK rewrite and records tool savings", async (
 
     const result = await registry.call(
       { id: "rtk_call_1", name: "run_command", arguments: { command: "printf raw-output", timeout_ms: 5000 } },
-      { session_id: session.session_id, run_id: "run_rtk" },
+      { session_id: session.session_id, run_id: "run_rtk", step_id: "step_rtk", step_index: 3 },
     );
 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.match(String(result.data?.output ?? ""), /compact printf raw-output/);
     const savings = store.listEvents(session.session_id).filter((item) => item.type === "rtk.tool_savings");
     assert.equal(savings.length, 1);
+    assert.equal(savings[0]?.data.step_id, "step_rtk");
+    assert.equal(savings[0]?.data.step_index, 3);
     assert.equal(savings[0]?.data.tool_call_id, "rtk_call_1");
     assert.equal(savings[0]?.data.original_command, "printf raw-output");
     assert.equal(savings[0]?.data.rewritten_command, "rtk printf raw-output");

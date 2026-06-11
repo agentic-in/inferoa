@@ -26,6 +26,7 @@ import {
   type MetricDirection,
 } from "../autoresearch/state.js";
 import { readGoalState } from "../goals/state.js";
+import { recordGoalVerification, researchVerificationVerdict } from "../loop/verification.js";
 
 const HARNESS = "autoresearch.sh";
 const HARNESS_COMMAND = `bash ${HARNESS}`;
@@ -102,7 +103,7 @@ export async function initExperiment(args: JsonObject, context: ToolExecutionCon
 export async function runExperiment(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
   const state = readAutoresearchState(context.store, context.session_id);
   if (!state.enabled) {
-    return fail("research_goal_required", "no active research goal; start with /goal mode research <objective>", autoresearchFailureData(state));
+    return fail("research_goal_required", "no active research goal; start with /loop mode research <objective>", autoresearchFailureData(state));
   }
   const pendingExperiment = pendingAutoresearchExperiment(state);
   if (pendingExperiment?.pending_run) {
@@ -235,6 +236,30 @@ export async function logExperiment(args: JsonObject, context: ToolExecutionCont
       context.run_id,
     );
     const latest = nextExperiment.results.at(-1)!;
+    const goal = readGoalState(context.store, context.session_id)?.goal;
+    if (goal) {
+      recordGoalVerification(context.store, context.session_id, {
+        provider: "research",
+        verdict: researchVerificationVerdict(latest.status),
+        confidence: typeof latest.metric === "number" ? "hard" : "mixed",
+        goal_id: goal.id,
+        horizon_generation: goal.horizon_generation,
+        run_id: String(latest.run_id),
+        evidence: {
+          experiment: nextExperiment.name,
+          status: latest.status,
+          description: latest.description,
+          asi: latest.asi,
+        },
+        metrics: {
+          primary_metric: nextExperiment.primary_metric,
+          metric: latest.metric,
+          ...latest.metrics,
+        },
+        summary: latest.description,
+        failure_reason: latest.status === "keep" ? undefined : latest.description,
+      }, context.run_id);
+    }
     return ok(`Logged run ${latest.run_id}: ${latest.status} ${nextExperiment.primary_metric}=${latest.metric === null ? "missing" : latest.metric}`, {
       result: latest as unknown as JsonObject,
       autoresearch: next as unknown as JsonObject,
@@ -270,7 +295,7 @@ export async function updateExperiment(args: JsonObject, context: ToolExecutionC
   try {
     state = readAutoresearchState(context.store, context.session_id);
     if (!state.enabled) {
-      return fail("autoresearch_not_initialized", "no active research goal; start with /goal mode research <objective>", autoresearchFailureData(state));
+      return fail("autoresearch_not_initialized", "no active research goal; start with /loop mode research <objective>", autoresearchFailureData(state));
     }
     const experiment = selectExperiment(state, args);
     if (!experiment) {
@@ -306,7 +331,7 @@ function autoresearchFailureData(state: AutoresearchState, extra: JsonObject = {
 function ensureResearchGoalEnabled(context: ToolExecutionContext): AutoresearchState {
   const goal = readGoalState(context.store, context.session_id);
   if (!goal || goal.goal.kind !== "research" || goal.goal.status === "complete" || goal.goal.status === "dropped") {
-    throw new Error("an active research goal is required; start with /goal mode research <objective>");
+    throw new Error("an active research goal is required; start with /loop mode research <objective>");
   }
   const state = readAutoresearchState(context.store, context.session_id);
   if (state.enabled) {

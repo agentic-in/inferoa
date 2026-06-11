@@ -99,7 +99,7 @@ test("vision understanding and image generation use endpoint-backed requests and
       {
         id: "vision",
         name: "vision_understanding",
-        arguments: { inputs: ["fixture.png"], prompt: "What is in the image?", model: "wrong-vision-model" },
+        arguments: { inputs: ["fixture.png"], prompt: "What is in the image?" },
       },
       { session_id: session.session_id, run_id: "run" },
     );
@@ -112,7 +112,7 @@ test("vision understanding and image generation use endpoint-backed requests and
       {
         id: "image",
         name: "image_generation",
-        arguments: { prompt: "tiny fixture", size: "256x256", seed: 7, model: "qwen2.5-omni-7b" },
+        arguments: { prompt: "tiny fixture", size: "256x256", seed: 7 },
       },
       { session_id: session.session_id, run_id: "run" },
     );
@@ -388,22 +388,20 @@ test("generation tools store audio, speech, image edit, and sync video results a
     const registry = new ToolRegistry(config(baseUrl), workspace, store);
 
     const audio = await registry.call(
-      { id: "audio", name: "audio_generation", arguments: { input: "rain on glass", response_format: "wav", model: "wrong-audio-model" } },
+      { id: "audio", name: "audio_generation", arguments: { input: "rain on glass", response_format: "wav" } },
       { session_id: session.session_id, run_id: "run" },
     );
     assert.equal(audio.ok, true);
     assert.match(seen.find((entry) => entry.url === "/v1/audio/generate")?.body ?? "", /"input":"rain on glass"/);
     assert.match(seen.find((entry) => entry.url === "/v1/audio/generate")?.body ?? "", /"model":"stable-audio"/);
-    assert.doesNotMatch(seen.find((entry) => entry.url === "/v1/audio/generate")?.body ?? "", /wrong-audio-model/);
     assert.equal(store.readResource((audio.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-audio").toString("base64"));
 
     const speech = await registry.call(
-      { id: "speech", name: "speech_generation", arguments: { input: "hello", voice: "vivian", model: "wrong-speech-model" } },
+      { id: "speech", name: "speech_generation", arguments: { input: "hello", voice: "vivian" } },
       { session_id: session.session_id, run_id: "run" },
     );
     assert.equal(speech.ok, true);
     assert.match(seen.find((entry) => entry.url === "/v1/audio/speech")?.body ?? "", /"model":"qwen3-tts"/);
-    assert.doesNotMatch(seen.find((entry) => entry.url === "/v1/audio/speech")?.body ?? "", /wrong-speech-model/);
     assert.equal(store.readResource((speech.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-speech").toString("base64"));
 
     const voices = await registry.call(
@@ -416,7 +414,7 @@ test("generation tools store audio, speech, image edit, and sync video results a
       {
         id: "image-edit",
         name: "image_edit",
-        arguments: { prompt: "make it brighter", images: ["https://example.test/image.png"], model: "wrong-image-edit-model" },
+        arguments: { prompt: "make it brighter", images: ["https://example.test/image.png"] },
       },
       { session_id: session.session_id, run_id: "run" },
     );
@@ -428,13 +426,12 @@ test("generation tools store audio, speech, image edit, and sync video results a
     assert.equal(store.readResource(imageEdit.resource_uri!)?.metadata.primary_media_resource, imageEditResources[0]?.uri);
     assert.match(seen.find((entry) => entry.url === "/v1/images/edits")?.body ?? "", /make it brighter/);
     assert.match(seen.find((entry) => entry.url === "/v1/images/edits")?.body ?? "", /image-edit-model/);
-    assert.doesNotMatch(seen.find((entry) => entry.url === "/v1/images/edits")?.body ?? "", /wrong-image-edit-model/);
 
     const video = await registry.call(
       {
         id: "video-sync",
         name: "video_generation",
-        arguments: { prompt: "short clip", mode: "sync", seconds: "1", extra_params: { scheduler: "fast" }, model: "wrong-video-model" },
+        arguments: { prompt: "short clip", mode: "sync", duration: 1, extra_params: { scheduler: "fast" } },
       },
       { session_id: session.session_id, run_id: "run" },
     );
@@ -442,7 +439,6 @@ test("generation tools store audio, speech, image edit, and sync video results a
     assert.equal(store.readResource((video.data?.resources as Array<{ uri: string }>)[0]!.uri)?.content, Buffer.from("fake-sync-video").toString("base64"));
     assert.match(seen.find((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /scheduler/);
     assert.match(seen.find((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /Wan-AI\/Wan2\.1-T2V-1\.3B-Diffusers/);
-    assert.doesNotMatch(seen.find((entry) => entry.url === "/v1/videos/sync")?.body ?? "", /wrong-video-model/);
   } finally {
     store.close();
     server.close();

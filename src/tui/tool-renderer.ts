@@ -209,6 +209,9 @@ function renderToolBody(group: ToolEventGroup, store: SessionStore): string[] {
   if (result?.error) {
     lines.push(fg256(203, `${result.error.code}: ${result.error.message}`));
   }
+  if (group.name === "run_command" && !lines.length) {
+    return [];
+  }
   return lines.length ? lines : [fg256(243, "No display data.")];
 }
 
@@ -232,6 +235,9 @@ function shouldHideFailedToolTrace(group: ToolEventGroup): boolean {
 }
 
 function shouldExpandToolGroup(group: ToolEventGroup, body: string[]): boolean {
+  if (group.name === "run_command") {
+    return body.length > 0;
+  }
   if (group.result?.ok === false || group.result?.error) {
     return true;
   }
@@ -250,7 +256,6 @@ function shouldExpandToolGroup(group: ToolEventGroup, body: string[]): boolean {
       "git_diff",
       "git_show",
       "git_status",
-      "run_command",
       "todo_write",
       "clarify",
       "goal",
@@ -370,11 +375,7 @@ function compactToolName(name: string): string {
 }
 
 function renderCommand(data: JsonObject): string[] {
-  const lines = [
-    `${fg256(39, "cmd")} ${stringField(data.command) ?? "unknown"}`,
-    `${fg256(39, "cwd")} ${stringField(data.cwd) ?? "."}`,
-    `${fg256(39, "exit")} ${numberField(data.code) ?? "running"}${data.timed_out ? " timeout" : ""}`,
-  ];
+  const lines: string[] = [];
   const output = stringField(data.output);
   if (output) {
     lines.push(...renderIndentedPreview(output, 10, "out"));
@@ -558,12 +559,12 @@ function renderClarifyTool(data: JsonObject): string[] {
 function renderGoalTool(data: JsonObject, args: JsonObject = {}): string[] {
   const goal = objectField(data.goal);
   if (!Object.keys(goal).length) {
-    return [fg256(243, "No active goal.")];
+    return [fg256(243, "No active loop.")];
   }
   const lines: string[] = [];
   const op = stringField(args.op);
   if (op) {
-    lines.push(`${fg256(39, "op")} ${goalOperationLabel(op, stringField(args.decision))}`);
+    lines.push(`${fg256(39, "op")} ${goalOperationLabel(op, stringField(args.decision) ?? stringField(args.review_decision))}`);
   }
   if (op === "update_step") {
     const stepId = stringField(args.step_id) ?? stringField(objectField(goal.planning).active_step_id);
@@ -611,7 +612,7 @@ function renderGoalTool(data: JsonObject, args: JsonObject = {}): string[] {
   if (Object.keys(plan).length) {
     lines.push(`${fg256(39, "plan")} ${stringField(plan.summary) ?? stringField(plan.objective) ?? "approved"}`);
   }
-  return lines.length ? lines : [fg256(243, "Goal state saved.")];
+  return lines.length ? lines : [fg256(243, "Loop state saved.")];
 }
 
 function goalOperationLabel(op: string, decision?: string): string {
@@ -632,6 +633,8 @@ function goalOperationLabel(op: string, decision?: string): string {
       return "update candidates";
     case "reflect":
       return decision ? `reflect ${decision}` : "reflect";
+    case "review_decision":
+      return decision ? `review ${decision}` : "review";
     case "resume":
       return "resume";
     case "complete":
@@ -652,40 +655,40 @@ function goalLedgerJsonSummary(ledger: JsonObject): string {
 
 function goalToolAction(group: ToolEventGroup, failed: string): string {
   const summary = group.result?.summary ?? "";
-  if (/Goal horizon expanded/i.test(summary)) {
-    return `Expanded goal horizon${failed}`;
+  if (/(?:Goal horizon|Loop task) expanded/i.test(summary)) {
+    return `Expanded loop task${failed}`;
   }
-  if (/Goal reflection recorded/i.test(summary)) {
-    return `Recorded goal reflection${failed}`;
+  if (/(?:Goal reflection|Loop decision) recorded/i.test(summary)) {
+    return `Recorded loop decision${failed}`;
   }
-  if (/Goal complete/i.test(summary)) {
-    return `Completed goal${failed}`;
+  if (/(?:Goal|Loop) complete/i.test(summary)) {
+    return `Completed loop${failed}`;
   }
   const op = stringField(group.args.op);
   switch (op) {
     case "create":
-      return `Created goal${failed}`;
+      return `Created loop${failed}`;
     case "get":
-      return `Read goal${failed}`;
+      return `Read loop${failed}`;
     case "decompose":
     case "update_plan":
-      return `Updated goal plan${failed}`;
+      return `Updated loop plan${failed}`;
     case "update_step":
-      return `Updated goal step${failed}`;
+      return `Updated loop step${failed}`;
     case "set_strategy":
-      return `Set goal strategy${failed}`;
+      return `Set loop approach${failed}`;
     case "update_ledger":
-      return `Updated goal candidates${failed}`;
+      return `Updated loop candidates${failed}`;
     case "reflect":
-      return `Recorded goal reflection${failed}`;
+      return `Recorded loop decision${failed}`;
     case "resume":
-      return `Resumed goal${failed}`;
+      return `Resumed loop${failed}`;
     case "complete":
-      return `Completed goal${failed}`;
+      return `Completed loop${failed}`;
     case "drop":
-      return `Dropped goal${failed}`;
+      return `Dropped loop${failed}`;
     default:
-      return `Updated goal${failed}`;
+      return `Updated loop${failed}`;
   }
 }
 
@@ -708,10 +711,10 @@ function goalToolDetail(group: ToolEventGroup, data: JsonObject, summary: string
   if (op === "update_ledger") {
     return goalLedgerJsonSummary(objectField(goal.ledger));
   }
-  if (op === "reflect" || /Goal horizon expanded|Goal reflection recorded/i.test(summary)) {
+  if (op === "reflect" || /Goal horizon expanded|Goal reflection recorded|Loop task expanded|Loop decision recorded/i.test(summary)) {
     const decision = stringField(group.args.decision) ?? stringField(goal.last_reflection_decision);
     const horizon = numberField(goal.horizon_generation);
-    return [decision, horizon === undefined ? undefined : `horizon ${horizon}`, stringField(goal.objective)].filter(Boolean).join(" · ") || compactSummary(summary);
+    return [decision, horizon === undefined ? undefined : `loop task ${horizon}`, stringField(goal.objective)].filter(Boolean).join(" · ") || compactSummary(summary);
   }
   return [stringField(goal.objective), stringField(goal.status)].filter(Boolean).join(" · ") || compactSummary(summary);
 }
@@ -722,13 +725,13 @@ function renderGoalHorizonsTool(horizons: JsonObject[]): string[] {
     const current = horizon.current === true ? " current" : "";
     const steps = Array.isArray(horizon.steps) ? horizon.steps.map(objectField) : [];
     const title = stringField(horizon.title) ?? stringField(horizon.summary);
-    const heading = `${fg256(39, "horizon")} ${generation}${title ? ` · ${title}` : ""}${current}`;
+    const heading = `${fg256(39, "loop task")} ${generation}${title ? ` · ${title}` : ""}${current}`;
     const stepLines = steps.map((step) => {
       const id = stringField(step.id) ?? "step";
       const title = stringField(step.title) ?? "";
-      return `${fg256(39, "sub-goal")} ${goalStepJsonMarker(stringField(step.status))} ${id} ${title}`;
+      return `${fg256(39, "step")} ${goalStepJsonMarker(stringField(step.status))} ${id} ${title}`;
     });
-    return stepLines.length ? [heading, ...stepLines] : [heading, `${fg256(39, "sub-goal")} ${fg256(244, "none")}`];
+    return stepLines.length ? [heading, ...stepLines] : [heading, `${fg256(39, "step")} ${fg256(244, "none")}`];
   });
 }
 
@@ -736,11 +739,11 @@ function renderGoalPlanningTool(planning: JsonObject): string[] {
   const steps = Array.isArray(planning.steps) ? planning.steps.map(objectField) : [];
   const summary = goalPlanningJsonSummary(steps);
   const activeStepId = stringField(planning.active_step_id);
-  const lines = [`${fg256(39, "plan")} ${summary}`];
+  const lines = [`${fg256(39, "task plan")} ${summary}`];
   const activeStep = activeStepId ? steps.find((step) => stringField(step.id) === activeStepId) : undefined;
   if (activeStep) {
     const id = stringField(activeStep.id) ?? "step";
-    lines.push(`${fg256(39, "now")} ${goalStepJsonMarker(stringField(activeStep.status))} ${id} ${stringField(activeStep.title) ?? ""}`);
+    lines.push(`${fg256(39, "active step")} ${goalStepJsonMarker(stringField(activeStep.status))} ${id} ${stringField(activeStep.title) ?? ""}`);
   }
   return lines;
 }
@@ -1158,8 +1161,9 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
     case "run_command": {
       const command = stringField(data.command) ?? stringField(group.args.command);
       const code = numberField(data.code);
-      if (command && code !== undefined) {
-        return `${command} · exited ${code}`;
+      const status = booleanField(data.timed_out) ? "timeout" : code !== undefined ? `exited ${code}` : "running";
+      if (command) {
+        return `${command} · ${status}`;
       }
       return command ?? compactSummary(summary);
     }

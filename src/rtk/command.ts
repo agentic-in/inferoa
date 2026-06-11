@@ -11,6 +11,8 @@ export interface RtkShellCommandOptions {
   store: SessionStore;
   session_id: string;
   run_id?: string;
+  step_id?: string;
+  step_index?: number;
   tool_call_id?: string;
   tool_name: string;
   command: string;
@@ -98,6 +100,8 @@ function recordRtkUnavailable(options: RtkShellCommandOptions, error?: string): 
     data: {
       tool_call_id: options.tool_call_id,
       tool_name: options.tool_name,
+      step_id: options.step_id,
+      step_index: options.step_index,
       original_command: options.command,
       rtk_commands: 0,
       input_tokens: 0,
@@ -133,6 +137,8 @@ async function recordRtkSavings(options: RtkShellCommandOptions, prepared: Prepa
     data: {
       tool_call_id: options.tool_call_id,
       tool_name: options.tool_name,
+      step_id: options.step_id,
+      step_index: options.step_index,
       original_command: prepared.original_command,
       rewritten_command: prepared.rewritten_command,
       rtk_commands: stats.commands,
