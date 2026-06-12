@@ -676,11 +676,10 @@ test("runtime freezes enabled skill prompt state for a run", async () => {
       const messages = body.messages as Array<{ role?: string; content?: string }>;
       return String(messages.find((message) => message.role === "system")?.content ?? "");
     });
-    assert.match(systemMessages[0]!, /Enabled skills: none\./);
-    assert.match(systemMessages[0]!, /- demo-skill \| available/);
-    assert.match(systemMessages[1]!, /Enabled skills: none\./);
-    assert.match(systemMessages[1]!, /- demo-skill \| available/);
-    assert.doesNotMatch(systemMessages[1]!, /- demo-skill \| enabled/);
+    assert.match(systemMessages[0]!, /Enabled skill index: none\./);
+    assert.doesNotMatch(systemMessages[0]!, /demo-skill/);
+    assert.match(systemMessages[1]!, /Enabled skill index: none\./);
+    assert.doesNotMatch(systemMessages[1]!, /demo-skill/);
     const started = store.listEvents(result.session.session_id).filter((event) => event.type === "model.request.started");
     assert.equal(started[0]?.data.prompt_epoch_id, started[1]?.data.prompt_epoch_id);
   } finally {

@@ -75,8 +75,8 @@ test("runtime prefetches direct URLs before the model turn without orphan tool m
     const messages = firstRequest.messages as Array<{ role: string; content: string }>;
     assert.equal(messages.filter((message) => message.role === "tool").length, 0);
     assert.equal(messages.filter((message) => message.role === "user").length, 2);
-    assert.match(String(messages[0]?.content ?? ""), /Direct http:\/\/ and https:\/\/ URLs are not search queries/);
-    assert.match(String(messages[0]?.content ?? ""), /web_open/);
+    assert.doesNotMatch(String(messages[0]?.content ?? ""), /Direct http:\/\/ and https:\/\/ URLs are not search queries/);
+    assert.doesNotMatch(String(messages[0]?.content ?? ""), /Never pass a direct URL string to web_search/);
     assert.doesNotMatch(String(messages[0]?.content ?? ""), /Serving engines and router docs/);
     const prefetchMessage = messages.find((message) => message.role === "user" && message.content.includes("<web.prefetch.context>"));
     assert.ok(prefetchMessage);
