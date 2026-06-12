@@ -1,16 +1,16 @@
 import type { JsonObject, PermissionMode, ToolDefinition, VllmAgentConfig, WorkspaceIdentity } from "../types.js";
 import { isExternalLocalPath } from "../util/fs.js";
-import { classifyConnectorToolAction, decideConnectorActionPolicy } from "./connector-actions.js";
+import { classifyExternalMutationToolCall, decideExternalMutationPolicy } from "./external-mutation-policy.js";
 
 export interface PermissionDecision {
   status: "allow" | "ask" | "deny";
   reason: string;
-  policy_kind?: "destructive_shell" | "connector_mutation";
-  connector?: string;
-  connector_surface?: string;
-  connector_action?: string;
-  connector_area?: string;
-  connector_operation?: string;
+  policy_kind?: "destructive_shell" | "external_mutation";
+  external_system?: string;
+  external_surface?: string;
+  external_action?: string;
+  external_area?: string;
+  external_operation?: string;
 }
 
 export interface PermissionContext {
@@ -43,19 +43,19 @@ export class PermissionPolicy {
         policy_kind: "destructive_shell",
       };
     }
-    const connectorAction = classifyConnectorToolAction(tool.name, args);
-    if (connectorAction) {
-      const connectorDecision = decideConnectorActionPolicy(connectorAction, requestClassForConnectorPolicy(context.request_class));
-      if (connectorDecision.status !== "allow") {
+    const externalMutation = classifyExternalMutationToolCall(tool.name, args);
+    if (externalMutation) {
+      const externalDecision = decideExternalMutationPolicy(externalMutation, requestClassForExternalMutationPolicy(context.request_class));
+      if (externalDecision.status !== "allow") {
         return {
           status: "deny",
-          reason: connectorDecision.reason,
-          policy_kind: connectorDecision.policy_kind,
-          connector: connectorDecision.action.connector,
-          connector_surface: connectorDecision.action.surface,
-          connector_action: connectorDecision.action.kind,
-          connector_area: connectorDecision.action.area,
-          connector_operation: connectorDecision.action.operation,
+          reason: externalDecision.reason,
+          policy_kind: externalDecision.policy_kind,
+          external_system: externalDecision.action.system,
+          external_surface: externalDecision.action.surface,
+          external_action: externalDecision.action.kind,
+          external_area: externalDecision.action.area,
+          external_operation: externalDecision.action.operation,
         };
       }
     }
@@ -138,7 +138,7 @@ function isUnattendedRequest(requestClass: string | undefined): boolean {
   return requestClass === "background" || requestClass === "verification";
 }
 
-function requestClassForConnectorPolicy(requestClass: string | undefined): "interactive" | "tool" | "verification" | "compaction" | "background" | "reflection" {
+function requestClassForExternalMutationPolicy(requestClass: string | undefined): "interactive" | "tool" | "verification" | "compaction" | "background" | "reflection" {
   if (
     requestClass === "interactive"
     || requestClass === "tool"

@@ -18,7 +18,7 @@ import {
 import { verifyHttpHealth } from "./http-verification.js";
 import { verifyNpmPackageStatus } from "./npm-verification.js";
 
-export type ConnectorVerifierId =
+export type VerificationHelperId =
   | "github-pr-checks"
   | "github-pr-status"
   | "github-review-request"
@@ -32,34 +32,30 @@ export type ConnectorVerifierId =
   | "http-health"
   | "npm-package-status";
 
-export interface RunConnectorVerifierOptions {
+export interface RunVerificationHelperOptions {
   session_id: string;
   params?: Record<string, unknown>;
   run_id?: string;
 }
 
-export interface ConnectorVerifierDefinition {
-  id: ConnectorVerifierId;
-  connector: "github" | "git" | "http" | "npm";
+export interface VerificationHelperDefinition {
+  id: VerificationHelperId;
+  system: "github" | "git" | "http" | "npm";
   verifier_role: string;
-  cli_command: string;
-  tui_action: string;
   description: string;
   run: (
     store: SessionStore,
     workspace: WorkspaceIdentity,
-    options: RunConnectorVerifierOptions,
+    options: RunVerificationHelperOptions,
   ) => Promise<GoalLoopVerification>;
 }
 
-const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifierDefinition> = {
+const VERIFICATION_HELPER_REGISTRY: Record<VerificationHelperId, VerificationHelperDefinition> = {
   "github-pr-checks": {
     id: "github-pr-checks",
-    connector: "github",
+    system: "github",
     verifier_role: "github-pr-checks",
-    cli_command: "verify-github-pr",
-    tui_action: "verify-github-pr",
-    description: "Read GitHub PR check status and record connector verification.",
+    description: "Read GitHub PR check status and record structured verification.",
     run: (store, workspace, options) => verifyGitHubPullRequestChecks(store, workspace, {
       session_id: options.session_id,
       pr: requireStringParam(options.params, "pr", "github-pr-checks"),
@@ -69,11 +65,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-pr-status": {
     id: "github-pr-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-pr-status",
-    cli_command: "verify-github-pr-status",
-    tui_action: "verify-github-pr-status",
-    description: "Read GitHub PR state and record connector verification.",
+    description: "Read GitHub PR state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubPullRequestStatus(store, workspace, {
       session_id: options.session_id,
       pr: requireStringParam(options.params, "pr", "github-pr-status"),
@@ -83,11 +77,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-review-request": {
     id: "github-review-request",
-    connector: "github",
+    system: "github",
     verifier_role: "github-review-request",
-    cli_command: "verify-github-review-request",
-    tui_action: "verify-github-review-request",
-    description: "Read GitHub review-request state and record connector verification.",
+    description: "Read GitHub review-request state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubReviewRequestStatus(store, workspace, {
       session_id: options.session_id,
       pr: requireStringParam(options.params, "pr", "github-review-request"),
@@ -98,11 +90,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-issue-status": {
     id: "github-issue-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-issue-status",
-    cli_command: "verify-github-issue-status",
-    tui_action: "verify-github-issue-status",
-    description: "Read GitHub issue state and record connector verification.",
+    description: "Read GitHub issue state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubIssueStatus(store, workspace, {
       session_id: options.session_id,
       issue: requireStringParam(options.params, "issue", "github-issue-status"),
@@ -112,11 +102,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-notification-status": {
     id: "github-notification-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-notification-status",
-    cli_command: "verify-github-notification",
-    tui_action: "verify-github-notification",
-    description: "Read GitHub notification thread state and record connector verification.",
+    description: "Read GitHub notification thread state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubNotificationStatus(store, workspace, {
       session_id: options.session_id,
       thread: requireStringParam(options.params, "thread", "github-notification-status"),
@@ -125,11 +113,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-actions-run": {
     id: "github-actions-run",
-    connector: "github",
+    system: "github",
     verifier_role: "github-actions-run",
-    cli_command: "verify-github-run",
-    tui_action: "verify-github-run",
-    description: "Read GitHub Actions run state and record connector verification.",
+    description: "Read GitHub Actions run state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubActionsRun(store, workspace, {
       session_id: options.session_id,
       run: requireStringParam(options.params, "run", "github-actions-run"),
@@ -140,11 +126,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-workflow-run-status": {
     id: "github-workflow-run-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-workflow-run-status",
-    cli_command: "verify-github-workflow",
-    tui_action: "verify-github-workflow",
-    description: "Read the latest matching GitHub Actions workflow run and record connector verification.",
+    description: "Read the latest matching GitHub Actions workflow run and record structured verification.",
     run: (store, workspace, options) => verifyGitHubWorkflowRunStatus(store, workspace, {
       session_id: options.session_id,
       workflow: requireStringParam(options.params, "workflow", "github-workflow-run-status"),
@@ -157,11 +141,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-deployment-status": {
     id: "github-deployment-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-deployment-status",
-    cli_command: "verify-github-deployment",
-    tui_action: "verify-github-deployment",
-    description: "Read GitHub Deployment latest status and record connector verification.",
+    description: "Read GitHub Deployment latest status and record structured verification.",
     run: (store, workspace, options) => verifyGitHubDeploymentStatus(store, workspace, {
       session_id: options.session_id,
       repo: requireStringParam(options.params, "repo", "github-deployment-status"),
@@ -174,11 +156,9 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "github-release-status": {
     id: "github-release-status",
-    connector: "github",
+    system: "github",
     verifier_role: "github-release-status",
-    cli_command: "verify-github-release",
-    tui_action: "verify-github-release",
-    description: "Read GitHub release draft/published state and record connector verification.",
+    description: "Read GitHub release draft/published state and record structured verification.",
     run: (store, workspace, options) => verifyGitHubReleaseStatus(store, workspace, {
       session_id: options.session_id,
       tag: requireStringParam(options.params, "tag", "github-release-status"),
@@ -189,10 +169,8 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "git-clean": {
     id: "git-clean",
-    connector: "git",
+    system: "git",
     verifier_role: "git-clean",
-    cli_command: "verify-git-clean",
-    tui_action: "verify-git-clean",
     description: "Read local git working tree status and record clean-state verification.",
     run: (store, workspace, options) => verifyGitClean(store, workspace, {
       session_id: options.session_id,
@@ -201,10 +179,8 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "http-health": {
     id: "http-health",
-    connector: "http",
+    system: "http",
     verifier_role: "http-health",
-    cli_command: "verify-http",
-    tui_action: "verify-http",
     description: "Read an HTTP endpoint and record health verification.",
     run: (store, workspace, options) => verifyHttpHealth(store, workspace, {
       session_id: options.session_id,
@@ -216,10 +192,8 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
   "npm-package-status": {
     id: "npm-package-status",
-    connector: "npm",
+    system: "npm",
     verifier_role: "npm-package-status",
-    cli_command: "verify-npm-package",
-    tui_action: "verify-npm-package",
     description: "Read npm registry package metadata and record published version/tag verification.",
     run: (store, workspace, options) => verifyNpmPackageStatus(store, workspace, {
       session_id: options.session_id,
@@ -232,23 +206,23 @@ const CONNECTOR_VERIFIER_REGISTRY: Record<ConnectorVerifierId, ConnectorVerifier
   },
 };
 
-export function listConnectorVerifierDefinitions(): ConnectorVerifierDefinition[] {
-  return Object.values(CONNECTOR_VERIFIER_REGISTRY);
+export function listVerificationHelperDefinitions(): VerificationHelperDefinition[] {
+  return Object.values(VERIFICATION_HELPER_REGISTRY);
 }
 
-export function getConnectorVerifierDefinition(id: string): ConnectorVerifierDefinition | undefined {
-  return CONNECTOR_VERIFIER_REGISTRY[id as ConnectorVerifierId];
+export function getVerificationHelperDefinition(id: string): VerificationHelperDefinition | undefined {
+  return VERIFICATION_HELPER_REGISTRY[id as VerificationHelperId];
 }
 
-export async function runConnectorVerifier(
+export async function runVerificationHelper(
   store: SessionStore,
   workspace: WorkspaceIdentity,
-  id: ConnectorVerifierId,
-  options: RunConnectorVerifierOptions,
+  id: VerificationHelperId,
+  options: RunVerificationHelperOptions,
 ): Promise<GoalLoopVerification> {
-  const definition = CONNECTOR_VERIFIER_REGISTRY[id];
+  const definition = VERIFICATION_HELPER_REGISTRY[id];
   if (!definition) {
-    throw new Error(`Unknown connector verifier: ${id}`);
+    throw new Error(`Unknown verification helper: ${id}`);
   }
   return definition.run(store, workspace, options);
 }
@@ -256,7 +230,7 @@ export async function runConnectorVerifier(
 function requireStringParam(params: Record<string, unknown> | undefined, key: string, verifier: string): string {
   const value = optionalStringParam(params, key);
   if (!value) {
-    throw new Error(`Connector verifier ${verifier} requires parameter ${key}.`);
+    throw new Error(`Verification helper ${verifier} requires parameter ${key}.`);
   }
   return value;
 }
@@ -283,7 +257,7 @@ function optionalReleaseExpectedStateParam(params: Record<string, unknown> | und
   if (value === "published" || value === "draft" || value === "any") {
     return value;
   }
-  throw new Error(`Connector verifier github-release-status parameter ${key} must be published, draft, or any.`);
+  throw new Error(`Verification helper github-release-status parameter ${key} must be published, draft, or any.`);
 }
 
 function optionalDeploymentExpectedStateParam(params: Record<string, unknown> | undefined, key: string): GitHubDeploymentExpectedState | undefined {
@@ -294,5 +268,5 @@ function optionalDeploymentExpectedStateParam(params: Record<string, unknown> | 
   if (value === "success" || value === "inactive" || value === "failure" || value === "any") {
     return value;
   }
-  throw new Error(`Connector verifier github-deployment-status parameter ${key} must be success, inactive, failure, or any.`);
+  throw new Error(`Verification helper github-deployment-status parameter ${key} must be success, inactive, failure, or any.`);
 }

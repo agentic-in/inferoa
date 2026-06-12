@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { completeGoalReflection, createGoalState, writeGoalState } from "../src/goals/state.js";
-import { SELF_IMPROVE_OPTIMIZER_TOOL_NAMES, buildAgenticEvidencePacket, runtimeAgenticOptimizer, type AgenticSkillProposalDraft } from "../src/opt/agentic-propose.js";
+import { SELF_IMPROVE_OPTIMIZER_TOOL_NAMES, buildAgenticEvidencePacket, parseAgenticProposalJsonWithMetadata, runtimeAgenticOptimizer, type AgenticSkillProposalDraft } from "../src/opt/agentic-propose.js";
 import { optLitePropose, optLiteReplay } from "../src/opt/opt-lite.js";
 import { SessionStore } from "../src/session/store.js";
 import type { WorkspaceIdentity } from "../src/types.js";
@@ -118,6 +118,128 @@ test("self-improve propose accepts more than five bounded cited edits", async ()
   }
 });
 
+test("self-improve preserves and normalizes rich model learning instead of falling back on shape drift", async () => {
+  const fixture = await createFixture("inferoa-opt-agentic-normalize-");
+  try {
+    const { store, workspace } = fixture;
+    addVerifiedGoal(store, workspace);
+    let citedSignalId = "";
+    const proposal = await optLitePropose(store, workspace, {
+      config: structuredClone(DEFAULT_CONFIG),
+      optimizer: {
+        async propose(packet): Promise<AgenticSkillProposalDraft> {
+          const signal = packet.signals.find((item) => item.tier === "T1") ?? packet.signals[0]!;
+          citedSignalId = signal.signal_id;
+          return {
+            observations: [
+              "The previous loop stayed in one file and accepted shallow confidence fixes after human feedback asked for deeper looper coverage.",
+            ],
+            edits: [
+              {
+                target: "loop_skill",
+                type: "verification_breadth",
+                summary: "When feedback says the bug hunt was not deep enough, expand verification breadth before completion.",
+                content: {
+                  file_breadth_checklist: [
+                    "src/semantic-router/pkg/looper/confidence.go",
+                    "src/semantic-router/pkg/looper/base.go",
+                    "src/semantic-router/pkg/looper/ratings.go",
+                  ],
+                  required_checks: [
+                    "Check goroutine or timeout leaks.",
+                    "Check sort/shuffle behavior and duplicate extraction.",
+                  ],
+                },
+                signal_ids: [signal.signal_id],
+              },
+              {
+                target: "workspace_skill",
+                type: "bug_surface_coverage",
+                summary: "For semantic-router looper bugs, inspect the looper package broadly before patching one confidence file.",
+                content: {
+                  package_scope: "src/semantic-router/pkg/looper",
+                  checklist: [
+                    "confidence scoring",
+                    "ratings aggregation",
+                    "base loop orchestration",
+                  ],
+                },
+                source_signal_ids: [signal.signal_id],
+              },
+            ],
+            rejected_signals: [
+              {
+                signal_id: signal.signal_id,
+                reason: "Accepted as hard evidence for concrete edits; not rejected.",
+              },
+            ],
+          } as unknown as AgenticSkillProposalDraft;
+        },
+      },
+    });
+
+    assert.equal(proposal.proposal_source, "agentic");
+    assert.equal(proposal.agentic_error, undefined);
+    assert.equal(proposal.model_proposal?.edits.length, 2);
+    assert.equal(proposal.model_proposal?.edits[0]?.op, "add");
+    assert.equal(proposal.model_proposal?.edits[0]?.section, "verification");
+    assert.equal(proposal.model_proposal?.edits[1]?.section, "testing");
+    assert.match(proposal.normalization_warnings?.join("\n") ?? "", /defaulted to add/);
+    assert.match(proposal.normalization_warnings?.join("\n") ?? "", /structured content object/);
+    assert.match(JSON.stringify(proposal.raw_model_proposal), /verification_breadth/);
+    assert.equal(proposal.model_proposal?.rejected_signals?.[0]?.source_signal_id, citedSignalId);
+    assert.deepEqual(proposal.skill_targets?.map((target) => target.skill_id), ["inferoa-loop-skill", "inferoa-workspace-skill"]);
+    assert.match(proposal.skill_targets?.find((target) => target.target === "loop_skill")?.body ?? "", /ratings\.go/);
+    assert.match(proposal.skill_targets?.find((target) => target.target === "workspace_skill")?.body ?? "", /base loop orchestration/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("agentic proposal parser keeps full JSON when string content contains nested code fences", () => {
+  const raw = [
+    "Based on deep code inspection, here is the analysis.",
+    "",
+    "```json",
+    "{",
+    '  "failure_modes": [',
+    "    {",
+    '      "mode_id": "fm_repeated_human_fail",',
+    '      "sig_ids": ["sig_hard"],',
+    '      "pattern": "Human review said not deep after shallow fixes.",',
+    '      "root_cause": "The loop accepted self-reflection as validation."',
+    "    }",
+    "  ],",
+    '  "observations": [',
+    "    {",
+    '      "file": "src/semantic-router/pkg/looper/remom.go",',
+    '      "summary": "Semaphore acquisition does not select on ctx.Done()."',
+    "    }",
+    "  ],",
+    '  "edits": [',
+    "    {",
+    '      "target": {"type": "workspace_skill", "file": "src/semantic-router/pkg/looper/remom.go", "lines": [68, 112]},',
+    '      "source_signal_ids": ["sig_hard"],',
+    '      "description": "Fix goroutine leak in remomRunOneParallelCall semaphore acquisition",',
+    '      "content": "Replace bare semaphore send with:\\n```go\\nselect {\\ncase sem <- struct{}{}:\\ncase <-ctx.Done():\\n    return err\\n}\\n```\\nThis prevents leaked goroutines."',
+    "    }",
+    "  ],",
+    '  "rejected_signals": []',
+    "}",
+    "```",
+  ].join("\n");
+
+  const parsed = parseAgenticProposalJsonWithMetadata(raw);
+
+  assert.equal(Array.isArray(parsed.raw_proposal?.edits) ? parsed.raw_proposal.edits.length : 0, 1);
+  assert.equal(parsed.draft.edits.some((edit) => edit.target === "workspace_skill"), true);
+  assert.equal(parsed.draft.edits.some((edit) => edit.target === "loop_skill"), true);
+  assert.match(parsed.normalization_warnings.join("\n"), /Extracted JSON object/);
+  assert.match(parsed.normalization_warnings.join("\n"), /source-code patch target/);
+  assert.match(parsed.normalization_warnings.join("\n"), /Synthesized skill policy edits/);
+  assert.match(parsed.draft.edits.find((edit) => edit.target === "workspace_skill")?.content ?? "", /not an automatic code patch/);
+});
+
 test("runtime-backed agentic optimizer records a first-class read-only self-improve run", async () => {
   const fixture = await createFixture("inferoa-opt-agentic-runtime-");
   try {
@@ -176,7 +298,7 @@ test("runtime-backed agentic optimizer records a first-class read-only self-impr
     assert.equal(runtimeCalls[0]?.request_class, "background");
     assert.equal(runtimeCalls[0]?.visibility, "internal");
     assert.equal(runtimeCalls[0]?.session_id, undefined);
-    assert.equal(runtimeCalls[0]?.max_tool_rounds, 8);
+    assert.equal(runtimeCalls[0]?.max_tool_rounds, undefined);
     assert.deepEqual(runtimeCalls[0]?.tool_names, [...SELF_IMPROVE_OPTIMIZER_TOOL_NAMES]);
     const optimizerToolNames = runtimeCalls[0]?.tool_names as string[] | undefined;
     assert.equal(optimizerToolNames?.includes("edit_file"), false);
@@ -184,6 +306,7 @@ test("runtime-backed agentic optimizer records a first-class read-only self-impr
     assert.equal(optimizerToolNames?.includes("run_command"), false);
     assert.match(runtimeCalls[0]?.prompt ?? "", /Return only JSON/);
     assert.match(runtimeCalls[0]?.prompt ?? "", /proposal-only learning session/);
+    assert.match(runtimeCalls[0]?.prompt ?? "", /Do not propose source-code patches/);
   } finally {
     await fixture.cleanup();
   }

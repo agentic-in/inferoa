@@ -131,7 +131,7 @@ test("loop metrics projects token cost, source attribution, and checker quality"
     assert.equal(metrics.tokens.cache_hit_rate, 0.25);
     assert.equal(metrics.by_goal.find((item) => item.key === goalState.goal.id)?.tokens.total_tokens, 150);
     assert.equal(metrics.by_source.find((item) => item.key === "github-actions")?.tokens.total_tokens, 150);
-    assert.equal(metrics.by_connector.find((item) => item.key === "github")?.tokens.total_tokens, 150);
+    assert.equal(metrics.by_system.find((item) => item.key === "github")?.tokens.total_tokens, 150);
     assert.equal(metrics.by_worktree.find((item) => item.key === "wt_metrics")?.tokens.total_tokens, 150);
     assert.equal(metrics.by_request_class.find((item) => item.key === "background")?.tokens.total_tokens, 150);
     assert.equal(metrics.verification.summary.total, 2);

@@ -1,103 +1,68 @@
 import type { ModelRequest } from "../types.js";
 
-export type ConnectorActionKind = "read" | "mutation";
-export type ConnectorActionSurface = "cli" | "tool" | "first_class";
-export type ConnectorCommandActionKind = "mutation";
-export type ConnectorActionPolicyDecision = "deny";
-export type ConnectorActionPreflightStatus = "allow" | "deny";
+export type ExternalMutationKind = "mutation";
+export type ExternalMutationSurface = "cli";
+export type ExternalMutationPolicyDecision = "deny";
+export type ExternalMutationPolicyStatus = "allow" | "deny";
+export type ExternalMutationRequestClass = NonNullable<ModelRequest["request_class"]>;
 
-export type ConnectorActionRequestClass = NonNullable<ModelRequest["request_class"]>;
-
-export interface ConnectorAction {
-  connector: string;
-  surface: ConnectorActionSurface;
-  command?: string;
-  tool_name?: string;
-  kind: ConnectorActionKind;
-  area: string;
-  operation: string;
-}
-
-export interface ConnectorCommandAction extends ConnectorAction {
-  connector: string;
-  surface: "cli";
+export interface ExternalMutationAction {
+  system: string;
+  surface: ExternalMutationSurface;
   command: string;
-  kind: ConnectorCommandActionKind;
+  kind: ExternalMutationKind;
   area: string;
   operation: string;
 }
 
-export interface ConnectorActionPolicyDefinition {
+export interface ExternalMutationPolicyDefinition {
   id: string;
-  connector: string;
-  surface: ConnectorActionSurface;
-  command?: string;
+  system: string;
+  surface: ExternalMutationSurface;
+  command: string;
   tool_names: string[];
-  kind: ConnectorCommandActionKind;
-  request_classes: ConnectorActionRequestClass[];
-  decision: ConnectorActionPolicyDecision;
+  kind: ExternalMutationKind;
+  request_classes: ExternalMutationRequestClass[];
+  decision: ExternalMutationPolicyDecision;
   review_surface: string;
   description: string;
 }
 
-export interface ConnectorActionPreflightInput {
-  connector?: string;
-  surface?: ConnectorActionSurface;
-  command?: string;
-  tool_name?: string;
-  kind?: ConnectorActionKind;
-  area?: string;
-  operation?: string;
-  request_class?: ConnectorActionRequestClass;
-}
-
-export interface ConnectorActionPreflightResult {
-  status: ConnectorActionPreflightStatus;
+export interface ExternalMutationPolicyResult {
+  status: ExternalMutationPolicyStatus;
   reason: string;
-  request_class: ConnectorActionRequestClass;
+  request_class: ExternalMutationRequestClass;
   needs_review: boolean;
   review_surface?: string;
   policy_id?: string;
-  policy_kind?: "connector_mutation";
-  action: ConnectorAction;
+  policy_kind?: "external_mutation";
+  action: ExternalMutationAction;
 }
 
-const githubCliMutationPolicy: ConnectorActionPolicyDefinition = {
+const githubCliMutationPolicy: ExternalMutationPolicyDefinition = {
   id: "github-cli-mutation",
-  connector: "github",
+  system: "github",
   surface: "cli",
   command: "gh",
   tool_names: ["run_command"],
   kind: "mutation",
   request_classes: ["background", "verification"],
   decision: "deny",
-  review_surface: "loop inbox action_review",
+  review_surface: "loop inbox external_action_approval",
   description: "Deny known mutating GitHub CLI operations in unattended request classes.",
 };
 
-const npmCliMutationPolicy: ConnectorActionPolicyDefinition = {
+const npmCliMutationPolicy: ExternalMutationPolicyDefinition = {
   id: "npm-cli-package-publish",
-  connector: "npm",
+  system: "npm",
   surface: "cli",
   command: "npm",
   tool_names: ["run_command"],
   kind: "mutation",
   request_classes: ["background", "verification"],
   decision: "deny",
-  review_surface: "loop inbox action_review",
+  review_surface: "loop inbox external_action_approval",
   description: "Deny npm package publish commands in unattended request classes.",
-};
-
-const firstClassConnectorMutationPolicy: ConnectorActionPolicyDefinition = {
-  id: "first-class-connector-mutation",
-  connector: "*",
-  surface: "first_class",
-  tool_names: [],
-  kind: "mutation",
-  request_classes: ["background", "verification"],
-  decision: "deny",
-  review_surface: "loop inbox action_review",
-  description: "Deny first-class connector mutations in unattended request classes before execution.",
 };
 
 const githubMutationSubcommands: Record<string, Set<string>> = {
@@ -116,22 +81,24 @@ const githubMutationSubcommands: Record<string, Set<string>> = {
   workflow: new Set(["disable", "enable", "run"]),
 };
 
-export function listConnectorActionPolicyDefinitions(): ConnectorActionPolicyDefinition[] {
-  return [githubCliMutationPolicy, npmCliMutationPolicy, firstClassConnectorMutationPolicy].map((definition) => ({
+export function listExternalMutationPolicyDefinitions(): ExternalMutationPolicyDefinition[] {
+  return [githubCliMutationPolicy, npmCliMutationPolicy].map((definition) => ({
     ...definition,
     tool_names: [...definition.tool_names],
     request_classes: [...definition.request_classes],
   }));
 }
 
-export function classifyConnectorToolAction(toolName: string, args: Record<string, unknown>): ConnectorCommandAction | undefined {
-  if (githubCliMutationPolicy.tool_names.includes(toolName) && typeof args.command === "string") {
-    return classifyConnectorCommandAction(args.command);
+export function classifyExternalMutationToolCall(toolName: string, args: Record<string, unknown>): ExternalMutationAction | undefined {
+  if (typeof args.command !== "string") {
+    return undefined;
   }
-  return undefined;
+  return listExternalMutationPolicyDefinitions().some((definition) => definition.tool_names.includes(toolName))
+    ? classifyExternalMutationCommand(args.command)
+    : undefined;
 }
 
-export function classifyConnectorCommandAction(command: string): ConnectorCommandAction | undefined {
+export function classifyExternalMutationCommand(command: string): ExternalMutationAction | undefined {
   for (const segment of shellCommandSegments(command)) {
     const words = shellWords(segment);
     const action = classifyGitHubCliSegment(words) ?? classifyNpmCliSegment(words);
@@ -142,23 +109,15 @@ export function classifyConnectorCommandAction(command: string): ConnectorComman
   return undefined;
 }
 
-export function preflightConnectorAction(input: ConnectorActionPreflightInput): ConnectorActionPreflightResult {
-  const requestClass = normalizeRequestClass(input.request_class);
-  const action = actionFromPreflightInput(input);
-  return decideConnectorActionPolicy(action, requestClass);
-}
-
-export function decideConnectorActionPolicy(
-  action: ConnectorAction,
-  requestClass: ConnectorActionRequestClass = "interactive",
-): ConnectorActionPreflightResult {
-  const policy = matchingConnectorActionPolicy(action, requestClass);
+export function decideExternalMutationPolicy(
+  action: ExternalMutationAction,
+  requestClass: ExternalMutationRequestClass = "interactive",
+): ExternalMutationPolicyResult {
+  const policy = matchingExternalMutationPolicy(action, requestClass);
   if (!policy) {
     return {
       status: "allow",
-      reason: action.kind === "mutation"
-        ? "connector mutation is allowed for this request class"
-        : "no connector mutation policy matched",
+      reason: "external mutation is allowed for this request class",
       request_class: requestClass,
       needs_review: false,
       action,
@@ -166,77 +125,30 @@ export function decideConnectorActionPolicy(
   }
   return {
     status: policy.decision,
-    reason: "unattended connector mutation requires explicit interactive approval",
+    reason: "unattended external mutation requires explicit interactive approval",
     request_class: requestClass,
     needs_review: true,
     review_surface: policy.review_surface,
     policy_id: policy.id,
-    policy_kind: "connector_mutation",
+    policy_kind: "external_mutation",
     action,
   };
 }
 
-function actionFromPreflightInput(input: ConnectorActionPreflightInput): ConnectorAction {
-  if (input.command) {
-    const classified = classifyConnectorCommandAction(input.command);
-    if (classified) {
-      return classified;
-    }
-  }
-  const commandName = input.command ? commandNameFromCommand(input.command) : undefined;
-  return {
-    connector: normalizeIdentifier(input.connector) ?? (commandName === "gh" ? "github" : commandName === "npm" ? "npm" : "unknown"),
-    surface: input.surface ?? (input.command ? "cli" : "first_class"),
-    command: commandName,
-    tool_name: normalizeIdentifier(input.tool_name),
-    kind: input.kind ?? (input.command ? "read" : "mutation"),
-    area: normalizeIdentifier(input.area) ?? "unknown",
-    operation: normalizeIdentifier(input.operation) ?? "unknown",
-  };
+function matchingExternalMutationPolicy(
+  action: ExternalMutationAction,
+  requestClass: ExternalMutationRequestClass,
+): ExternalMutationPolicyDefinition | undefined {
+  return listExternalMutationPolicyDefinitions().find((definition) => (
+    definition.system === action.system
+    && definition.surface === action.surface
+    && definition.command === action.command
+    && definition.kind === action.kind
+    && definition.request_classes.includes(requestClass)
+  ));
 }
 
-function matchingConnectorActionPolicy(
-  action: ConnectorAction,
-  requestClass: ConnectorActionRequestClass,
-): ConnectorActionPolicyDefinition | undefined {
-  return listConnectorActionPolicyDefinitions().find((definition) => {
-    if (definition.surface !== action.surface) {
-      return false;
-    }
-    if (definition.connector !== "*" && definition.connector !== action.connector) {
-      return false;
-    }
-    if (definition.command && definition.command !== action.command) {
-      return false;
-    }
-    if (definition.kind !== action.kind) {
-      return false;
-    }
-    return definition.request_classes.includes(requestClass);
-  });
-}
-
-function normalizeRequestClass(value: ConnectorActionRequestClass | undefined): ConnectorActionRequestClass {
-  return value ?? "background";
-}
-
-function normalizeIdentifier(value: string | undefined): string | undefined {
-  const normalized = value?.trim().toLowerCase().replace(/[\s_]+/g, "-");
-  return normalized || undefined;
-}
-
-function commandNameFromCommand(command: string): string | undefined {
-  for (const segment of shellCommandSegments(command)) {
-    const words = shellWords(segment);
-    const start = executableIndex(words);
-    if (start !== undefined) {
-      return commandName(words[start]!);
-    }
-  }
-  return undefined;
-}
-
-function classifyGitHubCliSegment(words: string[]): ConnectorCommandAction | undefined {
+function classifyGitHubCliSegment(words: string[]): ExternalMutationAction | undefined {
   const start = executableIndex(words);
   if (start === undefined || commandName(words[start]!) !== "gh") {
     return undefined;
@@ -250,7 +162,7 @@ function classifyGitHubCliSegment(words: string[]): ConnectorCommandAction | und
     const method = githubApiMutationMethod(words.slice(start + 2));
     return method
       ? {
-          connector: "github",
+          system: "github",
           surface: "cli",
           command: "gh",
           kind: "mutation",
@@ -266,7 +178,7 @@ function classifyGitHubCliSegment(words: string[]): ConnectorCommandAction | und
   const normalizedAction = action.toLowerCase();
   return githubMutationSubcommands[normalizedArea]?.has(normalizedAction)
     ? {
-        connector: "github",
+        system: "github",
         surface: "cli",
         command: "gh",
         kind: "mutation",
@@ -276,7 +188,7 @@ function classifyGitHubCliSegment(words: string[]): ConnectorCommandAction | und
     : undefined;
 }
 
-function classifyNpmCliSegment(words: string[]): ConnectorCommandAction | undefined {
+function classifyNpmCliSegment(words: string[]): ExternalMutationAction | undefined {
   const start = executableIndex(words);
   if (start === undefined || commandName(words[start]!) !== "npm") {
     return undefined;
@@ -286,7 +198,7 @@ function classifyNpmCliSegment(words: string[]): ConnectorCommandAction | undefi
     return undefined;
   }
   return {
-    connector: "npm",
+    system: "npm",
     surface: "cli",
     command: "npm",
     kind: "mutation",

@@ -50,7 +50,7 @@ export interface LoopDashboardReport {
   top: {
     goal?: LoopDashboardTopItem;
     source?: LoopDashboardTopItem;
-    connector?: LoopDashboardTopItem;
+    system?: LoopDashboardTopItem;
     request_class?: LoopDashboardTopItem;
   };
   attention: {
@@ -137,7 +137,7 @@ export async function readLoopDashboard(store: SessionStore, workspace: Workspac
     top: {
       goal: topGroup(metrics.by_goal, (item) => item.key !== "no_goal"),
       source: topGroup(metrics.by_source),
-      connector: topGroup(metrics.by_connector, (item) => item.key !== "none"),
+      system: topGroup(metrics.by_system, (item) => item.key !== "none"),
       request_class: topGroup(metrics.by_request_class),
     },
     attention: {

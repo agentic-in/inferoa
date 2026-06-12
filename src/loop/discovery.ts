@@ -174,7 +174,7 @@ interface DiscoverySourceDefinition {
 
 export interface LoopDiscoverySourceDefinition {
   id: string;
-  connector: string;
+  system: string;
   description: string;
   dismiss_stale: boolean;
 }
@@ -197,73 +197,73 @@ const NPM_PACKAGE_STATUS_SOURCE = "npm-package-status";
 const DISCOVERY_SOURCE_CATALOG: Record<string, LoopDiscoverySourceDefinition> = {
   [GIT_CHANGES_SOURCE]: {
     id: GIT_CHANGES_SOURCE,
-    connector: "git",
+    system: "git",
     description: "Discover local working-tree changes that may need review, verification, splitting, or completion.",
     dismiss_stale: true,
   },
   [GITHUB_ISSUES_SOURCE]: {
     id: GITHUB_ISSUES_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover open GitHub issues, optionally filtered by explicit labels.",
     dismiss_stale: false,
   },
   [GITHUB_ASSIGNED_ISSUES_SOURCE]: {
     id: GITHUB_ASSIGNED_ISSUES_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover open GitHub issues assigned to a user, optionally filtered by explicit labels.",
     dismiss_stale: false,
   },
   [GITHUB_PULL_REQUESTS_SOURCE]: {
     id: GITHUB_PULL_REQUESTS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover open GitHub pull requests, optionally filtered by explicit labels.",
     dismiss_stale: false,
   },
   [GITHUB_ASSIGNED_PULL_REQUESTS_SOURCE]: {
     id: GITHUB_ASSIGNED_PULL_REQUESTS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover open GitHub pull requests assigned to a user, optionally filtered by explicit labels.",
     dismiss_stale: false,
   },
   [GITHUB_REVIEW_REQUESTS_SOURCE]: {
     id: GITHUB_REVIEW_REQUESTS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover GitHub pull requests requesting review.",
     dismiss_stale: false,
   },
   [GITHUB_NOTIFICATIONS_SOURCE]: {
     id: GITHUB_NOTIFICATIONS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover unread GitHub notifications.",
     dismiss_stale: false,
   },
   [GITHUB_ACTIONS_SOURCE]: {
     id: GITHUB_ACTIONS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover failing GitHub Actions runs.",
     dismiss_stale: false,
   },
   [GITHUB_DRAFT_RELEASES_SOURCE]: {
     id: GITHUB_DRAFT_RELEASES_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover draft GitHub releases that may need review or publication.",
     dismiss_stale: false,
   },
   [GITHUB_DEPLOYMENTS_SOURCE]: {
     id: GITHUB_DEPLOYMENTS_SOURCE,
-    connector: "github",
+    system: "github",
     description: "Discover recent GitHub Deployments that may need status verification or follow-up.",
     dismiss_stale: false,
   },
   [HTTP_HEALTH_SOURCE]: {
     id: HTTP_HEALTH_SOURCE,
-    connector: "http",
+    system: "http",
     description: "Discover HTTP endpoint health failures.",
     dismiss_stale: true,
   },
   [NPM_PACKAGE_STATUS_SOURCE]: {
     id: NPM_PACKAGE_STATUS_SOURCE,
-    connector: "npm",
+    system: "npm",
     description: "Discover npm package version or dist-tag mismatches that need release follow-up.",
     dismiss_stale: true,
   },
@@ -1483,8 +1483,8 @@ function parseGitHubDeploymentCandidate(
     title: `GitHub Deployment ${id} (${envText})`,
     prompt: [
       `Verify GitHub Deployment ${id} in ${repo}.`,
-      `Use inferoa verify-github-deployment <session> --repo ${repo} --deployment-id ${id} to record structured deployment status evidence.`,
-      "If the deployment is failed, pending, queued, or in progress, inspect related workflow or deployment logs with read-only connector commands before proposing changes.",
+      "Use read-only gh CLI/API or the GitHub skill to inspect deployment status, then record structured goal.verify evidence.",
+      "If the deployment is failed, pending, queued, or in progress, inspect related workflow or deployment logs with read-only commands before proposing changes.",
       "Do not create deployment statuses, deploy, publish, or mutate external systems unless the user explicitly asks.",
     ].join(" "),
     detail,
@@ -1602,8 +1602,8 @@ function npmPackageStatusCandidate(
     prompt: [
       `Investigate npm package publication state for ${target}.`,
       tag ? `Expected dist-tag ${tag} to point to ${version}.` : "Expected the package version to be present in npm metadata.",
-      `Use inferoa verify-npm-package <session> ${packageName} --version ${version}${tag ? ` --tag ${tag}` : ""} to record structured registry evidence.`,
-      "If publication or tag update is needed, use the dry-run connector action path first and execute only when the user explicitly asks.",
+      "Use read-only npm CLI queries or registry HTTP checks, then record structured goal.verify evidence.",
+      "If publication or tag update is needed, request explicit human approval for the external mutation before any write command.",
     ].join(" "),
     detail,
     priority: "high",
@@ -1669,7 +1669,7 @@ function httpHealthCandidate(input: {
       `Investigate HTTP health check failure for ${input.url}.`,
       `Expected status ${input.expectedStatus}${input.status !== undefined ? ` but received ${input.status}` : " but the endpoint could not be read"}.`,
       "Inspect recent code, configuration, deployment assumptions, and verification evidence.",
-      "Use verify-http after changes or investigation to record structured health evidence.",
+      "Use read-only HTTP checks after changes or investigation, then record structured goal.verify evidence.",
       "Do not deploy, publish, or mutate external systems unless the user explicitly asks.",
     ].join(" "),
     detail,

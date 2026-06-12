@@ -1000,6 +1000,51 @@ test("self-improve from welcome keeps the chat banner before command output", as
   }
 });
 
+test("self-improve learn from welcome renders pending status immediately", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-self-improve-welcome-learn-"));
+  const originalStdoutWrite = process.stdout.write;
+  const store = await SessionStore.open(stateDir);
+  try {
+    const workspace = { id: "w_self_improve_welcome_learn", root: stateDir, alias: "self-improve-welcome-learn" };
+    const tui = new TuiApp(
+      {
+        config: structuredClone(DEFAULT_CONFIG),
+        configFiles: [],
+        workspace,
+        store,
+        runtime: {},
+      } as never,
+    );
+    const view = tui as unknown as {
+      openView: (command: "self-improve", args: string) => Promise<void>;
+      shutdownBackgroundWork: (reason: string) => Promise<void>;
+    };
+    let output = "";
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      output += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      return true;
+    }) as typeof process.stdout.write;
+
+    const result = await Promise.race([
+      view.openView("self-improve", "learn").then(() => "returned"),
+      delay(100).then(() => "blocked"),
+    ]);
+
+    assert.equal(result, "returned");
+    const plain = stripAnsi(output);
+    assert.ok(plain.indexOf("Welcome back!") >= 0);
+    assert.ok(plain.indexOf("Self-Improve Learn") >= 0);
+    assert.ok(plain.indexOf("learning from verified loop evidence") >= 0);
+    assert.ok(plain.indexOf("Welcome back!") < plain.indexOf("Self-Improve Learn"));
+
+    await view.shutdownBackgroundWork("test done");
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    store.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("self-improve learn returns composer control while optimizer is pending", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-self-improve-learn-bg-"));
   const store = await SessionStore.open(stateDir);
@@ -1087,7 +1132,9 @@ test("self-improve learn returns composer control while optimizer is pending", a
     assert.equal(result, "returned");
     assert.equal(runtimeOptions, undefined);
     assert.equal(activity[0], "start:Learning from loop evidence");
-    assert.deepEqual(transcripts, []);
+    assert.equal(transcripts[0]?.title, "Self-Improve Learn");
+    assert.match(stripAnsi(transcripts[0]?.body.join("\n") ?? ""), /learning from verified loop evidence/i);
+    assert.match(stripAnsi(transcripts[0]?.body.join("\n") ?? ""), /optimizer and replay gate running/i);
     for (let index = 0; index < 20 && !runtimeOptions; index += 1) {
       await delay(10);
     }

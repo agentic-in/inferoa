@@ -36,8 +36,8 @@ export async function verifyHttpHealth(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "http",
+      provider: "checker",
+      system: "http",
       role: "http-health",
       url: target,
       expected_status: expectedStatus,
@@ -106,7 +106,7 @@ function recordHttpHealthVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "http-health",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -114,7 +114,7 @@ function recordHttpHealthVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: compactJsonObject({
-      connector: "http",
+      system: "http",
       verifier: "http-health",
       url: input.url,
       expected_status: input.expected_status,

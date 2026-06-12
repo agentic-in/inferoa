@@ -31,8 +31,8 @@ export async function verifyGitClean(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "git",
+      provider: "checker",
+      system: "git",
       role: "git-clean",
       workspace_root: workspace.root,
     },
@@ -46,7 +46,7 @@ export async function verifyGitClean(
     const summary = summarizeGitPorcelain(lines);
     const clean = summary.total === 0;
     return recordGoalVerification(store, options.session_id, {
-      provider: "connector",
+      provider: "checker",
       verifier_role: "git-clean",
       verdict: clean ? "pass" : "fail",
       confidence: "hard",
@@ -54,7 +54,7 @@ export async function verifyGitClean(
       horizon_generation: state.goal.horizon_generation,
       run_id: runId,
       evidence: {
-        connector: "git",
+        system: "git",
         verifier: "git-clean",
         workspace_root: workspace.root,
         clean,
@@ -76,7 +76,7 @@ export async function verifyGitClean(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return recordGoalVerification(store, options.session_id, {
-      provider: "connector",
+      provider: "checker",
       verifier_role: "git-clean",
       verdict: "blocked",
       confidence: "soft",
@@ -84,7 +84,7 @@ export async function verifyGitClean(
       horizon_generation: state.goal.horizon_generation,
       run_id: runId,
       evidence: {
-        connector: "git",
+        system: "git",
         verifier: "git-clean",
         workspace_root: workspace.root,
         command: "git status --porcelain=v1 --untracked-files=normal",

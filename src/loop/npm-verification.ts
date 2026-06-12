@@ -42,8 +42,8 @@ export async function verifyNpmPackageStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "npm",
+      provider: "checker",
+      system: "npm",
       role: "npm-package-status",
       package_name: packageName,
       version,
@@ -143,7 +143,7 @@ function recordNpmPackageStatusVerification(
   const versions = input.npm_status?.versions ?? [];
   const tagVersion = input.tag && input.npm_status ? input.npm_status.dist_tags[input.tag] : undefined;
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verdict: input.verdict,
     confidence: input.confidence,
     goal_id: goalId,
@@ -151,7 +151,7 @@ function recordNpmPackageStatusVerification(
     run_id: runId,
     verifier_role: "npm-package-status",
     evidence: {
-      connector: "npm",
+      system: "npm",
       verifier: "npm-package-status",
       package_name: input.package_name,
       version: input.version,

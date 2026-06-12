@@ -2,7 +2,7 @@ import type { JsonObject } from "../types.js";
 import type { GoalHorizonSnapshot, GoalKind, GoalPendingReviewDecision, GoalRecord, GoalReflectionSnapshot } from "../goals/state.js";
 
 export type GoalLoopRunStatus = "running" | "completed" | "stopped" | "failed" | "unknown";
-export type GoalLoopVerificationProvider = "reflection" | "research" | "human" | "checker" | "command" | "connector";
+export type GoalLoopVerificationProvider = "reflection" | "research" | "human" | "checker" | "command";
 export type GoalLoopVerificationVerdict = "pass" | "fail" | "partial" | "blocked" | "unknown";
 export type GoalLoopVerificationConfidence = "hard" | "soft" | "mixed";
 export type GoalLoopLearningSignalCategory = "verification" | "human_feedback";

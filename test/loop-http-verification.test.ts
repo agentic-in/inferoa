@@ -4,7 +4,6 @@ import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
@@ -30,11 +29,11 @@ test("HTTP health verifier records hard pass from expected status", async () => 
       run_id: "verify_http_pass",
     });
 
-    assert.equal(verification.provider, "connector");
+    assert.equal(verification.provider, "checker");
     assert.equal(verification.verifier_role, "http-health");
     assert.equal(verification.verdict, "pass");
     assert.equal(verification.confidence, "hard");
-    assert.equal(verification.evidence?.connector, "http");
+    assert.equal(verification.evidence?.system, "http");
     assert.equal(verification.evidence?.verifier, "http-health");
     assert.equal(verification.evidence?.status, 204);
     assert.equal(verification.evidence?.expected_status, 204);
@@ -44,7 +43,7 @@ test("HTTP health verifier records hard pass from expected status", async () => 
     const records = readGoalVerificationRecords(fixture.store, fixture.session.session_id);
     assert.equal(records[0]?.verifier_role, "http-health");
     const metrics = readLoopMetrics(fixture.store, fixture.workspace);
-    assert.equal(metrics.by_connector.some((group) => group.key === "http" && group.verification.pass === 1), true);
+    assert.equal(metrics.by_system.some((group) => group.key === "http" && group.verification.pass === 1), true);
   } finally {
     await server.close();
     await fixture.cleanup();
@@ -62,7 +61,7 @@ test("HTTP health verifier records hard failure from unexpected status", async (
       run_id: "verify_http_fail",
     });
 
-    assert.equal(verification.provider, "connector");
+    assert.equal(verification.provider, "checker");
     assert.equal(verification.verifier_role, "http-health");
     assert.equal(verification.verdict, "fail");
     assert.equal(verification.confidence, "hard");
@@ -76,47 +75,6 @@ test("HTTP health verifier records hard failure from unexpected status", async (
     await fixture.cleanup();
   }
 });
-
-test("verify-http command records HTTP connector verification", async () => {
-  const fixture = await createFixture("inferoa-loop-http-verification-cli-");
-  const server = await startServer({ "/ready": 200 });
-  try {
-    await writeFile(path.join(fixture.workspace.root, ".inferoa", "config.yaml"), YAML.stringify(DEFAULT_CONFIG), "utf8");
-    const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
-    const result = JSON.parse((await execFileAsync(process.execPath, [
-      cliPath,
-      "--workspace",
-      fixture.workspace.root,
-      "--config",
-      path.join(fixture.workspace.root, ".inferoa", "config.yaml"),
-      "--state-dir",
-      fixture.stateDir,
-      "--json",
-      "verify-http",
-      fixture.session.session_id,
-      server.url("/ready"),
-      "--status",
-      "200",
-    ], { maxBuffer: 1024 * 1024 })).stdout) as {
-      verification: {
-        provider?: string;
-        verdict?: string;
-        verifier_role?: string;
-        evidence?: { status?: number; expected_status?: number };
-      };
-    };
-
-    assert.equal(result.verification.provider, "connector");
-    assert.equal(result.verification.verdict, "pass");
-    assert.equal(result.verification.verifier_role, "http-health");
-    assert.equal(result.verification.evidence?.status, 200);
-    assert.equal(result.verification.evidence?.expected_status, 200);
-  } finally {
-    await server.close();
-    await fixture.cleanup();
-  }
-});
-
 async function createFixture(prefix: string): Promise<{
   dir: string;
   stateDir: string;

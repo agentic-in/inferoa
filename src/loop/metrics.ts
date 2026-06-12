@@ -76,7 +76,7 @@ export interface LoopMetricsReport {
   };
   by_goal: LoopMetricsGroup[];
   by_source: LoopMetricsGroup[];
-  by_connector: LoopMetricsGroup[];
+  by_system: LoopMetricsGroup[];
   by_worktree: LoopMetricsGroup[];
   by_request_class: LoopMetricsGroup[];
 }
@@ -94,8 +94,8 @@ interface Attribution {
   goal_label?: string;
   source_key: string;
   source_label?: string;
-  connector_key: string;
-  connector_label?: string;
+  system_key: string;
+  system_label?: string;
   worktree_key: string;
   worktree_label?: string;
   request_class_key: string;
@@ -129,7 +129,7 @@ export function readLoopMetrics(store: SessionStore, workspace: WorkspaceIdentit
   const tokenGroups = {
     goal: new Map<string, MutableGroup>(),
     source: new Map<string, MutableGroup>(),
-    connector: new Map<string, MutableGroup>(),
+    system: new Map<string, MutableGroup>(),
     worktree: new Map<string, MutableGroup>(),
     requestClass: new Map<string, MutableGroup>(),
     provider: new Map<string, MutableGroup>(),
@@ -150,7 +150,7 @@ export function readLoopMetrics(store: SessionStore, workspace: WorkspaceIdentit
       }
       addTokenGroup(tokenGroups.goal, attribution.goal_key, attribution.goal_label, observation, usage);
       addTokenGroup(tokenGroups.source, attribution.source_key, attribution.source_label, observation, usage);
-      addTokenGroup(tokenGroups.connector, attribution.connector_key, attribution.connector_label, observation, usage);
+      addTokenGroup(tokenGroups.system, attribution.system_key, attribution.system_label, observation, usage);
       addTokenGroup(tokenGroups.worktree, attribution.worktree_key, attribution.worktree_label, observation, usage);
       addTokenGroup(tokenGroups.requestClass, attribution.request_class_key, undefined, observation, usage);
       const date = dayKey(observation.created_at);
@@ -173,7 +173,7 @@ export function readLoopMetrics(store: SessionStore, workspace: WorkspaceIdentit
       }
       addVerificationGroup(tokenGroups.goal, attribution.goal_key, attribution.goal_label, session.session_id, record.run_id, record);
       addVerificationGroup(tokenGroups.source, attribution.source_key, attribution.source_label, session.session_id, record.run_id, record);
-      addVerificationGroup(tokenGroups.connector, attribution.connector_key, attribution.connector_label, session.session_id, record.run_id, record);
+      addVerificationGroup(tokenGroups.system, attribution.system_key, attribution.system_label, session.session_id, record.run_id, record);
       addVerificationGroup(tokenGroups.worktree, attribution.worktree_key, attribution.worktree_label, session.session_id, record.run_id, record);
       addVerificationGroup(tokenGroups.provider, record.provider, undefined, session.session_id, record.run_id, record);
       const date = dayKey(record.created_at);
@@ -222,7 +222,7 @@ export function readLoopMetrics(store: SessionStore, workspace: WorkspaceIdentit
     },
     by_goal: finalizeGroups(tokenGroups.goal),
     by_source: finalizeGroups(tokenGroups.source),
-    by_connector: finalizeGroups(tokenGroups.connector),
+    by_system: finalizeGroups(tokenGroups.system),
     by_worktree: finalizeGroups(tokenGroups.worktree),
     by_request_class: finalizeGroups(tokenGroups.requestClass),
   };
@@ -326,7 +326,7 @@ function attributeVerification(
   const base = attributionFromParts(context, sessionId, record.run_id, undefined, record.goal_id);
   const source = sourceFromVerification(record);
   return source
-    ? { ...base, source_key: source.key, source_label: source.label, connector_key: source.connector, connector_label: source.connector }
+    ? { ...base, source_key: source.key, source_label: source.label, system_key: source.system, system_label: source.system }
     : base;
 }
 
@@ -343,7 +343,7 @@ function attributionFromParts(
   const source = sourceFromJob(context, fallbackJob) ?? sourceFromSession(context, sessionId) ?? {
     key: "direct",
     label: "direct",
-    connector: "direct",
+    system: "direct",
   };
   const worktree = worktreeFromJob(context, fallbackJob) ?? singleItem(context.worktreesBySession.get(sessionId));
   return {
@@ -351,8 +351,8 @@ function attributionFromParts(
     goal_label: goal?.objective,
     source_key: source.key,
     source_label: source.label,
-    connector_key: source.connector,
-    connector_label: source.connector,
+    system_key: source.system,
+    system_label: source.system,
     worktree_key: worktree?.worktree_id ?? "active_checkout",
     worktree_label: worktree?.branch ?? "active checkout",
     request_class_key: requestClass ?? "unknown",
@@ -362,7 +362,7 @@ function attributionFromParts(
 function sourceFromJob(
   context: AttributionContext,
   job: SupervisorJob | undefined,
-): { key: string; label?: string; connector: string } | undefined {
+): { key: string; label?: string; system: string } | undefined {
   if (!job) {
     return undefined;
   }
@@ -373,23 +373,23 @@ function sourceFromJob(
     if (source) {
       return source;
     }
-    return { key: "discovery", label: "discovery", connector: "discovery" };
+    return { key: "discovery", label: "discovery", system: "discovery" };
   }
   const discoveryScheduleId = stringValue(job.metadata.discovery_schedule_id);
   if (discoveryScheduleId) {
     const schedule = context.discoveryById.get(discoveryScheduleId);
     const source = stringValue(schedule?.metadata.source) ?? "command";
-    return { key: source, label: source, connector: connectorForSource(source) };
+    return { key: source, label: source, system: systemForSource(source) };
   }
   const automationScheduleId = stringValue(job.metadata.automation_schedule_id);
   if (automationScheduleId) {
     const schedule = context.automationById.get(automationScheduleId);
     const source = stringValue(schedule?.metadata.source) ?? "automation";
-    return { key: source, label: source, connector: connectorForSource(source) };
+    return { key: source, label: source, system: systemForSource(source) };
   }
   const inboxKind = stringValue(job.metadata.inbox_item_kind);
   if (inboxKind) {
-    return { key: `inbox:${inboxKind}`, label: `inbox ${inboxKind}`, connector: "inbox" };
+    return { key: `inbox:${inboxKind}`, label: `inbox ${inboxKind}`, system: "inbox" };
   }
   return undefined;
 }
@@ -397,21 +397,21 @@ function sourceFromJob(
 function sourceFromSession(
   context: AttributionContext,
   sessionId: string,
-): { key: string; label?: string; connector: string } | undefined {
+): { key: string; label?: string; system: string } | undefined {
   const automation = [...context.automationById.values()].filter((schedule) => schedule.session_id === sessionId);
   if (automation.length === 1) {
     const source = stringValue(automation[0]?.metadata.source) ?? "automation";
-    return { key: source, label: source, connector: connectorForSource(source) };
+    return { key: source, label: source, system: systemForSource(source) };
   }
   const discovery = [...context.discoveryById.values()].filter((schedule) => schedule.session_id === sessionId);
   if (discovery.length === 1) {
     const source = stringValue(discovery[0]?.metadata.source) ?? "command";
-    return { key: source, label: source, connector: connectorForSource(source) };
+    return { key: source, label: source, system: systemForSource(source) };
   }
   return undefined;
 }
 
-function sourceFromCandidate(candidate: DiscoveryCandidate | undefined): { key: string; label?: string; connector: string } | undefined {
+function sourceFromCandidate(candidate: DiscoveryCandidate | undefined): { key: string; label?: string; system: string } | undefined {
   if (!candidate) {
     return undefined;
   }
@@ -420,24 +420,24 @@ function sourceFromCandidate(candidate: DiscoveryCandidate | undefined): { key: 
   return {
     key: kind,
     label: candidate.title,
-    connector: provider ?? connectorForSource(kind),
+    system: provider ?? systemForSource(kind),
   };
 }
 
-function sourceFromVerification(record: GoalLoopVerification): { key: string; label?: string; connector: string } | undefined {
-  if (record.provider !== "connector") {
+function sourceFromVerification(record: GoalLoopVerification): { key: string; label?: string; system: string } | undefined {
+  const system = stringValue(record.evidence?.system);
+  if (!system) {
     return undefined;
   }
-  const connector = stringValue(record.evidence?.connector) ?? "connector";
-  const verifier = stringValue(record.evidence?.verifier) ?? "connector-verifier";
+  const verifier = stringValue(record.evidence?.verifier) ?? "checker";
   return {
     key: verifier,
     label: verifier,
-    connector,
+    system,
   };
 }
 
-function connectorForSource(source: string): string {
+function systemForSource(source: string): string {
   if (source.startsWith("github-")) {
     return "github";
   }

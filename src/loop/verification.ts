@@ -284,8 +284,8 @@ function unattendedCompletionBlockMessage(
     return undefined;
   }
   const providers = goal.kind === "research"
-    ? "research metric, command, connector, human review, or checker"
-    : "command, connector, human review, or checker";
+    ? "research metric, command, human review, or checker"
+    : "command, human review, or checker";
   return `Cannot auto-complete unattended ${goal.kind} goal until horizon ${goal.horizon_generation} has a pass verification from ${providers}. Reflection-only evidence is not enough for background completion.`;
 }
 
@@ -302,14 +302,11 @@ function isStrongCompletionVerification(record: GoalLoopVerification): boolean {
   if (record.provider === "human") {
     return record.confidence === "hard";
   }
-  if (record.provider === "connector") {
-    return record.confidence === "hard" || record.confidence === "mixed";
-  }
   return record.provider === "checker";
 }
 
 function parseProvider(value: unknown): GoalLoopVerificationProvider | undefined {
-  return value === "reflection" || value === "research" || value === "human" || value === "checker" || value === "command" || value === "connector" ? value : undefined;
+  return value === "reflection" || value === "research" || value === "human" || value === "checker" || value === "command" ? value : undefined;
 }
 
 function normalizeVerifierCwd(value: string | undefined): string | undefined {

@@ -973,19 +973,19 @@ test("ToolRegistry denies destructive shell commands in unattended request class
     assert.equal(denied.length, 2);
     assert.deepEqual(denied.map((event) => event.data.request_class), ["background", "verification"]);
     assert.deepEqual(denied.map((event) => (event.data.decision as { policy_kind?: string }).policy_kind), ["destructive_shell", "destructive_shell"]);
-    assert.equal((await readLoopInbox(store, workspace)).summary.by_kind.action_review, undefined);
+    assert.equal((await readLoopInbox(store, workspace)).summary.by_kind.external_action_approval, undefined);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("ToolRegistry denies connector mutations in unattended request classes", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-connectors-"));
+test("ToolRegistry denies external mutations in unattended request classes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-external-mutation-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_unattended_connectors", root: dir, alias: "unattended-connectors" };
-    const session = store.createSession(workspace, "unattended-connectors");
+    const workspace: WorkspaceIdentity = { id: "w_unattended_external_mutation", root: dir, alias: "unattended-external-mutation" };
+    const session = store.createSession(workspace, "unattended-external-mutation");
     const registry = new ToolRegistry(config(), workspace, store);
 
     const background = await registry.call(
@@ -994,7 +994,7 @@ test("ToolRegistry denies connector mutations in unattended request classes", as
     );
     assert.equal(background.ok, false);
     assert.equal(background.error?.code, "permission_denied");
-    assert.match(background.error?.message ?? "", /unattended connector mutation/);
+    assert.match(background.error?.message ?? "", /unattended external mutation/);
 
     const verification = await registry.call(
       { id: "verify_gh_api_patch", name: "run_command", arguments: { command: "GH_TOKEN=x gh api repos/owner/repo/issues/42 --method PATCH -f title=updated", timeout_ms: 5000 } },
@@ -1006,17 +1006,17 @@ test("ToolRegistry denies connector mutations in unattended request classes", as
     const denied = store.listEvents(session.session_id).filter((event) => event.type === "permission.denied");
     assert.equal(denied.length, 2);
     assert.deepEqual(denied.map((event) => event.data.request_class), ["background", "verification"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { policy_kind?: string }).policy_kind), ["connector_mutation", "connector_mutation"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { connector?: string }).connector), ["github", "github"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_surface?: string }).connector_surface), ["cli", "cli"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_action?: string }).connector_action), ["mutation", "mutation"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_area?: string }).connector_area), ["issue", "api"]);
-    assert.deepEqual(denied.map((event) => (event.data.decision as { connector_operation?: string }).connector_operation), ["close", "patch"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { policy_kind?: string }).policy_kind), ["external_mutation", "external_mutation"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { external_system?: string }).external_system), ["github", "github"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { external_surface?: string }).external_surface), ["cli", "cli"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { external_action?: string }).external_action), ["mutation", "mutation"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { external_area?: string }).external_area), ["issue", "api"]);
+    assert.deepEqual(denied.map((event) => (event.data.decision as { external_operation?: string }).external_operation), ["close", "patch"]);
 
     const inbox = await readLoopInbox(store, workspace);
-    const actionItems = inbox.items.filter((item) => item.kind === "action_review");
+    const actionItems = inbox.items.filter((item) => item.kind === "external_action_approval");
     assert.equal(actionItems.length, 2);
-    assert.equal(inbox.summary.by_kind.action_review, 2);
+    assert.equal(inbox.summary.by_kind.external_action_approval, 2);
     assert.equal(actionItems[0]?.source, "policy");
     assert.equal(actionItems[0]?.source_label, "github");
     assert.match(actionItems.map((item) => item.detail).join("\n"), /operation github\.issue\.close/);
@@ -1028,10 +1028,10 @@ test("ToolRegistry denies connector mutations in unattended request classes", as
   }
 });
 
-test("PermissionPolicy allows read-only connector inspection commands in unattended request classes", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-connector-readonly-"));
+test("PermissionPolicy allows read-only external inspection commands in unattended request classes", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-unattended-external-readonly-"));
   try {
-    const workspace: WorkspaceIdentity = { id: "w_unattended_connector_readonly", root: dir, alias: "unattended-connector-readonly" };
+    const workspace: WorkspaceIdentity = { id: "w_unattended_external_readonly", root: dir, alias: "unattended-external-readonly" };
     const policy = new PermissionPolicy(config(), workspace);
     const runCommand = CORE_TOOL_DEFINITIONS.find((tool) => tool.name === "run_command");
     assert.ok(runCommand);

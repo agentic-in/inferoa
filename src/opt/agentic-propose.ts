@@ -5,6 +5,7 @@ import { readGoalLoopView } from "../loop/projection.js";
 import type { GoalLoopLearningSignal, GoalLoopVerification } from "../loop/types.js";
 import type { SessionStore } from "../session/store.js";
 import type { JsonObject, ModelRequest, VllmAgentConfig, WorkspaceIdentity } from "../types.js";
+import { stableJson } from "../util/hash.js";
 import type { OptLearningEdit, OptSkillTarget, OptSkillTargetKind } from "./opt-lite.js";
 
 export type LoopLearningSignalTier = "T0" | "T1" | "T2" | "T3";
@@ -78,6 +79,8 @@ export type AgenticProposalOptimizerResult = AgenticSkillProposalDraft | Agentic
 
 export interface AgenticProposalOptimizerOutput {
   draft: AgenticSkillProposalDraft;
+  raw_proposal?: JsonObject;
+  normalization_warnings?: string[];
   run?: AgenticOptimizerRun;
 }
 
@@ -86,6 +89,12 @@ export interface AgenticOptimizerRun {
   run_id: string;
   title?: string;
   request_class: "background";
+}
+
+export interface NormalizedAgenticProposal {
+  draft: AgenticSkillProposalDraft;
+  raw_proposal?: JsonObject;
+  normalization_warnings: string[];
 }
 
 export interface AgenticOptimizerRuntime {
@@ -146,7 +155,6 @@ export const SELF_IMPROVE_OPTIMIZER_TOOL_NAMES = [
   "skill_list",
   "skill_read",
 ] as const;
-const SELF_IMPROVE_OPTIMIZER_MAX_TOOL_ROUNDS = 8;
 
 export function buildAgenticEvidencePacket(store: SessionStore, workspace: WorkspaceIdentity): AgenticEvidencePacket {
   recordGoalLearningSignals(store, workspace);
@@ -289,9 +297,9 @@ export function modelGatewayAgenticOptimizer(config: VllmAgentConfig): AgenticPr
   }
   const gateway = new ModelGateway(config);
   return {
-    async propose(packet: AgenticEvidencePacket): Promise<AgenticSkillProposalDraft> {
+    async propose(packet: AgenticEvidencePacket): Promise<AgenticProposalOptimizerOutput> {
       const response = await gateway.stream(modelRequest(config, packet));
-      return parseAgenticProposalJson(response.content);
+      return parseAgenticProposalJsonWithMetadata(response.content);
     },
   };
 }
@@ -307,12 +315,12 @@ export function runtimeAgenticOptimizer(config: VllmAgentConfig, runtime: Agenti
         request_class: "background",
         visibility: "internal",
         signal: options.signal,
-        max_tool_rounds: SELF_IMPROVE_OPTIMIZER_MAX_TOOL_ROUNDS,
         tool_names: [...SELF_IMPROVE_OPTIMIZER_TOOL_NAMES],
         prompt: runtimeOptimizerPrompt(packet),
       });
+      const parsed = parseAgenticProposalJsonWithMetadata(run.content);
       return {
-        draft: parseAgenticProposalJson(run.content),
+        ...parsed,
         run: {
           session_id: run.session.session_id,
           run_id: run.run_id,
@@ -325,14 +333,467 @@ export function runtimeAgenticOptimizer(config: VllmAgentConfig, runtime: Agenti
 }
 
 export function parseAgenticProposalJson(text: string): AgenticSkillProposalDraft {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]?.trim();
-  const candidate = fenced ?? trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1);
-  if (!candidate) {
+  return parseAgenticProposalJsonWithMetadata(text).draft;
+}
+
+export function parseAgenticProposalJsonWithMetadata(text: string): NormalizedAgenticProposal {
+  const candidate = parseJsonObjectFromModelText(text);
+  if (!candidate.parsed) {
     throw new Error("Model did not return a JSON proposal.");
   }
-  const parsed = JSON.parse(candidate) as AgenticSkillProposalDraft;
-  return parsed;
+  const normalized = normalizeAgenticProposalJson(candidate.parsed);
+  return candidate.warning
+    ? {
+        ...normalized,
+        normalization_warnings: [candidate.warning, ...normalized.normalization_warnings],
+      }
+    : normalized;
+}
+
+function parseJsonObjectFromModelText(text: string): { parsed?: unknown; warning?: string } {
+  const trimmed = text.trim();
+  const candidates = jsonObjectCandidates(trimmed);
+  let lastError: Error | undefined;
+  for (const candidate of candidates) {
+    try {
+      return {
+        parsed: JSON.parse(candidate),
+        warning: candidate.length < trimmed.length ? "Extracted JSON object from model prose or fenced output." : undefined,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return {};
+}
+
+function jsonObjectCandidates(text: string): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== "{") {
+      continue;
+    }
+    const candidate = balancedJsonObjectAt(text, index);
+    if (candidate && !seen.has(candidate)) {
+      seen.add(candidate);
+      output.push(candidate);
+    }
+  }
+  const fallback = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  if (fallback && !seen.has(fallback)) {
+    output.push(fallback);
+  }
+  return output;
+}
+
+function balancedJsonObjectAt(text: string, start: number): string | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return undefined;
+}
+
+export function normalizeAgenticProposalJson(value: unknown): NormalizedAgenticProposal {
+  const raw = objectRecord(value);
+  if (!raw) {
+    throw new Error("Agentic proposal JSON must be an object.");
+  }
+  const warnings: string[] = [];
+  const rawEdits = rawEditEntries(raw, warnings);
+  if (rawEdits.length && !Array.isArray(raw.edits)) {
+    warnings.push("Normalized proposal edits from a non-standard edit field.");
+  }
+  const edits = rawEdits
+    .map((entry, index) => normalizeAgenticEdit(entry.value, index, warnings, entry.defaultTarget))
+    .filter((item): item is AgenticSkillEditDraft => Boolean(item));
+  for (const synthesized of synthesizePolicyEdits(raw, warnings)) {
+    if (!edits.some((edit) => edit.target === synthesized.target && edit.section === synthesized.section && edit.content === synthesized.content)) {
+      edits.push(synthesized);
+    }
+  }
+  const rejectedSignals = (arrayValue(raw.rejected_signals) ?? [])
+    .map((item) => normalizeRejectedSignal(item))
+    .filter((item): item is AgenticRejectedSignal => Boolean(item));
+  return {
+    draft: {
+      edits,
+      rejected_signals: rejectedSignals,
+    },
+    raw_proposal: raw as JsonObject,
+    normalization_warnings: warnings,
+  };
+}
+
+function synthesizePolicyEdits(raw: Record<string, unknown>, warnings: string[]): AgenticSkillEditDraft[] {
+  const failureModes = (arrayValue(raw.failure_modes) ?? []).map((item) => objectRecord(item)).filter((item): item is Record<string, unknown> => Boolean(item));
+  const output: AgenticSkillEditDraft[] = [];
+  for (const failureMode of failureModes) {
+    const signalIds = stringArray(failureMode.sig_ids) ?? stringArray(failureMode.source_signal_ids) ?? [];
+    if (!signalIds.length) {
+      continue;
+    }
+    const modeId = stringValue(failureMode.mode_id) ?? stringValue(failureMode.id) ?? "model_failure_mode";
+    const pattern = stringValue(failureMode.pattern) ?? stringValue(failureMode.summary) ?? "";
+    const rootCause = stringValue(failureMode.root_cause) ?? "";
+    const text = `${modeId} ${pattern} ${rootCause}`.toLowerCase();
+    if (/not deep|不够深入|human.*fail|shallow|拆分更多/.test(text)) {
+      output.push({
+        target: "loop_skill",
+        op: "add",
+        section: "verification",
+        content: [
+          "When human feedback says a bug hunt was not deep enough, do not close after a small number of surface fixes.",
+          "Expand the loop into structural checks such as concurrency/cancellation, zero-value sentinels, cache lifecycle, normalization edge cases, and missing verifier coverage before claiming completion.",
+        ].join(" "),
+        rationale: `Model-observed failure mode ${modeId}: ${pattern || rootCause}`,
+        expected_behavior_change: "Future loop-control decisions expand or continue after shallow bug-hunt feedback instead of accepting reflection-only completion.",
+        eval_plan: "Replay human-fail bug-hunt sessions and verify the controller chooses expand/continue with deeper structural checks.",
+        source_event_ids: [],
+        source_signal_ids: signalIds,
+      });
+    }
+    if (/soft|reflection|self-reflection|validation|closure|done/.test(text)) {
+      output.push({
+        target: "loop_skill",
+        op: "add",
+        section: "completion",
+        content: "Do not treat self-reflection as sufficient validation for deep code-quality or bug-hunting loops when hard human or verifier feedback has contradicted prior completion claims.",
+        rationale: `Model-observed failure mode ${modeId}: ${pattern || rootCause}`,
+        expected_behavior_change: "Future loops require verifier-backed or human-accepted evidence before completing deep bug-hunt work.",
+        eval_plan: "Replay sessions with soft reflection passes and hard human failures; completion should be blocked until stronger verification exists.",
+        source_event_ids: [],
+        source_signal_ids: signalIds,
+      });
+    }
+  }
+  const observations = (arrayValue(raw.observations) ?? []).map((item) => objectRecord(item)).filter((item): item is Record<string, unknown> => Boolean(item));
+  const observedSignals = uniqueStrings(output.flatMap((edit) => edit.source_signal_ids));
+  if (observations.length && observedSignals.length) {
+    const bullets = observations
+      .slice(0, 6)
+      .map((observation) => {
+        const file = stringValue(observation.file);
+        const summary = stringValue(observation.summary) ?? stringValue(observation.detail);
+        return [file, summary].filter((item): item is string => Boolean(item)).join(": ");
+      })
+      .filter(Boolean);
+    if (bullets.length) {
+      output.push({
+        target: "workspace_skill",
+        op: "add",
+        section: "testing",
+        content: [
+          "For deep semantic-router looper bug hunts, include a broad checklist before completion:",
+          ...bullets.map((bullet) => `- ${bullet}`),
+        ].join("\n"),
+        rationale: "Model observations identified recurring code-quality surfaces that prior shallow loops missed.",
+        expected_behavior_change: "Future workspace work inspects the recurring looper bug surfaces instead of stopping at the first simple sort-order fix.",
+        eval_plan: "During replay, workspace skill scoring should require these bug-surface checks for similar looper quality tasks.",
+        source_event_ids: [],
+        source_signal_ids: observedSignals,
+      });
+    }
+  }
+  if (output.length) {
+    warnings.push("Synthesized skill policy edits from model failure modes and observations.");
+  }
+  return output;
+}
+
+function rawEditEntries(raw: Record<string, unknown>, warnings: string[]): Array<{ value: unknown; defaultTarget?: OptSkillTargetKind }> {
+  const direct = arrayValue(raw.edits);
+  if (direct) {
+    return direct.map((value) => ({ value }));
+  }
+  const namedSources: Array<{ key: string; defaultTarget?: OptSkillTargetKind }> = [
+    { key: "policy_edits" },
+    { key: "skill_edits" },
+    { key: "loop_policy_edits", defaultTarget: "loop_skill" },
+    { key: "loop_rules", defaultTarget: "loop_skill" },
+    { key: "workspace_rules", defaultTarget: "workspace_skill" },
+    { key: "verifier_candidates", defaultTarget: "loop_skill" },
+    { key: "bug_candidates", defaultTarget: "workspace_skill" },
+  ];
+  for (const source of namedSources) {
+    const values = arrayValue(raw[source.key]);
+    if (values?.length) {
+      return values.map((value) => ({ value, defaultTarget: source.defaultTarget }));
+    }
+  }
+  if (arrayValue(raw.observations)?.length || arrayValue(raw.failure_modes)?.length) {
+    warnings.push("Model returned observations without concrete skill edits.");
+  }
+  return [];
+}
+
+function normalizeAgenticEdit(value: unknown, index: number, warnings: string[], defaultTarget?: OptSkillTargetKind): AgenticSkillEditDraft | undefined {
+  const raw = objectRecord(value);
+  if (!raw) {
+    warnings.push(`Dropped edit ${index}: not an object.`);
+    return undefined;
+  }
+  const rawTarget = objectRecord(raw.target);
+  const target = normalizeTarget(raw.target) ?? defaultTarget;
+  if (!target) {
+    warnings.push(`Dropped edit ${index}: unsupported target ${String(raw.target)}.`);
+    return undefined;
+  }
+  const rawOp = stringValue(raw.op);
+  const op = normalizeOp(rawOp);
+  if (!op) {
+    warnings.push(`Normalized edit ${index}: missing or unsupported op ${String(raw.op)}; defaulted to add.`);
+  }
+  const section = normalizeEditSection(stringValue(raw.section) ?? stringValue(raw.type) ?? stringValue(raw.kind) ?? stringValue(raw.category) ?? (rawTarget ? "bug_hunting" : undefined), target);
+  const summary = stringValue(raw.summary) ?? stringValue(raw.title) ?? stringValue(raw.description);
+  const content = normalizeEditContent(raw.content, summary, target, warnings, index, rawTarget);
+  const rationale = stringValue(raw.rationale) ?? stringValue(raw.reason) ?? summary ?? "Model-authored self-improve proposal.";
+  return {
+    target,
+    op: op ?? "add",
+    section,
+    anchor: stringValue(raw.anchor),
+    content,
+    rationale,
+    expected_behavior_change: stringValue(raw.expected_behavior_change)
+      ?? stringValue(raw.expected_behavior)
+      ?? summary
+      ?? `Future ${target === "loop_skill" ? "loop control" : "workspace workflow"} follows this learned rule.`,
+    eval_plan: stringValue(raw.eval_plan)
+      ?? stringValue(raw.evaluation)
+      ?? defaultEvalPlan(target, section),
+    source_event_ids: numberArray(raw.source_event_ids)
+      ?? numberArray(raw.source_events)
+      ?? numberArray(objectRecord(raw.citations)?.events)
+      ?? numberArray(objectRecord(raw.citation)?.events)
+      ?? [],
+    source_signal_ids: stringArray(raw.source_signal_ids)
+      ?? stringArray(raw.signal_ids)
+      ?? stringArray(raw.source_signals)
+      ?? oneStringArray(raw.source_signal_id)
+      ?? stringArray(objectRecord(raw.citations)?.signals)
+      ?? stringArray(objectRecord(raw.citation)?.signals)
+      ?? oneStringArray(objectRecord(raw.citation)?.signal_id)
+      ?? [],
+  };
+}
+
+function normalizeRejectedSignal(value: unknown): AgenticRejectedSignal | undefined {
+  const raw = objectRecord(value);
+  if (!raw) {
+    return undefined;
+  }
+  const sourceSignalId = stringValue(raw.source_signal_id) ?? stringValue(raw.signal_id) ?? stringValue(raw.id);
+  const reason = stringValue(raw.reason) ?? stringValue(raw.summary);
+  if (!sourceSignalId || !reason) {
+    return undefined;
+  }
+  return {
+    source_signal_id: sourceSignalId,
+    reason,
+  };
+}
+
+function normalizeTarget(value: unknown): OptSkillTargetKind | undefined {
+  const raw = objectRecord(value);
+  if (raw) {
+    return normalizeTarget(raw.type ?? raw.target ?? raw.kind);
+  }
+  if (value === "loop_skill" || value === "workspace_skill") {
+    return value;
+  }
+  const text = stringValue(value)?.toLowerCase().replaceAll("-", "_");
+  if (text === "loop" || text === "loop_policy" || text === "controller") {
+    return "loop_skill";
+  }
+  if (text === "workspace" || text === "workspace_policy" || text === "project") {
+    return "workspace_skill";
+  }
+  return undefined;
+}
+
+function normalizeOp(value: string | undefined): AgenticSkillEditDraft["op"] | undefined {
+  const text = value?.toLowerCase().replaceAll("-", "_");
+  if (text === "add" || text === "append" || text === "insert" || text === "create") {
+    return "add";
+  }
+  if (text === "replace" || text === "update") {
+    return "replace";
+  }
+  if (text === "delete" || text === "remove") {
+    return "delete";
+  }
+  return undefined;
+}
+
+function normalizeEditSection(value: string | undefined, target: OptSkillTargetKind): string {
+  const raw = value?.trim();
+  const text = raw?.toLowerCase().replaceAll("-", "_").trim();
+  switch (text) {
+    case "verification_breadth":
+    case "verifier_policy":
+    case "verification_policy":
+      return "verification";
+    case "decompose_strategy":
+    case "decomposition_strategy":
+      return "decomposition";
+    case "bug_surface_coverage":
+    case "static_analysis":
+      return target === "workspace_skill" ? "testing" : "verification";
+    case "repo_convention":
+    case "repo_conventions":
+      return "repo_conventions";
+    default:
+      return raw || (target === "loop_skill" ? "verification" : "repo_conventions");
+  }
+}
+
+function normalizeEditContent(
+  value: unknown,
+  summary: string | undefined,
+  target: OptSkillTargetKind,
+  warnings: string[],
+  index: number,
+  rawTarget?: Record<string, unknown>,
+): string {
+  if (rawTarget && stringValue(rawTarget.file)) {
+    warnings.push(`Normalized edit ${index}: converted source-code patch target to a workspace skill policy.`);
+    return truncateEditContent(codeTargetPolicyContent(value, summary, rawTarget), warnings, index);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return truncateEditContent(value.trim(), warnings, index);
+  }
+  const raw = objectRecord(value);
+  if (!raw) {
+    return truncateEditContent(summary ?? defaultEditContent(target), warnings, index);
+  }
+  warnings.push(`Normalized edit ${index}: converted structured content object to a skill instruction.`);
+  const lines: string[] = [];
+  if (summary) {
+    lines.push(summary);
+  }
+  for (const [key, item] of Object.entries(raw)) {
+    const title = normalizeSectionTitle(key.replaceAll("_", " "));
+    if (Array.isArray(item)) {
+      const values = item.map((entry) => stringValue(entry) ?? stableJson(entry)).filter(Boolean).slice(0, 8);
+      if (values.length) {
+        lines.push(`${title}:`);
+        lines.push(...values.map((entry) => `- ${entry}`));
+      }
+    } else if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+      lines.push(`${title}: ${String(item)}`);
+    } else if (objectRecord(item)) {
+      lines.push(`${title}: ${stableJson(item)}`);
+    }
+  }
+  return truncateEditContent(lines.join("\n"), warnings, index);
+}
+
+function codeTargetPolicyContent(value: unknown, summary: string | undefined, rawTarget: Record<string, unknown>): string {
+  const file = stringValue(rawTarget.file) ?? "the referenced source file";
+  const lines = numberArray(rawTarget.lines);
+  const location = lines?.length ? `${file}:${lines.join("-")}` : file;
+  const notes = typeof value === "string" && value.trim()
+    ? value.trim().replace(/```[a-zA-Z0-9_-]*\n?/g, "").replace(/```/g, "").trim()
+    : undefined;
+  return [
+    summary
+      ? `When doing similar bug-hunting work, inspect this pattern before claiming completion: ${summary}`
+      : `Inspect ${location} before claiming similar work complete.`,
+    `Scope: ${location}.`,
+    "Use this as a workspace bug-hunting/checklist rule, not an automatic code patch.",
+    notes ? `Inspection notes: ${notes}` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function truncateEditContent(content: string, warnings: string[], index: number): string {
+  const trimmed = content.trim();
+  if (trimmed.length <= MAX_EDIT_CONTENT_LENGTH) {
+    return trimmed;
+  }
+  warnings.push(`Normalized edit ${index}: truncated content to ${MAX_EDIT_CONTENT_LENGTH} characters.`);
+  return `${trimmed.slice(0, MAX_EDIT_CONTENT_LENGTH - 15).trimEnd()}\n... truncated`;
+}
+
+function defaultEditContent(target: OptSkillTargetKind): string {
+  return target === "loop_skill"
+    ? "When prior loop feedback indicates incomplete verification or insufficient depth, expand or verify before claiming completion."
+    : "When this workspace has recurring verification feedback, inspect the relevant package, scripts, and verifier history before claiming completion.";
+}
+
+function defaultEvalPlan(target: OptSkillTargetKind, section: string): string {
+  return target === "loop_skill"
+    ? `Replay loop-control decisions for ${section} cases and verify the candidate prevents the previous incorrect decision.`
+    : `Run or review the relevant workspace verifier for ${section} cases before adopting this rule.`;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function arrayValue(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const values = value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+  return values.length ? [...new Set(values)] : undefined;
+}
+
+function oneStringArray(value: unknown): string[] | undefined {
+  const item = stringValue(value);
+  return item ? [item] : undefined;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim()))];
+}
+
+function numberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const values = value
+    .map((item) => typeof item === "number" && Number.isFinite(item) ? Math.trunc(item) : typeof item === "string" && /^\d+$/.test(item) ? Number(item) : undefined)
+    .filter((item): item is number => item !== undefined);
+  return values.length ? [...new Set(values)] : undefined;
 }
 
 function runtimeOptimizerPrompt(packet: AgenticEvidencePacket): string {
@@ -341,9 +802,11 @@ function runtimeOptimizerPrompt(packet: AgenticEvidencePacket): string {
     "This is a proposal-only learning session, not a coding task.",
     "Never modify workspace files, run shell commands, enable or disable skills, spawn subagents, update goals, or write notes.",
     "Use only the read-only tools exposed in this session when extra context is necessary.",
-    "Return only JSON with an edits array and optional rejected_signals array.",
-    "Write bounded edits, not whole skill templates.",
-    "Every edit must cite source_signal_ids or source_event_ids from the evidence packet.",
+    "Return only JSON. Prefer {observations, failure_modes, edits, rejected_signals}; edits may contain string or structured content.",
+    "Write bounded Loop Skill or Workspace Skill policy edits, not whole skill templates.",
+    "Do not propose source-code patches, diffs, or implementation changes; convert code findings into future loop/workspace behavior rules.",
+    "Use edit target as the string loop_skill or workspace_skill, not a source file object.",
+    "Every edit must cite source_signal_ids or source_event_ids from the evidence packet; use target loop_skill or workspace_skill.",
     "Do not accept soft-only evidence as validation.",
     "If the evidence is insufficient, return {\"edits\":[],\"rejected_signals\":[...]} instead of attempting implementation.",
     "",
@@ -367,9 +830,11 @@ function modelRequest(config: VllmAgentConfig, packet: AgenticEvidencePacket): M
         role: "system",
         content: [
           "You are the Inferoa self-improve optimizer.",
-          "Return only JSON matching { edits: [...], rejected_signals: [...] }.",
-          "Write bounded edits, not whole skill templates.",
-          "Every edit must cite source_signal_ids or source_event_ids from the packet.",
+          "Return only JSON. Prefer {observations, failure_modes, edits, rejected_signals}; edits may contain string or structured content.",
+          "Write bounded Loop Skill or Workspace Skill policy edits, not whole skill templates.",
+          "Do not propose source-code patches, diffs, or implementation changes; convert code findings into future loop/workspace behavior rules.",
+          "Use edit target as the string loop_skill or workspace_skill, not a source file object.",
+          "Every edit must cite source_signal_ids or source_event_ids from the packet; use target loop_skill or workspace_skill.",
           "Do not accept soft-only evidence as validation.",
         ].join("\n"),
       },
@@ -407,7 +872,7 @@ function signalTier(signal: GoalLoopLearningSignal, verification: GoalLoopVerifi
   if (verification.provider === "research") {
     return "T0";
   }
-  if (verification.provider === "command" || verification.provider === "checker" || verification.provider === "connector") {
+  if (verification.provider === "command" || verification.provider === "checker") {
     return "T1";
   }
   return verification.confidence === "hard" ? "T1" : "T2";

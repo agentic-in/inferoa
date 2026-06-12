@@ -59,7 +59,7 @@ test("loop health summarizes structured loop state", async () => {
       session_id: session.session_id,
       command: "printf '[]'",
     });
-    store.updateDiscoverySchedule(discovery.schedule_id, { last_error: "connector unavailable" });
+    store.updateDiscoverySchedule(discovery.schedule_id, { last_error: "source unavailable" });
     store.upsertDiscoveryCandidate({
       candidate_id: "cand_health",
       schedule_id: discovery.schedule_id,
@@ -171,7 +171,7 @@ test("loop dashboard combines health, metrics, inbox, and roadmap edges", async 
       session_id: session.session_id,
       command: "printf '[]'",
     });
-    store.updateDiscoverySchedule(discovery.schedule_id, { last_error: "connector unavailable" });
+    store.updateDiscoverySchedule(discovery.schedule_id, { last_error: "source unavailable" });
     recordGoalVerification(store, session.session_id, {
       provider: "command",
       verdict: "fail",
@@ -206,7 +206,7 @@ test("loop dashboard combines health, metrics, inbox, and roadmap edges", async 
     assert.equal(dashboard.operations.automation_review_pending, 1);
     assert.equal(dashboard.operations.discovery_errors, 1);
     assert.equal(dashboard.attention.inbox_items.length > 0, true);
-    assert.equal(dashboard.attention.roadmap_edges.some((item) => item.id === "connectors-plugins"), true);
+    assert.equal(dashboard.attention.roadmap_edges.some((item) => item.id === "policy-unattended-safety"), true);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -272,29 +272,20 @@ test("loop dashboard command returns workspace dashboard as json", async () => {
     assert.equal(parsed.status?.severity, "ok");
     assert.equal(parsed.totals?.sessions, 0);
     assert.equal(parsed.totals?.verifications, 0);
-    assert.ok(parsed.attention?.roadmap_edges?.some((item) => item.id === "connectors-plugins"));
+    assert.ok(parsed.attention?.roadmap_edges?.some((item) => item.id === "policy-unattended-safety"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("loop action-preflight command records blocked connector action as json", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-action-preflight-cli-"));
+test("removed loop connector/action commands are not part of the public loop surface", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-surface-cli-"));
   const workspaceRoot = path.join(dir, "workspace");
   const stateDir = path.join(dir, "state");
   const configPath = path.join(workspaceRoot, ".inferoa", "config.yaml");
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, YAML.stringify(DEFAULT_CONFIG), "utf8");
   try {
-    const store = await SessionStore.open(stateDir);
-    let sessionId = "";
-    try {
-      const workspace = await resolveWorkspace(process.cwd(), structuredClone(DEFAULT_CONFIG), workspaceRoot);
-      sessionId = store.createSession(workspace, "cli action preflight").session_id;
-    } finally {
-      store.close();
-    }
-
     const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
     const baseArgs = [
       cliPath,
@@ -306,41 +297,12 @@ test("loop action-preflight command records blocked connector action as json", a
       stateDir,
       "--json",
     ];
-    const output = await execFileAsync(process.execPath, [
-      ...baseArgs,
-      "loop",
-      "action-preflight",
-      sessionId,
-      "github",
-      "pull_request",
-      "merge",
-      "--request-class",
-      "background",
-    ], { maxBuffer: 1024 * 1024 });
-    const parsed = JSON.parse(output.stdout) as {
-      status?: string;
-      recorded?: boolean;
-      policy_id?: string;
-      action?: { connector?: string; surface?: string; area?: string; operation?: string };
-    };
-    assert.equal(parsed.status, "deny");
-    assert.equal(parsed.recorded, true);
-    assert.equal(parsed.policy_id, "first-class-connector-mutation");
-    assert.deepEqual(parsed.action, {
-      connector: "github",
-      surface: "first_class",
-      kind: "mutation",
-      area: "pull-request",
-      operation: "merge",
-    });
-
-    const inboxOutput = await execFileAsync(process.execPath, [...baseArgs, "inbox"], { maxBuffer: 1024 * 1024 });
-    const inbox = JSON.parse(inboxOutput.stdout) as {
-      summary?: { by_kind?: Record<string, number> };
-      items?: Array<{ kind?: string; detail?: string }>;
-    };
-    assert.equal(inbox.summary?.by_kind?.action_review, 1);
-    assert.match(inbox.items?.find((item) => item.kind === "action_review")?.detail ?? "", /preflight/);
+    for (const removed of ["connectors", "connector", "action-preflight", "action", "action-run", "action-execute", "actions", "action-log"]) {
+      await assert.rejects(
+        execFileAsync(process.execPath, [...baseArgs, "loop", removed], { maxBuffer: 1024 * 1024 }),
+        /Usage: inferoa loop/,
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -383,11 +345,10 @@ test("loop policy command returns configured default background isolation", asyn
       default_background_isolation?: string;
       workspace_root?: string;
       unattended_completion?: { reflection_only_sufficient?: boolean; task_strong_pass_providers?: string[] };
-      unattended_tool_gates?: { destructive_shell?: string; connector_mutation?: string; read_only_connector_inspection?: string };
-      connector_verifiers?: Array<{ id?: string; connector?: string }>;
-      connector_action_policies?: Array<{
+      unattended_tool_gates?: { destructive_shell?: string; external_mutation?: string };
+      external_mutation_policy?: Array<{
         id?: string;
-        connector?: string;
+        system?: string;
         surface?: string;
         command?: string;
         tool_names?: string[];
@@ -395,13 +356,6 @@ test("loop policy command returns configured default background isolation", asyn
         request_classes?: string[];
         decision?: string;
         review_surface?: string;
-      }>;
-      connector_action_runners?: Array<{
-        id?: string;
-        connector?: string;
-        area?: string;
-        operation?: string;
-        default_mode?: string;
       }>;
       workspace_permission?: { mode?: string; source?: string };
       skill_policy?: {
@@ -422,18 +376,12 @@ test("loop policy command returns configured default background isolation", asyn
     assert.equal(parsed.workspace_permission?.mode, "full_access");
     assert.equal(parsed.workspace_permission?.source, "default");
     assert.equal(parsed.unattended_completion?.reflection_only_sufficient, false);
-    assert.ok(parsed.unattended_completion?.task_strong_pass_providers?.includes("connector"));
+    assert.ok(parsed.unattended_completion?.task_strong_pass_providers?.includes("command"));
     assert.equal(parsed.unattended_tool_gates?.destructive_shell, "deny");
-    assert.equal(parsed.unattended_tool_gates?.connector_mutation, "deny");
-    assert.equal(parsed.unattended_tool_gates?.read_only_connector_inspection, "allow");
-    assert.ok(parsed.connector_verifiers?.some((item) => item.id === "github-pr-status" && item.connector === "github"));
-    assert.ok(parsed.connector_verifiers?.some((item) => item.id === "github-workflow-run-status" && item.connector === "github"));
-    assert.ok(parsed.connector_verifiers?.some((item) => item.id === "github-deployment-status" && item.connector === "github"));
-    assert.ok(parsed.connector_verifiers?.some((item) => item.id === "github-release-status" && item.connector === "github"));
-    assert.ok(parsed.connector_verifiers?.some((item) => item.id === "npm-package-status" && item.connector === "npm"));
-    assert.ok(parsed.connector_action_policies?.some((item) =>
+    assert.equal(parsed.unattended_tool_gates?.external_mutation, "deny");
+    assert.ok(parsed.external_mutation_policy?.some((item) =>
       item.id === "github-cli-mutation"
-      && item.connector === "github"
+      && item.system === "github"
       && item.surface === "cli"
       && item.command === "gh"
       && item.kind === "mutation"
@@ -441,11 +389,11 @@ test("loop policy command returns configured default background isolation", asyn
       && item.tool_names?.includes("run_command")
       && item.request_classes?.includes("background")
       && item.request_classes?.includes("verification")
-      && item.review_surface === "loop inbox action_review"
+      && item.review_surface === "loop inbox external_action_approval"
     ));
-    assert.ok(parsed.connector_action_policies?.some((item) =>
+    assert.ok(parsed.external_mutation_policy?.some((item) =>
       item.id === "npm-cli-package-publish"
-      && item.connector === "npm"
+      && item.system === "npm"
       && item.surface === "cli"
       && item.command === "npm"
       && item.kind === "mutation"
@@ -453,94 +401,7 @@ test("loop policy command returns configured default background isolation", asyn
       && item.tool_names?.includes("run_command")
       && item.request_classes?.includes("background")
       && item.request_classes?.includes("verification")
-      && item.review_surface === "loop inbox action_review"
-    ));
-    assert.ok(parsed.connector_action_policies?.some((item) =>
-      item.id === "first-class-connector-mutation"
-      && item.connector === "*"
-      && item.surface === "first_class"
-      && item.kind === "mutation"
-      && item.decision === "deny"
-      && item.request_classes?.includes("background")
-      && item.request_classes?.includes("verification")
-      && item.review_surface === "loop inbox action_review"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-pr-merge"
-      && item.connector === "github"
-      && item.area === "pull_request"
-      && item.operation === "merge"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-pr-label"
-      && item.connector === "github"
-      && item.area === "pull_request"
-      && item.operation === "label"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-issue-close"
-      && item.connector === "github"
-      && item.area === "issue"
-      && item.operation === "close"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-issue-label"
-      && item.connector === "github"
-      && item.area === "issue"
-      && item.operation === "label"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-notification-mark-read"
-      && item.connector === "github"
-      && item.area === "notification"
-      && item.operation === "mark_read"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-run-rerun"
-      && item.connector === "github"
-      && item.area === "run"
-      && item.operation === "rerun"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-workflow-dispatch"
-      && item.connector === "github"
-      && item.area === "workflow"
-      && item.operation === "dispatch"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-deployment-create-status"
-      && item.connector === "github"
-      && item.area === "deployment"
-      && item.operation === "create_status"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-release-create-draft"
-      && item.connector === "github"
-      && item.area === "release"
-      && item.operation === "create_draft"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "github-release-publish-draft"
-      && item.connector === "github"
-      && item.area === "release"
-      && item.operation === "publish_draft"
-      && item.default_mode === "dry_run"
-    ));
-    assert.ok(parsed.connector_action_runners?.some((item) =>
-      item.id === "npm-package-publish"
-      && item.connector === "npm"
-      && item.area === "package"
-      && item.operation === "publish"
-      && item.default_mode === "dry_run"
+      && item.review_surface === "loop inbox external_action_approval"
     ));
     assert.equal(parsed.skill_policy?.prompt_contract?.skill_bodies_embedded, false);
     assert.equal(parsed.skill_policy?.prompt_contract?.skill_body_access, "on_demand_skill_read");
@@ -601,10 +462,10 @@ test("loop roadmap command returns structured coverage as json", async () => {
     assert.ok((parsed.summary?.implemented ?? 0) > 0);
     assert.ok((parsed.summary?.partially_implemented ?? 0) > 0);
     assert.ok(parsed.capabilities?.some((item) => item.id === "memory-spine" && item.status === "implemented"));
-    assert.ok(parsed.capabilities?.some((item) => item.id === "connectors-plugins" && item.status === "partially_implemented"));
-    assert.ok(parsed.capabilities?.some((item) => item.id === "policy-unattended-safety" && item.evidence?.includes("connector action policy registry")));
+    assert.equal(parsed.capabilities?.some((item) => item.id === "connectors-plugins"), false);
+    assert.ok(parsed.capabilities?.some((item) => item.id === "policy-unattended-safety" && item.evidence?.includes("external mutation policy")));
     assert.ok(parsed.current_closure?.includes("Self-improve and structured replay/gating"));
-    assert.ok(parsed.future_product_extensions?.some((item) => /Broader connectors/.test(item)));
+    assert.equal(parsed.future_product_extensions?.some((item) => /Broader connectors/.test(item)), false);
     assert.ok(parsed.guardrails?.some((item) => /speculative scanners/.test(item)));
   } finally {
     await rm(dir, { recursive: true, force: true });

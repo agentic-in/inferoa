@@ -12,6 +12,7 @@ import {
   buildAgenticEvidencePacket,
   AgenticNoEditsError,
   modelGatewayAgenticOptimizer,
+  normalizeAgenticProposalJson,
   renderAgenticSkillTargets,
   type AgenticOptimizerRun,
   type AgenticProposalOptimizer,
@@ -46,6 +47,7 @@ export interface OptLiteProposalSummary {
   skill_targets?: OptSkillTargetSummary[];
   proposal_source?: AgenticProposalSource;
   agentic_run?: AgenticOptimizerRun;
+  normalization_warnings?: string[];
   evidence: OptEvidenceSummary;
 }
 
@@ -57,6 +59,7 @@ export interface OptLiteProposal extends OptLiteProposalSummary {
   workspace_commands?: OptWorkspaceCommandEvidence[];
   skill_targets?: OptSkillTarget[];
   model_proposal?: AgenticSkillProposalDraft;
+  raw_model_proposal?: JsonObject;
   agentic_error?: string;
   skill_body: string;
   staged_skill_path: string;
@@ -267,6 +270,8 @@ export async function optLitePropose(
     evidence: evidence.source_events,
     workspace_commands: evidence.workspace_commands,
     model_proposal: agentic?.model_proposal,
+    raw_model_proposal: agentic?.raw_model_proposal,
+    normalization_warnings: agentic?.normalization_warnings,
     agentic_error: agentic?.error,
     skill_targets: targetDrafts.map((target) => ({ target: target.target, skill_id: target.skill_id, body: target.body, edits: target.edits })),
   }), 12)}`;
@@ -287,6 +292,8 @@ export async function optLitePropose(
     workspace_commands: evidence.workspace_commands,
     skill_targets: skillTargets,
     model_proposal: agentic?.model_proposal,
+    raw_model_proposal: agentic?.raw_model_proposal,
+    normalization_warnings: agentic?.normalization_warnings,
     agentic_run: agentic?.agentic_run,
     agentic_error: agentic?.error,
     skill_body: skillBody,
@@ -484,6 +491,7 @@ function recordSkillProposalStaged(store: SessionStore, workspace: WorkspaceIden
     proposal_source: proposal.proposal_source,
     agentic_run: agenticRunToJson(proposal.agentic_run),
     agentic_error: proposal.agentic_error,
+    normalization_warnings: proposal.normalization_warnings,
     skill_target_ids: targets.map((target) => target.skill_id),
     skill_targets: targets.map((target) => ({
       target: target.target,
@@ -574,7 +582,15 @@ async function tryAgenticSkillTargets(
   store: SessionStore,
   workspace: WorkspaceIdentity,
   options: OptLiteProposeOptions,
-): Promise<{ source: AgenticProposalSource; targets: OptSkillTarget[]; model_proposal?: AgenticSkillProposalDraft; agentic_run?: AgenticOptimizerRun; error?: string } | undefined> {
+): Promise<{
+  source: AgenticProposalSource;
+  targets: OptSkillTarget[];
+  model_proposal?: AgenticSkillProposalDraft;
+  raw_model_proposal?: JsonObject;
+  normalization_warnings?: string[];
+  agentic_run?: AgenticOptimizerRun;
+  error?: string;
+} | undefined> {
   if (options.mode === "deterministic_fallback") {
     return undefined;
   }
@@ -585,11 +601,18 @@ async function tryAgenticSkillTargets(
   try {
     const packet = buildAgenticEvidencePacket(store, workspace);
     const result = unwrapAgenticOptimizerResult(await optimizer.propose(packet));
-    const rendered = renderAgenticSkillTargets(packet, result.draft, await readExistingLearnedSkillBodies(workspace.root));
+    const normalized = normalizeAgenticProposalJson(result.draft);
+    const normalizationWarnings = uniqueStrings([
+      ...(result.normalization_warnings ?? []),
+      ...normalized.normalization_warnings,
+    ]);
+    const rendered = renderAgenticSkillTargets(packet, normalized.draft, await readExistingLearnedSkillBodies(workspace.root));
     return {
       source: "agentic",
       targets: rendered.targets,
       model_proposal: rendered.proposal,
+      raw_model_proposal: result.raw_proposal ?? normalized.raw_proposal,
+      normalization_warnings: normalizationWarnings.length ? normalizationWarnings : undefined,
       agentic_run: result.run,
     };
   } catch (error) {
@@ -632,10 +655,17 @@ async function readExistingLearnedSkillBodies(workspaceRoot: string): Promise<Pa
   return output;
 }
 
-function unwrapAgenticOptimizerResult(result: AgenticProposalOptimizerResult): { draft: AgenticSkillProposalDraft; run?: AgenticOptimizerRun } {
+function unwrapAgenticOptimizerResult(result: AgenticProposalOptimizerResult): {
+  draft: AgenticSkillProposalDraft;
+  raw_proposal?: JsonObject;
+  normalization_warnings?: string[];
+  run?: AgenticOptimizerRun;
+} {
   if (typeof result === "object" && result !== null && "draft" in result) {
     return {
       draft: result.draft,
+      raw_proposal: result.raw_proposal,
+      normalization_warnings: result.normalization_warnings,
       run: result.run,
     };
   }
@@ -876,7 +906,7 @@ function loopSkillReplayScore(target: OptSkillTarget, proposal: OptLiteProposal,
     candidate += 0.2;
     checks.push("human-feedback-rule");
   }
-  if (body.includes("verifier-backed evidence") || body.includes("command, checker, connector")) {
+  if (body.includes("verifier-backed evidence") || body.includes("command, checker")) {
     candidate += 0.2;
     checks.push("verifier-backed-completion-rule");
   }
@@ -1045,7 +1075,7 @@ function loopSkillEdits(evidence: { source_events: OptSourceEvent[]; summary: Op
       target: "loop_skill",
       op: "add",
       section: "completion",
-      content: "When completion evidence is reflection-only or otherwise soft-only completion evidence, do not mark the loop complete until a command, checker, connector, research metric, or explicit human approval verifies the result.",
+      content: "When completion evidence is reflection-only or otherwise soft-only completion evidence, do not mark the loop complete until a command, checker, research metric, or explicit human approval verifies the result.",
       rationale: "Loop completion should be tied to verifier-backed evidence instead of the agent's own reflection.",
       source_event_indexes: sourceIndexes(evidence.source_events, (event) => event.summary.includes("soft") || event.summary.includes("reflection")),
     },
@@ -1287,6 +1317,7 @@ function proposalSummary(proposal: OptLiteProposal): OptLiteProposalSummary {
     skill_path: proposal.skill_path,
     proposal_source: proposal.proposal_source,
     agentic_run: proposal.agentic_run,
+    normalization_warnings: proposal.normalization_warnings,
     skill_targets: proposalSkillTargets(proposal).map((target) => ({
       target: target.target,
       skill_id: target.skill_id,
@@ -1296,6 +1327,10 @@ function proposalSummary(proposal: OptLiteProposal): OptLiteProposalSummary {
     })),
     evidence: proposal.evidence,
   };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim()))];
 }
 
 function replaySummary(report: OptReplayReport): OptReplayReportSummary {

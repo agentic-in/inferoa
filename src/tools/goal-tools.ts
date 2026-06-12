@@ -521,7 +521,7 @@ function recordGoalVerificationTool(args: JsonObject, context: ToolExecutionCont
     summary: stringArg(args.summary),
     failure_reason: stringArg(args.failure_reason) ?? stringArg(args.blocker),
   }, context.run_id);
-  if (provider === "command" || provider === "checker" || provider === "connector") {
+  if (provider === "command" || provider === "checker") {
     appendSkillRuleApplied(context, state.goal, WORKSPACE_SKILL_ID, {
       target: "workspace_skill",
       rule_id: provider === "command" ? "workspace-command-verifier-used" : "workspace-verifier-used",
@@ -921,7 +921,7 @@ function loopSkillPolicyCompletionBlockMessage(context: ToolExecutionContext, go
     if (records.some(isLearnedLoopStrongVerification)) {
       return undefined;
     }
-    return `Cannot complete goal while Inferoa Loop Skill is enabled until horizon ${goal.horizon_generation} has a pass non-reflection verification from command, connector, human review, or checker. Reflection-only evidence is not enough.`;
+    return `Cannot complete goal while Inferoa Loop Skill is enabled until horizon ${goal.horizon_generation} has a pass non-reflection verification from command, human review, or checker. Reflection-only evidence is not enough.`;
   }
   return "Cannot complete goal while Inferoa Loop Skill is enabled until the Loop Skill body has been read with skill_read for this goal.";
 }
@@ -988,7 +988,7 @@ function isLearnedLoopStrongVerification(record: ReturnType<typeof readGoalVerif
   if (record.provider === "command" || record.provider === "human") {
     return record.confidence === "hard";
   }
-  if (record.provider === "connector" || record.provider === "research") {
+  if (record.provider === "research") {
     return record.confidence === "hard" || record.confidence === "mixed";
   }
   return record.provider === "checker";

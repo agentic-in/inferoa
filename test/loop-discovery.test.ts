@@ -112,7 +112,9 @@ test("git changes discovery projects local workspace changes and clears when cle
     const item = inbox.items.find((entry) => entry.kind === "discovery_candidate");
     assert.ok(item);
     assert.match(item.prompt ?? "", /git status --short/);
-    assert.equal(item.verification_hint?.command, `inferoa verify-git-clean ${item.session_id}`);
+    assert.equal(item.verification_hint?.verifier_id, "git-clean");
+    assert.equal("command" in (item.verification_hint ?? {}), false);
+    assert.match(item.detail ?? "", /goal\.verify evidence/);
 
     await execFileAsync("git", ["add", "feature.txt"], { cwd: workspaceRoot });
     await execFileAsync("git", ["-c", "user.name=Inferoa Test", "-c", "user.email=inferoa@example.test", "commit", "-m", "Add feature"], { cwd: workspaceRoot });
@@ -124,7 +126,7 @@ test("git changes discovery projects local workspace changes and clears when cle
   }
 });
 
-test("github issues discovery uses gh CLI output as connector candidates", async () => {
+test("github issues discovery uses gh CLI output as discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -185,7 +187,7 @@ test("github issues discovery uses gh CLI output as connector candidates", async
   }
 });
 
-test("github assigned issues discovery uses gh CLI output as assigned connector candidates", async () => {
+test("github assigned issues discovery uses gh CLI output as assigned discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-assigned-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -245,7 +247,7 @@ test("github assigned issues discovery uses gh CLI output as assigned connector 
   }
 });
 
-test("github pull request discovery uses gh CLI output as connector candidates", async () => {
+test("github pull request discovery uses gh CLI output as discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-pr-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -309,7 +311,7 @@ test("github pull request discovery uses gh CLI output as connector candidates",
   }
 });
 
-test("github assigned pull request discovery uses gh CLI output as assigned connector candidates", async () => {
+test("github assigned pull request discovery uses gh CLI output as assigned discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-assigned-pr-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -371,7 +373,7 @@ test("github assigned pull request discovery uses gh CLI output as assigned conn
   }
 });
 
-test("github review request discovery uses gh search output as connector candidates", async () => {
+test("github review request discovery uses gh search output as discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-review-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -430,7 +432,7 @@ test("github review request discovery uses gh search output as connector candida
   }
 });
 
-test("github notifications discovery uses gh API output as connector candidates", async () => {
+test("github notifications discovery uses gh API output as discovery candidates", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-loop-discovery-github-notifications-"));
   const stateDir = path.join(dir, "state");
   const workspaceRoot = path.join(dir, "workspace");
@@ -449,7 +451,7 @@ test("github notifications discovery uses gh API output as connector candidates"
         "case \" $* \" in *\" --method GET repos/owner/repo/notifications \"*) ;; *) exit 65 ;; esac",
         "case \" $* \" in *\" per_page=5 \"*) ;; *) exit 66 ;; esac",
         "case \" $* \" in *\" participating=true \"*) ;; *) exit 67 ;; esac",
-        "printf '%s\\n' '[{\"id\":\"notif_1\",\"unread\":true,\"reason\":\"review_requested\",\"updated_at\":\"2026-06-11T04:30:00Z\",\"repository\":{\"full_name\":\"owner/repo\"},\"subject\":{\"title\":\"Review loop connector policy\",\"type\":\"PullRequest\",\"url\":\"https://api.github.com/repos/owner/repo/pulls/44\",\"latest_comment_url\":\"https://api.github.com/repos/owner/repo/issues/comments/100\"}}]'",
+        "printf '%s\\n' '[{\"id\":\"notif_1\",\"unread\":true,\"reason\":\"review_requested\",\"updated_at\":\"2026-06-11T04:30:00Z\",\"repository\":{\"full_name\":\"owner/repo\"},\"subject\":{\"title\":\"Review loop policy\",\"type\":\"PullRequest\",\"url\":\"https://api.github.com/repos/owner/repo/pulls/44\",\"latest_comment_url\":\"https://api.github.com/repos/owner/repo/issues/comments/100\"}}]'",
       ].join("\n"),
       "utf8",
     );
@@ -470,7 +472,7 @@ test("github notifications discovery uses gh API output as connector candidates"
     assert.equal(result.ran.length, 1);
     const candidate = result.ran[0]?.candidates[0];
     assert.ok(candidate);
-    assert.equal(candidate.title, "GitHub notification owner/repo: Review loop connector policy");
+    assert.equal(candidate.title, "GitHub notification owner/repo: Review loop policy");
     assert.equal(candidate.priority, "medium");
     assert.equal(candidate.dedupe_key, "github-notification:notif_1");
     assert.equal(candidate.source.kind, "github-notifications");
@@ -613,7 +615,8 @@ test("github draft release discovery uses gh CLI output as release candidates", 
     assert.ok(item);
     assert.equal(item.source, "github-draft-releases");
     assert.equal(item.verification_hint?.verifier_id, "github-release-status");
-    assert.equal(item.verification_hint?.command, `inferoa verify-github-release ${item.session_id} v1.2.3 --repo owner/repo --expect published`);
+    assert.equal("command" in (item.verification_hint ?? {}), false);
+    assert.match(item.detail ?? "", /goal\.verify evidence/);
   } finally {
     process.env.PATH = originalPath;
     store.close();
@@ -679,7 +682,8 @@ test("github deployments discovery uses gh API output as deployment candidates",
       id: "github-deployment-status",
       params: { repo: "owner/repo", deployment_id: "4242" },
     });
-    assert.match(candidate.prompt, /verify-github-deployment <session> --repo owner\/repo --deployment-id 4242/);
+    assert.match(candidate.prompt, /read-only gh CLI\/API/i);
+    assert.match(candidate.prompt, /goal\.verify evidence/);
     assert.match(candidate.prompt, /Do not create deployment statuses/);
     assert.equal(store.getDiscoverySchedule(schedule.schedule_id)?.last_error, undefined);
 
@@ -688,7 +692,8 @@ test("github deployments discovery uses gh API output as deployment candidates",
     assert.ok(item);
     assert.equal(item.source, "github-deployments");
     assert.equal(item.verification_hint?.verifier_id, "github-deployment-status");
-    assert.equal(item.verification_hint?.command, `inferoa verify-github-deployment ${item.session_id} --repo owner/repo --deployment-id 4242`);
+    assert.equal("command" in (item.verification_hint ?? {}), false);
+    assert.match(item.detail ?? "", /goal\.verify evidence/);
   } finally {
     process.env.PATH = originalPath;
     store.close();
@@ -731,15 +736,17 @@ test("HTTP health discovery creates and clears typed health candidates", async (
       id: "http-health",
       params: { url: server.url("/health"), expected_status: 200 },
     });
-    assert.match(candidate.prompt, /verify-http/);
+    assert.match(candidate.prompt, /read-only HTTP checks/);
+    assert.match(candidate.prompt, /goal\.verify evidence/);
 
     const inbox = await readLoopInbox(store, workspace);
     const item = inbox.items.find((entry) => entry.kind === "discovery_candidate");
     assert.ok(item);
     assert.equal(item.source, "http-health");
     assert.equal(item.verification_hint?.verifier_id, "http-health");
-    assert.match(item.verification_hint?.command ?? "", /verify-http/);
+    assert.equal("command" in (item.verification_hint ?? {}), false);
     assert.match(item.prompt ?? "", /HTTP health check failure/);
+    assert.match(item.detail ?? "", /goal\.verify evidence/);
 
     routes["/health"] = 200;
     const next = new Date("2026-06-11T03:01:00.000Z");
@@ -804,14 +811,16 @@ test("npm package discovery creates and clears typed package status candidates",
       id: "npm-package-status",
       params: { package_name: "@scope/pkg", version: "1.2.3", tag: "latest" },
     });
-    assert.match(candidate.prompt, /verify-npm-package <session> @scope\/pkg --version 1\.2\.3 --tag latest/);
+    assert.match(candidate.prompt, /read-only npm CLI/);
+    assert.match(candidate.prompt, /goal\.verify evidence/);
 
     const inbox = await readLoopInbox(store, workspace);
     const item = inbox.items.find((entry) => entry.kind === "discovery_candidate");
     assert.ok(item);
     assert.equal(item.source, "npm-package-status");
     assert.equal(item.verification_hint?.verifier_id, "npm-package-status");
-    assert.equal(item.verification_hint?.command, `inferoa verify-npm-package ${item.session_id} @scope/pkg --version 1.2.3 --tag latest`);
+    assert.equal("command" in (item.verification_hint ?? {}), false);
+    assert.match(item.detail ?? "", /goal\.verify evidence/);
 
     await writeFakeNpmView(npmPath, {
       versions: ["1.2.2", "1.2.3"],

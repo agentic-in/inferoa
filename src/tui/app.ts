@@ -60,13 +60,8 @@ import { readLoopEvidence } from "../loop/evidence.js";
 import { readLoopTrace } from "../loop/trace.js";
 import { readLoopRoadmap } from "../loop/roadmap.js";
 import { readLoopWorkers } from "../loop/workers.js";
-import { readLoopConnectors } from "../loop/connectors.js";
 import { readLoopTasks } from "../loop/tasks.js";
-import { parseConnectorActionPreflightInput, recordConnectorActionPreflight } from "../loop/action-preflight.js";
-import { parseConnectorActionRunInput, runConnectorAction } from "../loop/actions.js";
-import { readLoopActions } from "../loop/action-log.js";
 import { queueGoalVerificationSuite, runGoalVerificationSuite } from "../loop/verifier-suite.js";
-import { runConnectorVerifier } from "../loop/connector-verifiers.js";
 import {
   createLoopAutomationSchedule,
   enqueueDueAutomationSchedules,
@@ -97,18 +92,11 @@ import {
   runDueDiscoverySchedules,
 } from "../loop/discovery.js";
 import {
-  parseLoopInboxSnoozeUntil,
   promoteLoopInboxItem,
   readLoopInbox,
-  readLoopInboxRouting,
-  updateLoopInboxAssignment,
   updateLoopInboxItemState,
-  updateLoopInboxMute,
-  updateLoopInboxRouting,
   type LoopInboxAction,
   type LoopInboxItem,
-  type LoopInboxItemKind,
-  type LoopInboxPriority,
   type LoopInboxPromotionIsolation,
 } from "../loop/inbox.js";
 import { readLoopPolicy, resolveLoopBackgroundIsolation } from "../loop/policy.js";
@@ -3204,7 +3192,7 @@ export class TuiApp {
   }
 
   private async renderLoopControlView(args: string): Promise<void> {
-    const parsed = parseModeAction(args, new Set(["status", "mode", "owner", "review-owner", "review", "verify", "verify-github-pr", "verify-github-pr-status", "verify-github-review-request", "verify-github-issue-status", "verify-github-notification", "verify-github-run", "verify-github-workflow", "verify-github-deployment", "verify-github-release", "verify-npm-package", "verify-git-clean", "verify-http", "pause", "resume", "budget", "complete", "drop"]));
+    const parsed = parseModeAction(args, new Set(["status", "mode", "owner", "review-owner", "review", "verify", "pause", "resume", "budget", "complete", "drop"]));
     const existingSession = this.optionalSession();
     if (!existingSession && parsed.action === "status") {
       this.renderLoopTranscriptPanel("Loop", ["No active session yet. Use /loop <objective> to start one."]);
@@ -3302,54 +3290,6 @@ export class TuiApp {
 
     if (parsed.action === "verify") {
       await this.verifyGoal(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-pr") {
-      await this.verifyGoalGitHubPullRequest(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-pr-status") {
-      await this.verifyGoalGitHubPullRequestStatus(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-review-request") {
-      await this.verifyGoalGitHubReviewRequest(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-issue-status") {
-      await this.verifyGoalGitHubIssueStatus(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-notification") {
-      await this.verifyGoalGitHubNotification(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-run") {
-      await this.verifyGoalGitHubRun(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-workflow") {
-      await this.verifyGoalGitHubWorkflow(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-deployment") {
-      await this.verifyGoalGitHubDeployment(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-github-release") {
-      await this.verifyGoalGitHubRelease(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-npm-package") {
-      await this.verifyGoalNpmPackage(session, current, parsed.rest);
-      return;
-    }
-    if (parsed.action === "verify-git-clean") {
-      await this.verifyGoalGitClean(session, current);
-      return;
-    }
-    if (parsed.action === "verify-http") {
-      await this.verifyGoalHttp(session, current, parsed.rest);
       return;
     }
 
@@ -3698,387 +3638,6 @@ export class TuiApp {
       latest?.summary ? `  ${truncateToWidth(oneLine(latest.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
       latest?.failure_reason ? `  ${truncateToWidth(oneLine(latest.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
     ].filter((line): line is string => Boolean(line)));
-  }
-
-  private async verifyGoalGitHubPullRequest(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubPrVerifierArgs>;
-    try {
-      parsed = parseGitHubPrVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub PR checks`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-pr-checks", {
-        session_id: session.session_id,
-        params: { pr: parsed.pr, repo: parsed.repo },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub PR ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubPullRequestStatus(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubPrVerifierArgs>;
-    try {
-      parsed = parseGitHubPrVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub PR status`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-pr-status", {
-        session_id: session.session_id,
-        params: { pr: parsed.pr, repo: parsed.repo },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub PR status ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubReviewRequest(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubReviewRequestVerifierArgs>;
-    try {
-      parsed = parseGitHubReviewRequestVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub review request status`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-review-request", {
-        session_id: session.session_id,
-        params: { pr: parsed.pr, repo: parsed.repo, reviewer: parsed.reviewer },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub review request ${parsed.pr} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubIssueStatus(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubIssueVerifierArgs>;
-    try {
-      parsed = parseGitHubIssueVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub issue status`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-issue-status", {
-        session_id: session.session_id,
-        params: { issue: parsed.issue, repo: parsed.repo },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub issue status ${parsed.issue} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubNotification(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubNotificationVerifierArgs>;
-    try {
-      parsed = parseGitHubNotificationVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub notification thread`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-notification-status", {
-        session_id: session.session_id,
-        params: { thread: parsed.thread },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub notification ${parsed.thread} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubRun(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubRunVerifierArgs>;
-    try {
-      parsed = parseGitHubRunVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub Actions run`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-actions-run", {
-        session_id: session.session_id,
-        params: { run: parsed.run, repo: parsed.repo, attempt: parsed.attempt },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub run ${parsed.run} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubWorkflow(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubWorkflowVerifierArgs>;
-    try {
-      parsed = parseGitHubWorkflowVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading latest GitHub workflow run`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-workflow-run-status", {
-        session_id: session.session_id,
-        params: {
-          workflow: parsed.workflow,
-          repo: parsed.repo,
-          branch: parsed.branch,
-          event: parsed.event,
-          commit: parsed.commit,
-        },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub workflow ${parsed.workflow} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubDeployment(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubDeploymentVerifierArgs>;
-    try {
-      parsed = parseGitHubDeploymentVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub deployment status`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-deployment-status", {
-        session_id: session.session_id,
-        params: {
-          repo: parsed.repo,
-          deployment_id: parsed.deployment_id,
-          environment: parsed.environment,
-          ref: parsed.ref,
-          expect: parsed.expect,
-        },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub deployment ${parsed.deployment_id ?? parsed.environment ?? "target"} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitHubRelease(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseGitHubReleaseVerifierArgs>;
-    try {
-      parsed = parseGitHubReleaseVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading GitHub release`,
-      fg256(244, "This records connector evidence but does not mutate GitHub or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "github-release-status", {
-        session_id: session.session_id,
-        params: { tag: parsed.tag, repo: parsed.repo, expect: parsed.expect },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} GitHub release ${parsed.tag} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalNpmPackage(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseNpmPackageVerifierArgs>;
-    try {
-      parsed = parseNpmPackageVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading npm package metadata`,
-      fg256(244, "This records connector evidence but does not publish or mutate npm."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "npm-package-status", {
-        session_id: session.session_id,
-        params: {
-          package_name: parsed.package_name,
-          version: parsed.version,
-          tag: parsed.tag,
-          timeout_ms: parsed.timeout_ms,
-        },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} npm ${parsed.package_name}@${parsed.version} · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalGitClean(session: SessionRecord, current: GoalState | undefined): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading local git status`,
-      fg256(244, "This records connector evidence but does not mutate git or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "git-clean", {
-        session_id: session.session_id,
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} Git clean · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async verifyGoalHttp(session: SessionRecord, current: GoalState | undefined, args: string): Promise<void> {
-    if (!current) {
-      this.renderLoopTranscriptPanel("Loop", ["No loop set. Use /loop <objective> or /loop mode auto <objective> to start one."]);
-      return;
-    }
-    let parsed: ReturnType<typeof parseHttpVerifierArgs>;
-    try {
-      parsed = parseHttpVerifierArgs(args.trim() ? args.trim().split(/\s+/) : []);
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    this.renderLoopVerificationPanel([
-      `${fg256(75, "•")} reading HTTP health endpoint`,
-      fg256(244, "This records connector evidence but does not mutate the endpoint or complete the loop."),
-    ]);
-    try {
-      const verification = await runConnectorVerifier(this.app.store, this.app.workspace, "http-health", {
-        session_id: session.session_id,
-        params: { url: parsed.url, expected_status: parsed.status, timeout_ms: parsed.timeout_ms },
-      });
-      this.renderLoopVerificationPanel([
-        `${fg256(48, "•")} HTTP health · ${verification.verdict} · ${verification.confidence}`,
-        verification.summary ? `  ${truncateToWidth(oneLine(verification.summary), Math.max(24, terminalWidth() - 6))}` : undefined,
-        verification.failure_reason ? `  ${truncateToWidth(oneLine(verification.failure_reason), Math.max(24, terminalWidth() - 6))}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
   }
 
   private async startGoal(session: SessionRecord, objective: string, options: GoalStartOptions = {}): Promise<void> {
@@ -5020,40 +4579,20 @@ export class TuiApp {
       await this.applyInboxAction(command as LoopInboxAction, parsed.args.slice(1));
       return;
     }
-    if (command === "snooze") {
-      await this.applyInboxAction("snooze", parsed.args.slice(1));
-      return;
-    }
     if (command === "promote") {
       await this.promoteInboxItem(parsed.args.slice(1));
       return;
     }
-    if (command === "assign" || command === "unassign") {
-      await this.assignInboxItem(command, parsed.args.slice(1));
-      return;
-    }
-    if (command === "routes" || command === "route") {
-      await this.routeInboxItems(command, parsed.args.slice(1));
-      return;
-    }
-    if (command === "mute" || command === "unmute") {
-      await this.muteInboxItem(command, parsed.args.slice(1));
-      return;
-    }
     const inbox = await readLoopInbox(this.app.store, this.app.workspace, {
       includeDone: parsed.includeDone,
-      includeSnoozed: parsed.includeDone,
-      includeMuted: parsed.includeMuted,
-      assignee: parsed.assignee,
-      onlyUnassigned: parsed.onlyUnassigned,
     });
     const counts = Object.entries(inbox.summary.by_kind)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([kind, count]) => `${kind}:${count}`)
       .join("  ");
     this.renderLoopTranscriptPanel("Loop Inbox", [
-      `${fg256(39, "Open")} ${inbox.summary.open}  ${fg256(203, "High")} ${inbox.summary.high}  ${fg256(75, "Assigned")} ${inbox.summary.assigned}  ${fg256(244, "Muted")} ${inbox.summary.muted}  ${fg256(244, "Total")} ${inbox.summary.total}`,
-      inboxFilterLabel(parsed) ?? (counts ? fg256(244, counts) : fg256(244, "No loop inbox items.")),
+      `${fg256(39, "Open")} ${inbox.summary.open}  ${fg256(203, "High")} ${inbox.summary.high}  ${fg256(244, "Total")} ${inbox.summary.total}`,
+      counts ? fg256(244, counts) : fg256(244, "No loop inbox items."),
       "",
       ...(inbox.items.length ? inbox.items.slice(0, 40).flatMap((item, index) => renderInboxItemLines(item, index + 1)) : ["  no items"]),
       ...(inbox.items.length > 40 ? [fg256(244, `  ... ${inbox.items.length - 40} more`)] : []),
@@ -5063,20 +4602,18 @@ export class TuiApp {
   private async applyInboxAction(action: LoopInboxAction, args: string[]): Promise<void> {
     const itemId = args[0];
     if (!itemId) {
-      this.renderNotice(`Usage: /inbox ${action} <item_id>${action === "snooze" ? " <30m|2h|1d|iso>" : ""}`);
+      this.renderNotice(`Usage: /inbox ${action} <item_id>`);
       return;
     }
     try {
       const result = await updateLoopInboxItemState(this.app.store, this.app.workspace, {
         action,
         item_id: itemId,
-        snoozed_until: action === "snooze" ? parseLoopInboxSnoozeUntil(args[1] ?? "") : undefined,
-        note: args.slice(action === "snooze" ? 2 : 1).join(" "),
+        note: args.slice(1).join(" "),
       });
       this.renderLoopTranscriptPanel("Loop Inbox", [
         `${fg256(48, "•")} ${action} ${result.item.id}`,
         result.state?.disposition ? `  disposition ${result.state.disposition}` : "  reopened",
-        result.state?.snoozed_until ? `  until ${result.state.snoozed_until}` : undefined,
         result.state?.note ? `  note ${result.state.note}` : undefined,
       ].filter((line): line is string => Boolean(line)));
     } catch (error) {
@@ -5101,89 +4638,6 @@ export class TuiApp {
         `  job ${result.job.job_id.slice(0, 12)} · ${result.job.kind} · ${result.job.status}`,
         result.worktree ? `  worktree ${result.worktree.worktree_id.slice(0, 12)} · ${result.worktree.branch}` : undefined,
         `  ${truncateToWidth(oneLine(result.job.prompt), Math.max(24, terminalWidth() - 6))}`,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async assignInboxItem(command: string, args: string[]): Promise<void> {
-    const itemId = args[0];
-    if (!itemId || (command === "assign" && !args[1])) {
-      this.renderNotice(`Usage: /inbox ${command === "assign" ? "assign <item_id> <owner> [note]" : "unassign <item_id>"}`);
-      return;
-    }
-    try {
-      const result = await updateLoopInboxAssignment(this.app.store, this.app.workspace, {
-        item_id: itemId,
-        assignee: command === "assign" ? args[1] : undefined,
-        note: command === "assign" ? args.slice(2).join(" ") : undefined,
-      });
-      this.renderLoopTranscriptPanel("Loop Inbox", [
-        `${fg256(48, "•")} ${result.action} ${result.item.id}`,
-        result.state?.assignee ? `  owner ${result.state.assignee}` : "  owner cleared",
-        result.state?.assignment_note ? `  note ${result.state.assignment_note}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async routeInboxItems(command: string, args: string[]): Promise<void> {
-    const subcommand = command === "routes" ? "list" : (args[0] ?? "list").toLowerCase();
-    try {
-      if (subcommand === "list" || subcommand === "show") {
-        const routes = await readLoopInboxRouting(this.app.workspace);
-        this.renderLoopTranscriptPanel("Loop Inbox Routes", routes.length
-          ? routes.map((route) => `  ${route.route_id} -> ${route.assignee}${routeSelectorLabel(route)}${route.note ? ` · ${route.note}` : ""}`)
-          : ["  no routes"]);
-        return;
-      }
-      if (subcommand === "add") {
-        const route = parseInboxRouteAddFlags(args.slice(1));
-        const result = await updateLoopInboxRouting(this.app.workspace, { action: "add", ...route });
-        this.renderLoopTranscriptPanel("Loop Inbox Routes", [
-          `${fg256(48, "•")} route ${result.route?.route_id ?? "added"}`,
-          result.route ? `  owner ${result.route.assignee}${routeSelectorLabel(result.route)}` : undefined,
-          result.route?.note ? `  note ${result.route.note}` : undefined,
-        ].filter((line): line is string => Boolean(line)));
-        return;
-      }
-      if (subcommand === "remove" || subcommand === "delete") {
-        const routeId = args[1];
-        if (!routeId) {
-          this.renderNotice("Usage: /inbox route remove <route_id>");
-          return;
-        }
-        const result = await updateLoopInboxRouting(this.app.workspace, { action: "remove", route_id: routeId });
-        this.renderLoopTranscriptPanel("Loop Inbox Routes", [
-          `${fg256(48, "•")} removed ${result.route?.route_id ?? routeId}`,
-          `  remaining ${result.routes.length}`,
-        ]);
-        return;
-      }
-      this.renderNotice("Usage: /inbox routes | /inbox route add <owner> --kind <kind>|--source <source>|--priority <priority> [--id route_id] [note] | /inbox route remove <route_id>");
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async muteInboxItem(command: string, args: string[]): Promise<void> {
-    const itemId = args[0];
-    if (!itemId) {
-      this.renderNotice(`Usage: /inbox ${command === "mute" ? "mute <item_id> [note]" : "unmute <item_id|mute_key>"}`);
-      return;
-    }
-    try {
-      const result = await updateLoopInboxMute(this.app.store, this.app.workspace, {
-        action: command === "mute" ? "mute" : "unmute",
-        item_id: itemId,
-        note: command === "mute" ? args.slice(1).join(" ") : undefined,
-      });
-      this.renderLoopTranscriptPanel("Loop Inbox", [
-        `${fg256(48, "•")} ${result.action} ${result.mute_key}`,
-        result.state?.muted_until ? `  until ${result.state.muted_until}` : undefined,
-        result.state?.note ? `  note ${result.state.note}` : undefined,
       ].filter((line): line is string => Boolean(line)));
     } catch (error) {
       this.renderNotice(error instanceof Error ? error.message : String(error));
@@ -5310,6 +4764,10 @@ export class TuiApp {
     }
     const abort = new AbortController();
     this.#selfImproveAbort = abort;
+    this.renderLoopTranscriptPanel("Self-Improve Learn", [
+      `${fg256(220, "●")} learning from verified loop evidence`,
+      `${fg256(39, "Status")} optimizer and replay gate running`,
+    ]);
     const activity = this.startActivityIndicator("Learning from loop evidence");
     const worker = new Promise<void>((resolve) => {
       setTimeout(() => {
@@ -5449,15 +4907,7 @@ export class TuiApp {
       "task",
       "workers",
       "worker",
-      "connectors",
-      "connector",
       "policy",
-      "action-preflight",
-      "action",
-      "action-run",
-      "action-execute",
-      "actions",
-      "action-log",
       "roadmap",
       "coverage",
     ]);
@@ -5499,24 +4949,8 @@ export class TuiApp {
       this.renderLoopWorkersView();
       return;
     }
-    if (action === "connectors" || action === "connector") {
-      this.renderLoopConnectorsView();
-      return;
-    }
     if (action === "policy") {
       await this.renderLoopPolicyView();
-      return;
-    }
-    if (action === "action-preflight" || action === "action") {
-      this.renderLoopActionPreflightView(tokens.slice(1));
-      return;
-    }
-    if (action === "action-run" || action === "action-execute") {
-      await this.renderLoopActionRunView(tokens.slice(1));
-      return;
-    }
-    if (action === "actions" || action === "action-log") {
-      this.renderLoopActionsView();
       return;
     }
     if (action === "roadmap" || action === "coverage") {
@@ -5530,7 +4964,7 @@ export class TuiApp {
     const dashboard = await readLoopDashboard(this.app.store, this.app.workspace);
     const topGoal = dashboard.top.goal;
     const topSource = dashboard.top.source;
-    const topConnector = dashboard.top.connector;
+    const topSystem = dashboard.top.system;
     this.renderPanel("Loop Internal Dashboard", [
       `${fg256(39, "Severity")} ${dashboard.status.severity}${dashboard.status.reasons.length ? ` · ${dashboard.status.reasons.join(", ")}` : ""}`,
       `${fg256(39, "Inbox")} open ${dashboard.status.open_inbox_items} · high ${dashboard.status.high_inbox_items} · background ${dashboard.status.active_jobs} · reviews ${dashboard.status.pending_reviews}`,
@@ -5539,7 +4973,7 @@ export class TuiApp {
       `${fg256(39, "Ops")} automation due ${dashboard.operations.automation_due} · discovery due ${dashboard.operations.discovery_due} · discovery errors ${dashboard.operations.discovery_errors} · worktrees ${dashboard.operations.worktrees_active}`,
       `${fg256(39, "Top loop")} ${topGoal ? `${truncateToWidth(oneLine(topGoal.label ?? topGoal.key), 48)} · ${formatCompactNumber(topGoal.tokens)} tok · verify ${topGoal.verifications}` : "none"}`,
       `${fg256(39, "Top source")} ${topSource ? `${topSource.key} · ${formatCompactNumber(topSource.tokens)} tok · verify ${topSource.verifications}` : "none"}`,
-      `${fg256(39, "Top connector")} ${topConnector ? `${topConnector.key} · ${formatCompactNumber(topConnector.tokens)} tok · verify ${topConnector.verifications}` : "none"}`,
+      `${fg256(39, "Top system")} ${topSystem ? `${topSystem.key} · ${formatCompactNumber(topSystem.tokens)} tok · verify ${topSystem.verifications}` : "none"}`,
       "",
       fg256(39, "Attention"),
       ...(dashboard.attention.inbox_items.length
@@ -5678,145 +5112,18 @@ export class TuiApp {
     ]);
   }
 
-  private renderLoopConnectorsView(): void {
-    const report = readLoopConnectors(this.app.store, this.app.workspace);
-    this.renderPanel("Loop Internal Connectors", [
-      `${fg256(39, "Summary")} connectors ${report.summary.connectors} · configured ${report.summary.configured_connectors} · sources ${report.summary.discovery_sources}`,
-      `${fg256(39, "Discovery")} schedules ${report.summary.schedules} · enabled ${report.summary.enabled_schedules} · due ${report.summary.due_schedules} · open ${report.summary.open_candidates}`,
-      `${fg256(39, "Verification")} verifiers ${report.summary.verifiers}`,
-      `${fg256(39, "Action policy")} connector ${report.summary.action_policies} · runners ${report.summary.action_runners} · global ${report.summary.global_action_policies}`,
-      "",
-      ...(report.connectors.length
-        ? report.connectors.map((connector) => {
-          const configured = connector.status === "configured" ? "configured" : "available";
-          const hot = connector.summary.high_open_candidates ? ` · high ${connector.summary.high_open_candidates}` : "";
-          return `  ${connector.connector.padEnd(8)} ${configured} · sources ${connector.summary.discovery_sources} · schedules ${connector.summary.schedules} · open ${connector.summary.open_candidates}${hot} · verifiers ${connector.summary.verifiers} · policies ${connector.summary.action_policies} · runners ${connector.summary.action_runners}`;
-        })
-        : ["  no connectors"]),
-      ...(report.global_action_policies.length
-        ? ["", fg256(39, "Global policies"), ...report.global_action_policies.map((policy) => `  ${policy.id} · ${policy.kind}/${policy.decision} · ${policy.request_classes.join("/")}`)]
-        : []),
-    ]);
-  }
-
   private async renderLoopPolicyView(): Promise<void> {
     const policy = await readLoopPolicy(this.app.config, this.app.workspace);
     this.renderPanel("Loop Internal Policy", [
       `${fg256(39, "Default background isolation")} ${policy.default_background_isolation}`,
       `${fg256(39, "Workspace permission")} ${policy.workspace_permission.mode} · ${policy.workspace_permission.source}`,
       `${fg256(39, "Completion gate")} background requires ${policy.unattended_completion.task_strong_pass_providers.join("/")} pass · reflection only ${policy.unattended_completion.reflection_only_sufficient ? "allowed" : "blocked"}`,
-      `${fg256(39, "Tool gates")} ${policy.unattended_tool_gates.request_classes.join("/")} deny destructive shell and connector mutation · read-only connector inspection ${policy.unattended_tool_gates.read_only_connector_inspection}`,
-      `${fg256(39, "Connector verifiers")} ${policy.connector_verifiers.map((item) => item.id).join(", ") || "none"}`,
-      `${fg256(39, "Action policies")} ${policy.connector_action_policies.map((item) => item.id).join(", ") || "none"}`,
-      `${fg256(39, "Action runners")} ${policy.connector_action_runners.map((item) => item.id).join(", ") || "none"}`,
+      `${fg256(39, "Tool gates")} ${policy.unattended_tool_gates.request_classes.join("/")} deny destructive shell and external mutation`,
+      `${fg256(39, "External mutation policy")} ${policy.external_mutation_policy.map((item) => item.id).join(", ") || "none"}`,
       `${fg256(39, "Skills")} enabled ${policy.skill_policy.enabled_count}/${policy.skill_policy.configured_enabled.length} · discovered ${policy.skill_policy.discovered_count} · missing ${policy.skill_policy.missing_enabled.length}`,
       `${fg256(39, "Learned skill")} ${policy.skill_policy.learned_workspace_skill.enabled ? "enabled" : policy.skill_policy.learned_workspace_skill.discovered ? "available" : "not adopted"}`,
       `${fg256(39, "Skill bodies")} ${policy.skill_policy.prompt_contract.skill_body_access} · embedded ${policy.skill_policy.prompt_contract.skill_bodies_embedded ? "yes" : "no"}`,
       fg256(244, "Applies when automation, inbox promotion, or daemon queueing does not pass --worktree or --active-checkout."),
-    ]);
-  }
-
-  private renderLoopActionPreflightView(args: string[]): void {
-    let session: SessionRecord | undefined;
-    let inputArgs = args;
-    if (args[0]) {
-      const explicit = this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0]);
-      if (explicit) {
-        session = explicit;
-        inputArgs = args.slice(1);
-      }
-    }
-    session ??= this.optionalSession();
-    if (!session) {
-      this.renderNotice("Usage: /loop action-preflight [session] <connector> <area> <operation> [--kind read|mutation] [--surface first_class|cli|tool] [--request-class background|verification|interactive]");
-      return;
-    }
-    try {
-      const result = recordConnectorActionPreflight(this.app.store, session, parseConnectorActionPreflightInput(inputArgs));
-      this.renderPanel("Loop Action Preflight", [
-        `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
-        `${fg256(39, "Decision")} ${result.status}${result.needs_review ? " · needs review" : ""}${result.recorded ? " · recorded" : ""}`,
-        `${fg256(39, "Request")} ${result.request_class} · ${result.action.surface} · ${result.action.connector}`,
-        `${fg256(39, "Action")} ${result.action.kind} · ${result.action.area}.${result.action.operation}`,
-        `${fg256(39, "Reason")} ${result.reason}`,
-        result.review_surface ? `${fg256(39, "Review")} ${result.review_surface}` : undefined,
-        result.event_id ? `${fg256(39, "Event")} ${result.event_id}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private async renderLoopActionRunView(args: string[]): Promise<void> {
-    let session: SessionRecord | undefined;
-    let inputArgs = args;
-    if (args[0]) {
-      const explicit = this.app.store.getSession(args[0]) ?? this.app.store.findSessionByPrefix(this.app.workspace.id, args[0]);
-      if (explicit) {
-        session = explicit;
-        inputArgs = args.slice(1);
-      }
-    }
-    session ??= this.optionalSession();
-    if (!session) {
-      this.renderNotice("Usage: /loop action-run [session] github pull_request merge --repo owner/repo --number N [--execute] OR github pull_request review --repo owner/repo --number N --event approve|request-changes|comment [--body TEXT] [--execute] OR github pull_request comment --repo owner/repo --number N --body TEXT [--execute] OR github pull_request label --repo owner/repo --number N [--add-label LABEL ...] [--remove-label LABEL ...] [--execute] OR github issue close --repo owner/repo --number N [--execute] OR github issue comment --repo owner/repo --number N --body TEXT [--execute] OR github issue label --repo owner/repo --number N [--add-label LABEL ...] [--remove-label LABEL ...] [--execute] OR github notification mark-read --thread THREAD [--execute] OR github run rerun --repo owner/repo --run-id RUN_ID [--execute] OR github workflow dispatch --repo owner/repo --workflow deploy.yml [--ref main] [--field key=value ...] [--execute] OR github deployment create-status --repo owner/repo --deployment-id ID --state success|failure|inactive|in_progress|queued|pending|error [--execute] OR github release create-draft --repo owner/repo --tag TAG (--notes TEXT|--generate-notes) [--execute] OR github release publish-draft --repo owner/repo --tag TAG [--execute] OR npm package publish [--tag latest] [--access public|restricted] [--provenance] [--execute]");
-      return;
-    }
-    try {
-      const result = await runConnectorAction(this.app.store, session, parseConnectorActionRunInput(inputArgs), {
-        cwd: this.app.workspace.root,
-        env: process.env,
-      });
-      this.renderPanel("Loop Action Run", [
-        `${fg256(39, "Session")} ${session.session_id.slice(0, 12)} · ${truncateToWidth(oneLine(session.title), 56)}`,
-        `${fg256(39, "Status")} ${result.status}${result.recorded ? " · recorded" : ""}`,
-        `${fg256(39, "Request")} ${result.action.request_class} · ${result.action.connector} · ${result.action.area}.${result.action.operation}`,
-        `${fg256(39, "Target")} ${formatConnectorActionTarget(result.action)}${formatConnectorActionOptions(result.action)}`,
-        `${fg256(39, "Command")} ${result.command.executable} ${result.command.args.join(" ")}`,
-        `${fg256(39, "Preflight")} ${result.preflight.status}${result.preflight.needs_review ? " · needs review" : ""}`,
-        result.exit_code !== undefined ? `${fg256(39, "Exit")} ${result.exit_code}` : undefined,
-        result.reason ? `${fg256(39, "Reason")} ${truncateToWidth(oneLine(result.reason), 72)}` : undefined,
-        result.event_id ? `${fg256(39, "Event")} ${result.event_id}` : undefined,
-      ].filter((line): line is string => Boolean(line)));
-    } catch (error) {
-      this.renderNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  private renderLoopActionsView(): void {
-    const report = readLoopActions(this.app.store, this.app.workspace, { limit: 14 });
-    this.renderPanel("Connector Action Audit", [
-      `${fg256(39, "Summary")} total ${report.summary.total} · dry-run ${report.summary.dry_run} · executed ${report.summary.executed} · failed ${report.summary.failed} · denied ${report.summary.denied}`,
-      `${fg256(39, "Connectors")} ${compactRecordCounts(report.summary.by_connector)}`,
-      "",
-      ...(report.actions.length
-        ? report.actions.map((action) => {
-          const target = action.thread
-            ? ` · thread ${action.thread}`
-            : action.target_run_id
-              ? ` · ${action.repo ?? "repo unknown"} run ${action.target_run_id}`
-              : action.workflow
-                ? ` · ${action.repo ?? "repo unknown"} workflow ${action.workflow}${action.ref ? ` @ ${action.ref}` : ""}`
-                : action.tag
-                  ? ` · ${action.repo ?? "repo unknown"} release ${action.tag}`
-                : action.dist_tag
-                  ? ` · tag ${action.dist_tag}`
-                : action.repo && action.number !== undefined ? ` · ${action.repo}#${action.number}` : "";
-          const method = action.review_event ? ` · ${action.review_event}` : action.method ? ` · ${action.method}` : "";
-          const workflowOptions = action.area === "workflow" && action.fields?.length
-            ? ` · fields ${action.fields.length}`
-            : "";
-          const labelOptions = action.add_labels?.length || action.remove_labels?.length
-            ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
-            : "";
-          const npmOptions = action.area === "package"
-            ? `${action.access ? ` · ${action.access}` : ""}${action.provenance ? " · provenance" : ""}`
-            : "";
-          const exit = action.exit_code !== undefined ? ` · exit ${action.exit_code}` : "";
-          const source = action.source === "action_run" ? "" : ` · ${action.source}`;
-          return `  ${action.status.padEnd(8)} ${action.connector}.${action.area}.${action.operation}${target}${method}${workflowOptions}${labelOptions}${npmOptions}${exit}${source} · ${truncateToWidth(oneLine(action.session_title), 42)}`;
-        })
-        : ["  no connector actions"]),
     ]);
   }
 
@@ -6015,7 +5322,7 @@ export class TuiApp {
   private async addGitHubIssuesDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryGitHubFlags(args.slice(1));
     const schedule = createGitHubIssuesDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6028,7 +5335,7 @@ export class TuiApp {
   private async addGitHubAssignedIssuesDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryAssignedConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryAssignedGitHubFlags(args.slice(1));
     const schedule = createGitHubAssignedIssuesDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6042,7 +5349,7 @@ export class TuiApp {
   private async addGitHubAssignedPullRequestsDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryAssignedConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryAssignedGitHubFlags(args.slice(1));
     const schedule = createGitHubAssignedPullRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6056,7 +5363,7 @@ export class TuiApp {
   private async addGitHubPullRequestsDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryGitHubFlags(args.slice(1));
     const schedule = createGitHubPullRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6069,7 +5376,7 @@ export class TuiApp {
   private async addGitHubReviewRequestsDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryGitHubFlags(args.slice(1));
     const schedule = createGitHubReviewRequestsDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6094,7 +5401,7 @@ export class TuiApp {
   private async addGitHubActionsDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryGitHubFlags(args.slice(1));
     const schedule = createGitHubActionsDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -6106,7 +5413,7 @@ export class TuiApp {
   private async addGitHubDraftReleasesDiscoverySchedule(args: string[]): Promise<void> {
     const intervalText = args[0] ?? (await this.ask("Interval", "1h"));
     const interval = parseAutomationInterval(intervalText);
-    const flags = parseDiscoveryConnectorFlags(args.slice(1));
+    const flags = parseDiscoveryGitHubFlags(args.slice(1));
     const schedule = createGitHubDraftReleasesDiscoverySchedule(this.app.store, this.app.workspace, {
       interval_ms: interval,
       repo: flags.repo,
@@ -8525,136 +7832,23 @@ function parseInboxPromoteFlags(args: string[]): { isolation?: LoopInboxPromotio
   return { isolation, item_id: output[0] };
 }
 
-function parseInboxRouteAddFlags(args: string[]): {
-  route_id?: string;
-  assignee: string;
-  note?: string;
-  kind?: LoopInboxItemKind;
-  source?: string;
-  priority?: LoopInboxPriority;
-} {
-  const owner = args[0]?.trim();
-  if (!owner) {
-    throw new Error("Usage: /inbox route add <owner> --kind <kind>|--source <source>|--priority <priority> [--id route_id] [note]");
-  }
-  let rest = args.slice(1);
-  const id = consumeInlineFlagValue(rest, "--id");
-  rest = id.rest;
-  const kind = consumeInlineFlagValue(rest, "--kind");
-  rest = kind.rest;
-  const source = consumeInlineFlagValue(rest, "--source");
-  rest = source.rest;
-  const priority = consumeInlineFlagValue(rest, "--priority");
-  rest = priority.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown inbox route option: ${unknown}`);
-  }
-  return {
-    route_id: id.value,
-    assignee: owner,
-    note: rest.join(" "),
-    kind: parseInboxKindFlag(kind.value),
-    source: source.value,
-    priority: parseInboxPriorityFlag(priority.value),
-  };
-}
-
-function parseInboxKindFlag(value: string | undefined): LoopInboxItemKind | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (
-    value === "goal_review"
-    || value === "goal_blocker"
-    || value === "goal_paused"
-    || value === "verification_failure"
-    || value === "stale_work"
-    || value === "automation_review"
-    || value === "action_review"
-    || value === "discovery_candidate"
-    || value === "daemon_job"
-    || value === "skill_proposal"
-    || value === "self_improve_replay"
-  ) {
-    return value;
-  }
-  throw new Error(`Unknown inbox item kind: ${value}`);
-}
-
-function parseInboxPriorityFlag(value: string | undefined): LoopInboxPriority | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === "high" || value === "medium" || value === "low") {
-    return value;
-  }
-  throw new Error(`Unknown inbox priority: ${value}`);
-}
-
-function parseInboxViewArgs(args: string[]): { args: string[]; includeDone: boolean; includeMuted: boolean; assignee?: string; onlyUnassigned?: boolean } {
+function parseInboxViewArgs(args: string[]): { args: string[]; includeDone: boolean } {
   const output: string[] = [];
   let includeDone = false;
-  let includeMuted = false;
-  let assignee: string | undefined;
-  let onlyUnassigned = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--all" || arg === "all") {
       includeDone = true;
-      includeMuted = true;
-      continue;
-    }
-    if (arg === "--muted" || arg === "muted") {
-      includeMuted = true;
-      continue;
-    }
-    if (arg === "--unassigned") {
-      onlyUnassigned = true;
-      continue;
-    }
-    if (arg === "--assignee") {
-      assignee = args[index + 1];
-      index += 1;
-      continue;
-    }
-    if (arg?.startsWith("--assignee=")) {
-      assignee = arg.slice("--assignee=".length);
       continue;
     }
     if (arg) {
       output.push(arg);
     }
   }
-  if (assignee) {
-    onlyUnassigned = false;
-  }
-  return { args: output, includeDone, includeMuted, assignee, onlyUnassigned };
+  return { args: output, includeDone };
 }
 
-function routeSelectorLabel(route: { kind?: string; source?: string; priority?: string }): string {
-  const selectors = [
-    route.kind ? `kind:${route.kind}` : undefined,
-    route.source ? `source:${route.source}` : undefined,
-    route.priority ? `priority:${route.priority}` : undefined,
-  ].filter((item): item is string => Boolean(item));
-  return selectors.length ? ` · ${selectors.join(" ")}` : "";
-}
-
-function inboxFilterLabel(parsed: { assignee?: string; onlyUnassigned?: boolean; includeMuted?: boolean }): string | undefined {
-  if (parsed.assignee) {
-    return fg256(244, `owner:${parsed.assignee}`);
-  }
-  if (parsed.onlyUnassigned) {
-    return fg256(244, "unassigned");
-  }
-  if (parsed.includeMuted) {
-    return fg256(244, "including muted");
-  }
-  return undefined;
-}
-
-function parseDiscoveryConnectorFlags(args: string[]): { repo?: string; labels?: string[]; limit?: number } {
+function parseDiscoveryGitHubFlags(args: string[]): { repo?: string; labels?: string[]; limit?: number } {
   let rest = [...args];
   const repo = consumeInlineFlagValue(rest, "--repo");
   rest = repo.rest;
@@ -8681,7 +7875,7 @@ function parseDiscoveryConnectorFlags(args: string[]): { repo?: string; labels?:
   };
 }
 
-function parseDiscoveryAssignedConnectorFlags(args: string[]): { repo?: string; assignee?: string; labels?: string[]; limit?: number } {
+function parseDiscoveryAssignedGitHubFlags(args: string[]): { repo?: string; assignee?: string; labels?: string[]; limit?: number } {
   let rest = [...args];
   const repo = consumeInlineFlagValue(rest, "--repo");
   rest = repo.rest;
@@ -8824,254 +8018,6 @@ function parseDiscoveryNpmPackageFlags(args: string[]): { package_name?: string;
   };
 }
 
-function parseGitHubPrVerifierArgs(args: string[]): { pr: string; repo?: string } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
-  }
-  const pr = rest[0]?.trim();
-  if (!pr) {
-    throw new Error("Usage: /loop verify-github-pr <pr> [--repo owner/name]");
-  }
-  return { pr, repo: repo.value };
-}
-
-function parseGitHubReviewRequestVerifierArgs(args: string[]): { pr: string; repo?: string; reviewer?: string } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const reviewer = consumeInlineFlagValue(rest, "--reviewer");
-  rest = reviewer.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
-  }
-  const pr = rest[0]?.trim();
-  if (!pr) {
-    throw new Error("Usage: /loop verify-github-review-request <pr> [--repo owner/name] [--reviewer login]");
-  }
-  return { pr, repo: repo.value, reviewer: reviewer.value };
-}
-
-function parseGitHubIssueVerifierArgs(args: string[]): { issue: string; repo?: string } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
-  }
-  const issue = rest[0]?.trim();
-  if (!issue) {
-    throw new Error("Usage: /loop verify-github-issue-status <issue> [--repo owner/name]");
-  }
-  return { issue, repo: repo.value };
-}
-
-function parseGitHubNotificationVerifierArgs(args: string[]): { thread: string } {
-  const unknown = args.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub notification verifier option: ${unknown}`);
-  }
-  const thread = args[0]?.trim();
-  if (!thread) {
-    throw new Error("Usage: /loop verify-github-notification <thread_id>");
-  }
-  return { thread };
-}
-
-function parseGitHubRunVerifierArgs(args: string[]): { run: string; repo?: string; attempt?: number } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const attempt = consumeInlineFlagValue(rest, "--attempt");
-  rest = attempt.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub verifier option: ${unknown}`);
-  }
-  const run = rest[0]?.trim();
-  if (!run) {
-    throw new Error("Usage: /loop verify-github-run <run_id> [--repo owner/name] [--attempt N]");
-  }
-  let parsedAttempt: number | undefined;
-  if (attempt.value !== undefined) {
-    const value = Number.parseInt(attempt.value, 10);
-    if (!Number.isInteger(value) || value <= 0) {
-      throw new Error("--attempt requires a positive integer");
-    }
-    parsedAttempt = value;
-  }
-  return { run, repo: repo.value, attempt: parsedAttempt };
-}
-
-function parseGitHubWorkflowVerifierArgs(args: string[]): { workflow: string; repo?: string; branch?: string; event?: string; commit?: string } {
-  let rest = [...args];
-  const workflow = consumeInlineFlagValue(rest, "--workflow");
-  rest = workflow.rest;
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const branch = consumeInlineFlagValue(rest, "--branch");
-  rest = branch.rest;
-  const event = consumeInlineFlagValue(rest, "--event");
-  rest = event.rest;
-  const commit = consumeInlineFlagValue(rest, "--commit");
-  rest = commit.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub workflow verifier option: ${unknown}`);
-  }
-  const targetWorkflow = workflow.value ?? rest[0]?.trim();
-  if (!targetWorkflow) {
-    throw new Error("Usage: /loop verify-github-workflow --workflow WORKFLOW [--repo owner/name] [--branch BRANCH] [--event EVENT] [--commit SHA]");
-  }
-  return {
-    workflow: targetWorkflow,
-    repo: repo.value,
-    branch: branch.value,
-    event: event.value,
-    commit: commit.value,
-  };
-}
-
-function parseGitHubDeploymentVerifierArgs(args: string[]): { repo: string; deployment_id?: string; environment?: string; ref?: string; expect?: string } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const deploymentId = consumeInlineFlagValue(rest, "--deployment-id");
-  rest = deploymentId.rest;
-  const environment = consumeInlineFlagValue(rest, "--environment");
-  rest = environment.rest;
-  const ref = consumeInlineFlagValue(rest, "--ref");
-  rest = ref.rest;
-  const expect = consumeInlineFlagValue(rest, "--expect");
-  rest = expect.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub deployment verifier option: ${unknown}`);
-  }
-  if (rest.length) {
-    throw new Error(`Unexpected GitHub deployment verifier argument: ${rest[0]}`);
-  }
-  if (!repo.value || (!deploymentId.value && !environment.value)) {
-    throw new Error("Usage: /loop verify-github-deployment --repo owner/name (--deployment-id ID|--environment ENV) [--ref REF] [--expect success|inactive|failure|any]");
-  }
-  return {
-    repo: repo.value,
-    deployment_id: deploymentId.value,
-    environment: environment.value,
-    ref: ref.value,
-    expect: parseGitHubDeploymentExpectedArg(expect.value),
-  };
-}
-
-function parseGitHubReleaseVerifierArgs(args: string[]): { tag: string; repo?: string; expect?: string } {
-  let rest = [...args];
-  const repo = consumeInlineFlagValue(rest, "--repo");
-  rest = repo.rest;
-  const expect = consumeInlineFlagValue(rest, "--expect");
-  rest = expect.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub release verifier option: ${unknown}`);
-  }
-  const tag = rest[0]?.trim();
-  if (!tag) {
-    throw new Error("Usage: /loop verify-github-release <tag> [--repo owner/name] [--expect published|draft|any]");
-  }
-  return { tag, repo: repo.value, expect: parseGitHubReleaseExpectedArg(expect.value) };
-}
-
-function parseGitHubReleaseExpectedArg(value: string | undefined): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "published" || normalized === "draft" || normalized === "any") {
-    return normalized;
-  }
-  throw new Error("--expect must be published, draft, or any");
-}
-
-function parseGitHubDeploymentExpectedArg(value: string | undefined): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "success" || normalized === "inactive" || normalized === "failure" || normalized === "any") {
-    return normalized;
-  }
-  throw new Error("--expect must be success, inactive, failure, or any");
-}
-
-function parseNpmPackageVerifierArgs(args: string[]): { package_name: string; version: string; tag?: string; timeout_ms?: number } {
-  let rest = [...args];
-  const version = consumeInlineFlagValue(rest, "--version");
-  rest = version.rest;
-  const tag = consumeInlineFlagValue(rest, "--tag");
-  rest = tag.rest;
-  const timeout = consumeInlineFlagValue(rest, "--timeout-ms");
-  rest = timeout.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown npm verifier option: ${unknown}`);
-  }
-  const packageName = rest[0]?.trim();
-  if (!packageName || !version.value?.trim()) {
-    throw new Error("Usage: /loop verify-npm-package <package> --version X [--tag latest] [--timeout-ms N]");
-  }
-  let parsedTimeout: number | undefined;
-  if (timeout.value !== undefined) {
-    const value = Number.parseInt(timeout.value, 10);
-    if (!Number.isInteger(value) || value <= 0) {
-      throw new Error("--timeout-ms requires a positive integer");
-    }
-    parsedTimeout = value;
-  }
-  return {
-    package_name: packageName,
-    version: version.value,
-    tag: tag.value,
-    timeout_ms: parsedTimeout,
-  };
-}
-
-function parseHttpVerifierArgs(args: string[]): { url: string; status?: number; timeout_ms?: number } {
-  let rest = [...args];
-  const status = consumeInlineFlagValue(rest, "--status");
-  rest = status.rest;
-  const timeout = consumeInlineFlagValue(rest, "--timeout-ms");
-  rest = timeout.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown HTTP verifier option: ${unknown}`);
-  }
-  const url = rest[0]?.trim();
-  if (!url) {
-    throw new Error("Usage: /loop verify-http <url> [--status N] [--timeout-ms N]");
-  }
-  let parsedStatus: number | undefined;
-  if (status.value !== undefined) {
-    const value = Number.parseInt(status.value, 10);
-    if (!Number.isInteger(value) || value < 100 || value > 599) {
-      throw new Error("--status requires an integer from 100 to 599");
-    }
-    parsedStatus = value;
-  }
-  let parsedTimeout: number | undefined;
-  if (timeout.value !== undefined) {
-    const value = Number.parseInt(timeout.value, 10);
-    if (!Number.isInteger(value) || value <= 0) {
-      throw new Error("--timeout-ms requires a positive integer");
-    }
-    parsedTimeout = value;
-  }
-  return { url, status: parsedStatus, timeout_ms: parsedTimeout };
-}
-
 function parseInlineWorktreeFlags(args: string[]): {
   args: string[];
   baseRef?: string;
@@ -9197,16 +8143,10 @@ function renderInboxItemLines(item: LoopInboxItem, index: number): string[] {
     item.run_id ? `run ${item.run_id.slice(0, 12)}` : undefined,
     item.source ? `source ${item.source_label ?? item.source}` : undefined,
     item.assignee ? `owner ${item.assignee}` : undefined,
-    item.routed_by ? `route ${item.routed_by}` : undefined,
-    item.muted ? `muted ${item.mute_key ?? "item"}` : undefined,
     item.disposition ? item.disposition : undefined,
-    item.snoozed_until ? `until ${item.snoozed_until}` : undefined,
-    item.muted_until ? `until ${item.muted_until}` : undefined,
     item.stale ? `stale ${item.stale_reason ?? "work"}${item.stale_age_ms !== undefined ? ` ${formatDuration(item.stale_age_ms)}` : ""}` : undefined,
     item.detail ? truncateToWidth(oneLine(item.detail), Math.max(24, terminalWidth() - 8)) : undefined,
     item.assignment_note ? truncateToWidth(oneLine(item.assignment_note), Math.max(24, terminalWidth() - 8)) : undefined,
-    item.routing_note && item.routing_note !== item.assignment_note ? truncateToWidth(oneLine(item.routing_note), Math.max(24, terminalWidth() - 8)) : undefined,
-    item.mute_note ? truncateToWidth(oneLine(item.mute_note), Math.max(24, terminalWidth() - 8)) : undefined,
     item.disposition_note ? truncateToWidth(oneLine(item.disposition_note), Math.max(24, terminalWidth() - 8)) : undefined,
   ].filter((part): part is string => Boolean(part));
   return [
@@ -9571,51 +8511,6 @@ function compactRecordCounts(counts: Record<string, number>): string {
   return entries.length ? entries.map(([key, count]) => `${key} ${count}`).join(" · ") : "none";
 }
 
-function formatConnectorActionOptions(action: { area: string; method?: string; review_event?: string; add_labels?: string[]; remove_labels?: string[]; delete_branch?: boolean; generate_notes?: boolean; draft?: boolean; verify_tag?: boolean; ref?: string; fields?: Array<{ key: string; value: string }>; dist_tag?: string; access?: string; provenance?: boolean }): string {
-  if (action.area === "pull_request") {
-    const method = action.review_event ? ` · ${action.review_event}` : action.method ? ` · ${action.method}` : "";
-    const labels = action.add_labels?.length || action.remove_labels?.length
-      ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
-      : "";
-    return `${method}${labels}${action.delete_branch ? " · delete branch" : ""}`;
-  }
-  if (action.area === "issue") {
-    return action.add_labels?.length || action.remove_labels?.length
-      ? ` · labels +${action.add_labels?.length ?? 0}/-${action.remove_labels?.length ?? 0}`
-      : "";
-  }
-  if (action.area === "workflow") {
-    return `${action.ref ? ` · ref ${action.ref}` : ""}${action.fields?.length ? ` · fields ${action.fields.length}` : ""}`;
-  }
-  if (action.area === "release") {
-    const draft = action.draft === true ? " · draft" : action.draft === false ? " · publish" : "";
-    return `${draft}${action.verify_tag ? " · verify tag" : ""}${action.generate_notes ? " · generate notes" : ""}`;
-  }
-  if (action.area === "package") {
-    return ` · tag ${action.dist_tag ?? "latest"}${action.access ? ` · ${action.access}` : ""}${action.provenance ? " · provenance" : ""}`;
-  }
-  return "";
-}
-
-function formatConnectorActionTarget(action: { area: string; repo?: string; number?: number; thread?: string; target_run_id?: string; workflow?: string; tag?: string }): string {
-  if (action.area === "notification") {
-    return action.thread ? `thread ${action.thread}` : "thread unknown";
-  }
-  if (action.area === "run") {
-    return action.repo && action.target_run_id ? `${action.repo} run ${action.target_run_id}` : "run unknown";
-  }
-  if (action.area === "workflow") {
-    return action.repo && action.workflow ? `${action.repo} workflow ${action.workflow}` : "workflow unknown";
-  }
-  if (action.area === "release") {
-    return action.repo && action.tag ? `${action.repo} release ${action.tag}` : "release unknown";
-  }
-  if (action.area === "package") {
-    return "current package";
-  }
-  return action.repo && action.number !== undefined ? `${action.repo}#${action.number}` : "target unknown";
-}
-
 function formatPercent(value: number): string {
   return `${Math.round(value * 1000) / 10}%`;
 }
@@ -9645,10 +8540,12 @@ function selfImproveLearnLines(learn: Awaited<ReturnType<typeof optLiteLearn>>):
   const proposal = learn.proposal;
   const replay = learn.replay;
   const targets = proposal.skill_targets?.map((target) => target.skill_id).join(", ") || proposal.skill_id;
+  const warningCount = proposal.normalization_warnings?.length ?? 0;
   return [
     `${fg256(48, "•")} learned ${proposal.id}`,
     `${fg256(39, "Source")} ${proposal.proposal_source ?? "deterministic_fallback"}${proposal.agentic_error ? ` · fallback ${proposal.agentic_error}` : ""}`,
     proposal.agentic_run ? `${fg256(39, "Optimizer run")} ${proposal.agentic_run.session_id} · ${proposal.agentic_run.run_id}` : undefined,
+    warningCount ? `${fg256(39, "Normalized")} ${warningCount} proposal shape ${warningCount === 1 ? "issue" : "issues"}; raw model output was preserved in the proposal artifact` : undefined,
     `${fg256(39, "Targets")} ${targets}`,
     `${fg256(39, "Evidence")} sessions ${proposal.evidence.goal_sessions} · verifications ${proposal.evidence.verification_records} · signals ${proposal.evidence.learning_signal_records}`,
     `${fg256(39, "Replay")} ${replay.id} · ${replay.status} · samples ${replay.sample_count} · ${formatOptScore(replay.baseline_score)} -> ${formatOptScore(replay.candidate_score)}`,

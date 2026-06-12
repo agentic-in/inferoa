@@ -7,7 +7,6 @@ import type { JsonObject, SessionEvent, SessionRecord, WorkspaceIdentity } from 
 import { readGoalState, type GoalRecord } from "../goals/state.js";
 import { buildGoalWorkPrompt } from "../goals/supervisor-prompts.js";
 import { createLoopWorktree, loopWorktreeRunTarget } from "./worktree.js";
-import { getConnectorVerifierDefinition } from "./connector-verifiers.js";
 
 export type LoopInboxItemKind =
   | "goal_review"
@@ -16,16 +15,16 @@ export type LoopInboxItemKind =
   | "verification_failure"
   | "stale_work"
   | "automation_review"
-  | "action_review"
+  | "external_action_approval"
   | "discovery_candidate"
   | "daemon_job"
   | "skill_proposal"
   | "self_improve_replay";
 
 export type LoopInboxPriority = "high" | "medium" | "low";
-export type LoopInboxStatus = "open" | "waiting" | "running" | "snoozed" | "muted" | "done";
-export type LoopInboxDisposition = "resolved" | "dismissed" | "snoozed";
-export type LoopInboxAction = "resolve" | "dismiss" | "snooze" | "reopen";
+export type LoopInboxStatus = "open" | "waiting" | "running" | "done";
+export type LoopInboxDisposition = "resolved" | "dismissed";
+export type LoopInboxAction = "resolve" | "dismiss" | "reopen";
 
 export interface LoopInboxItem {
   id: string;
@@ -52,19 +51,11 @@ export interface LoopInboxItem {
   updated_at?: string;
   disposition?: LoopInboxDisposition;
   disposition_note?: string;
-  snoozed_until?: string;
   state_updated_at?: string;
   assignee?: string;
   assignment_note?: string;
   assigned_at?: string;
   assignment_updated_at?: string;
-  routed_by?: string;
-  routing_note?: string;
-  muted?: boolean;
-  mute_key?: string;
-  mute_note?: string;
-  muted_at?: string;
-  muted_until?: string;
   stale?: boolean;
   stale_reason?: string;
   stale_age_ms?: number;
@@ -74,18 +65,13 @@ export interface LoopInboxItem {
 export interface LoopInboxVerificationHint {
   verifier_id: string;
   params?: JsonObject;
-  command?: string;
 }
 
 export interface LoopInboxSummary {
   total: number;
   open: number;
   high: number;
-  assigned: number;
-  routed: number;
-  muted: number;
   by_kind: Record<string, number>;
-  by_assignee: Record<string, number>;
 }
 
 export interface LoopInbox {
@@ -98,10 +84,6 @@ export interface LoopInbox {
 
 export interface LoopInboxOptions {
   includeDone?: boolean;
-  includeSnoozed?: boolean;
-  includeMuted?: boolean;
-  assignee?: string;
-  onlyUnassigned?: boolean;
   stalePolicy?: Partial<LoopInboxStalePolicy>;
 }
 
@@ -117,31 +99,6 @@ export interface LoopInboxStoredItemState {
   item_id: string;
   disposition?: LoopInboxDisposition;
   note?: string;
-  snoozed_until?: string;
-  assignee?: string;
-  assignment_note?: string;
-  assigned_at?: string;
-  assignment_updated_at?: string;
-  updated_at: string;
-}
-
-export interface LoopInboxStoredMuteState {
-  mute_key: string;
-  item_id?: string;
-  note?: string;
-  muted_until?: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface LoopInboxRoutingRule {
-  route_id: string;
-  assignee: string;
-  note?: string;
-  kind?: LoopInboxItemKind;
-  source?: string;
-  priority?: LoopInboxPriority;
-  created_at: string;
   updated_at: string;
 }
 
@@ -149,55 +106,12 @@ export interface LoopInboxActionRequest {
   action: LoopInboxAction;
   item_id: string;
   note?: string;
-  snoozed_until?: string;
 }
 
 export interface LoopInboxActionResult {
   item: LoopInboxItem;
   state?: LoopInboxStoredItemState;
   action: LoopInboxAction;
-}
-
-export interface LoopInboxAssignmentRequest {
-  item_id: string;
-  assignee?: string;
-  note?: string;
-}
-
-export interface LoopInboxAssignmentResult {
-  item: LoopInboxItem;
-  state?: LoopInboxStoredItemState;
-  action: "assign" | "unassign";
-}
-
-export interface LoopInboxMuteRequest {
-  action: "mute" | "unmute";
-  item_id: string;
-  note?: string;
-  muted_until?: string;
-}
-
-export interface LoopInboxMuteResult {
-  item?: LoopInboxItem;
-  state?: LoopInboxStoredMuteState;
-  action: "mute" | "unmute";
-  mute_key: string;
-}
-
-export interface LoopInboxRoutingRequest {
-  action: "add" | "remove";
-  route_id?: string;
-  assignee?: string;
-  note?: string;
-  kind?: LoopInboxItemKind;
-  source?: string;
-  priority?: LoopInboxPriority;
-}
-
-export interface LoopInboxRoutingResult {
-  action: "add" | "remove";
-  route?: LoopInboxRoutingRule;
-  routes: LoopInboxRoutingRule[];
 }
 
 export interface LoopInboxPromoteOptions {
@@ -244,8 +158,6 @@ interface ReplayArtifact {
 interface LoopInboxStateFile {
   version: 1;
   items: Record<string, LoopInboxStoredItemState>;
-  mutes: Record<string, LoopInboxStoredMuteState>;
-  routes: Record<string, LoopInboxRoutingRule>;
 }
 
 const DEFAULT_STALE_POLICY: Omit<LoopInboxStalePolicy, "now"> = {
@@ -261,7 +173,7 @@ export async function readLoopInbox(store: SessionStore, workspace: WorkspaceIde
   for (const session of store.listSessions(workspace.id, { includeArchived: true })) {
     items.push(...goalInboxItems(store, session, stalePolicy));
     items.push(...sessionStaleItems(store, session, stalePolicy));
-    items.push(...actionReviewInboxItems(store, session, stalePolicy));
+    items.push(...externalActionApprovalInboxItems(store, session, stalePolicy));
   }
   for (const job of store.listSupervisorJobs()) {
     if (jobBelongsToWorkspace(store, job, workspace)) {
@@ -274,7 +186,7 @@ export async function readLoopInbox(store: SessionStore, workspace: WorkspaceIde
   items.push(...automationReviewInboxItems(store, workspace, stalePolicy));
   items.push(...(await optArtifactInboxItems(workspace.root, options)));
   items.push(...discoveryCandidateInboxItems(store, workspace, options));
-  const sorted = filterInboxItems(await applyInboxState(workspace.root, items, options), options).sort(compareInboxItems);
+  const sorted = (await applyInboxState(workspace.root, items, options)).sort(compareInboxItems);
   return {
     workspace_id: workspace.id,
     workspace_root: workspace.root,
@@ -293,43 +205,21 @@ export async function updateLoopInboxItemState(
   if (!itemId) {
     throw new Error("Inbox item id is required.");
   }
-  const inbox = await readLoopInbox(store, workspace, { includeDone: true, includeSnoozed: true, includeMuted: true });
+  const inbox = await readLoopInbox(store, workspace, { includeDone: true });
   const item = inbox.items.find((candidate) => candidate.id === itemId);
   if (!item) {
     throw new Error(`No inbox item matches ${itemId}`);
   }
-  if (request.action === "snooze" && !request.snoozed_until) {
-    throw new Error("Snooze requires snoozed_until.");
-  }
   const file = await readInboxStateFile(workspace.root);
   let nextState: LoopInboxStoredItemState | undefined;
   if (request.action === "reopen") {
-    const existing = file.items[itemId];
-    if (existing?.assignee) {
-      nextState = {
-        item_id: itemId,
-        assignee: existing.assignee,
-        assignment_note: existing.assignment_note,
-        assigned_at: existing.assigned_at,
-        assignment_updated_at: existing.assignment_updated_at,
-        updated_at: new Date().toISOString(),
-      };
-      file.items[itemId] = nextState;
-    } else {
-      delete file.items[itemId];
-    }
+    delete file.items[itemId];
   } else {
     const disposition = actionDisposition(request.action);
-    const existing = file.items[itemId];
     nextState = {
       item_id: itemId,
       disposition,
       note: cleanOptionalString(request.note),
-      snoozed_until: disposition === "snoozed" ? request.snoozed_until : undefined,
-      assignee: existing?.assignee,
-      assignment_note: existing?.assignment_note,
-      assigned_at: existing?.assigned_at,
-      assignment_updated_at: existing?.assignment_updated_at,
       updated_at: new Date().toISOString(),
     };
     file.items[itemId] = nextState;
@@ -344,204 +234,15 @@ export async function updateLoopInboxItemState(
         item_id: itemId,
         action: request.action,
         disposition: nextState?.disposition,
-        snoozed_until: nextState?.snoozed_until,
         note: nextState?.note,
-        assignee: nextState?.assignee,
       },
     });
   }
   return {
     action: request.action,
     state: nextState,
-    item: nextState ? applyStoredItemState(item, nextState, { includeDone: true, includeSnoozed: true, includeMuted: true }, Date.now()) ?? item : item,
+    item: nextState ? applyStoredItemState(item, nextState, { includeDone: true }) ?? item : item,
   };
-}
-
-export async function updateLoopInboxAssignment(
-  store: SessionStore,
-  workspace: WorkspaceIdentity,
-  request: LoopInboxAssignmentRequest,
-): Promise<LoopInboxAssignmentResult> {
-  const itemId = request.item_id.trim();
-  if (!itemId) {
-    throw new Error("Inbox item id is required.");
-  }
-  const inbox = await readLoopInbox(store, workspace, { includeDone: true, includeSnoozed: true, includeMuted: true });
-  const item = inbox.items.find((candidate) => candidate.id === itemId);
-  if (!item) {
-    throw new Error(`No inbox item matches ${itemId}`);
-  }
-  const file = await readInboxStateFile(workspace.root);
-  const existing = file.items[itemId];
-  const assignee = cleanOptionalString(request.assignee);
-  const now = new Date().toISOString();
-  let nextState: LoopInboxStoredItemState | undefined;
-  const action: "assign" | "unassign" = assignee ? "assign" : "unassign";
-  if (assignee) {
-    nextState = {
-      item_id: itemId,
-      disposition: existing?.disposition,
-      note: existing?.note,
-      snoozed_until: existing?.snoozed_until,
-      assignee,
-      assignment_note: cleanOptionalString(request.note),
-      assigned_at: existing?.assignee === assignee ? existing.assigned_at ?? now : now,
-      assignment_updated_at: now,
-      updated_at: now,
-    };
-    file.items[itemId] = nextState;
-  } else if (existing?.disposition) {
-    nextState = {
-      item_id: itemId,
-      disposition: existing.disposition,
-      note: existing.note,
-      snoozed_until: existing.snoozed_until,
-      updated_at: now,
-    };
-    file.items[itemId] = nextState;
-  } else {
-    delete file.items[itemId];
-  }
-  await writeInboxStateFile(workspace.root, file);
-  if (item.session_id) {
-    store.appendEvent({
-      session_id: item.session_id,
-      run_id: item.run_id,
-      type: "loop.inbox.item.assigned",
-      data: {
-        item_id: itemId,
-        action,
-        assignee: nextState?.assignee,
-        note: nextState?.assignment_note,
-      },
-    });
-  }
-  return {
-    action,
-    state: nextState,
-    item: nextState ? applyStoredItemState(item, nextState, { includeDone: true, includeSnoozed: true, includeMuted: true }, Date.now()) ?? item : item,
-  };
-}
-
-export async function updateLoopInboxMute(
-  store: SessionStore,
-  workspace: WorkspaceIdentity,
-  request: LoopInboxMuteRequest,
-): Promise<LoopInboxMuteResult> {
-  const itemIdOrKey = request.item_id.trim();
-  if (!itemIdOrKey) {
-    throw new Error("Inbox item id or mute key is required.");
-  }
-  const file = await readInboxStateFile(workspace.root);
-  const inbox = await readLoopInbox(store, workspace, { includeDone: true, includeSnoozed: true, includeMuted: true });
-  const item = inbox.items.find((candidate) => candidate.id === itemIdOrKey);
-  const muteKey = item ? inboxMuteKey(item) : itemIdOrKey;
-  const now = new Date().toISOString();
-  if (request.action === "mute") {
-    if (!item) {
-      throw new Error(`No inbox item matches ${itemIdOrKey}`);
-    }
-    const existing = file.mutes[muteKey];
-    const nextState: LoopInboxStoredMuteState = {
-      mute_key: muteKey,
-      item_id: item.id,
-      note: cleanOptionalString(request.note),
-      muted_until: cleanOptionalString(request.muted_until),
-      created_at: existing?.created_at ?? now,
-      updated_at: now,
-    };
-    file.mutes[muteKey] = nextState;
-    await writeInboxStateFile(workspace.root, file);
-    appendInboxMuteEvent(store, item, request.action, nextState);
-    return {
-      action: "mute",
-      mute_key: muteKey,
-      state: nextState,
-      item: applyMuteState(item, nextState, { includeDone: true, includeSnoozed: true, includeMuted: true }, Date.now()) ?? item,
-    };
-  }
-  const existing = file.mutes[muteKey];
-  if (!existing) {
-    throw new Error(`No inbox mute matches ${itemIdOrKey}`);
-  }
-  delete file.mutes[muteKey];
-  await writeInboxStateFile(workspace.root, file);
-  if (item) {
-    appendInboxMuteEvent(store, item, request.action, existing);
-  }
-  return {
-    action: "unmute",
-    mute_key: muteKey,
-    state: existing,
-    item,
-  };
-}
-
-export async function readLoopInboxRouting(workspace: WorkspaceIdentity): Promise<LoopInboxRoutingRule[]> {
-  const file = await readInboxStateFile(workspace.root);
-  return sortRoutingRules(Object.values(file.routes));
-}
-
-export async function updateLoopInboxRouting(
-  workspace: WorkspaceIdentity,
-  request: LoopInboxRoutingRequest,
-): Promise<LoopInboxRoutingResult> {
-  const file = await readInboxStateFile(workspace.root);
-  const now = new Date().toISOString();
-  if (request.action === "remove") {
-    const routeId = cleanOptionalString(request.route_id);
-    if (!routeId) {
-      throw new Error("Inbox route id is required.");
-    }
-    const existing = file.routes[routeId];
-    if (!existing) {
-      throw new Error(`No inbox route matches ${routeId}`);
-    }
-    delete file.routes[routeId];
-    await writeInboxStateFile(workspace.root, file);
-    return { action: "remove", route: existing, routes: sortRoutingRules(Object.values(file.routes)) };
-  }
-  const assignee = cleanOptionalString(request.assignee);
-  if (!assignee) {
-    throw new Error("Inbox route owner is required.");
-  }
-  const kind = parseInboxKind(request.kind);
-  const source = cleanOptionalString(request.source);
-  const priority = parseInboxPriority(request.priority);
-  if (!kind && !source && !priority) {
-    throw new Error("Inbox route requires at least one structured selector: kind, source, or priority.");
-  }
-  const routeId = cleanOptionalString(request.route_id) ?? defaultRouteId({ assignee, kind, source, priority }, now);
-  const existing = file.routes[routeId];
-  const route: LoopInboxRoutingRule = {
-    route_id: routeId,
-    assignee,
-    note: cleanOptionalString(request.note),
-    kind,
-    source,
-    priority,
-    created_at: existing?.created_at ?? now,
-    updated_at: now,
-  };
-  file.routes[routeId] = route;
-  await writeInboxStateFile(workspace.root, file);
-  return { action: "add", route, routes: sortRoutingRules(Object.values(file.routes)) };
-}
-
-export function parseLoopInboxSnoozeUntil(value: string, now = new Date()): string {
-  const trimmed = value.trim();
-  const duration = /^(\d+)(m|h|d)$/i.exec(trimmed);
-  if (duration) {
-    const amount = Number.parseInt(duration[1]!, 10);
-    const unit = duration[2]!.toLowerCase();
-    const multiplier = unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-    return new Date(now.getTime() + amount * multiplier).toISOString();
-  }
-  const parsed = new Date(trimmed);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString();
-  }
-  throw new Error("Snooze duration must look like 30m, 2h, 1d, or an ISO timestamp.");
 }
 
 export async function promoteLoopInboxItem(
@@ -550,7 +251,7 @@ export async function promoteLoopInboxItem(
   itemId: string,
   options: LoopInboxPromoteOptions = {},
 ): Promise<LoopInboxPromoteResult> {
-  const inbox = await readLoopInbox(store, workspace, { includeDone: true, includeSnoozed: true });
+  const inbox = await readLoopInbox(store, workspace, { includeDone: true });
   const item = inbox.items.find((candidate) => candidate.id === itemId.trim());
   if (!item) {
     throw new Error(`No inbox item matches ${itemId}`);
@@ -921,20 +622,18 @@ function sessionStaleItems(store: SessionStore, session: SessionRecord, stalePol
   }];
 }
 
-function actionReviewInboxItems(store: SessionStore, session: SessionRecord, stalePolicy: LoopInboxStalePolicy): LoopInboxItem[] {
+function externalActionApprovalInboxItems(store: SessionStore, session: SessionRecord, stalePolicy: LoopInboxStalePolicy): LoopInboxItem[] {
   return store
     .listEvents(session.session_id)
-    .filter((event) => event.type === "permission.denied" && permissionDecisionPolicyKind(event) === "connector_mutation")
+    .filter((event) => event.type === "permission.denied" && permissionDecisionPolicyKind(event) === "external_mutation")
     .map((event) => {
       const toolCallId = cleanOptionalString(event.data.tool_call_id);
       const requestClass = cleanOptionalString(event.data.request_class);
       const toolName = cleanOptionalString(event.data.tool_name);
-      const isPreflight = event.data.preflight === true;
-      const connector = permissionDecisionConnector(event) ?? "connector";
-      const operation = permissionDecisionConnectorOperation(event);
+      const system = permissionDecisionExternalSystem(event) ?? "external";
+      const operation = permissionDecisionExternalOperation(event);
       const command = permissionEventCommand(event);
       const detail = [
-        isPreflight ? "preflight" : undefined,
         toolName ? `tool ${toolName}` : undefined,
         requestClass ? `request ${requestClass}` : undefined,
         operation ? `operation ${operation}` : undefined,
@@ -942,13 +641,13 @@ function actionReviewInboxItems(store: SessionStore, session: SessionRecord, sta
       ].filter((item): item is string => Boolean(item)).join(" · ");
       const createdAt = event.created_at ?? session.updated_at;
       return withStaleMetadata({
-        id: `action-review:${session.session_id}:${toolCallId ?? event.id ?? createdAt}`,
-        kind: "action_review",
+        id: `external-action:${session.session_id}:${toolCallId ?? event.id ?? createdAt}`,
+        kind: "external_action_approval",
         priority: "high",
         status: "open",
         source: "policy",
-        source_label: connector,
-        title: "Review blocked connector action",
+        source_label: system,
+        title: "Approve external mutation",
         detail,
         action: "review interactively or dismiss",
         session_id: session.session_id,
@@ -956,7 +655,7 @@ function actionReviewInboxItems(store: SessionStore, session: SessionRecord, sta
         run_id: event.run_id,
         created_at: createdAt,
         updated_at: createdAt,
-      } satisfies LoopInboxItem, createdAt, stalePolicy.review_ms, stalePolicy, "blocked connector action");
+      } satisfies LoopInboxItem, createdAt, stalePolicy.review_ms, stalePolicy, "blocked external mutation");
     });
 }
 
@@ -1176,7 +875,6 @@ function discoveryCandidateInboxItems(store: SessionStore, workspace: WorkspaceI
         action: candidate.status === "open" ? "/inbox promote" : "inferoa inbox reopen",
         session_id: candidate.session_id,
         candidate_id: candidate.candidate_id,
-        mute_key: `discovery:${candidate.dedupe_key}`,
         prompt: candidate.prompt,
         verification_hint: verificationHint,
         created_at: candidate.created_at,
@@ -1200,20 +898,14 @@ async function readJsonArtifacts<T>(dir: string): Promise<T[]> {
 
 async function applyInboxState(workspaceRoot: string, items: LoopInboxItem[], options: LoopInboxOptions): Promise<LoopInboxItem[]> {
   const state = await readInboxStateFile(workspaceRoot);
-  const now = Date.now();
-  const routes = sortRoutingRules(Object.values(state.routes));
   const output: LoopInboxItem[] = [];
   for (const item of items) {
     const stored = state.items[item.id];
-    const overlaid = stored ? applyStoredItemState(item, stored, options, now) : item;
+    const overlaid = stored ? applyStoredItemState(item, stored, options) : item;
     if (!overlaid) {
       continue;
     }
-    const routed = applyRoutingRules(overlaid, routes);
-    const muted = applyMuteState(routed, activeMuteState(state.mutes[inboxMuteKey(routed)], now), options, now);
-    if (muted) {
-      output.push(muted);
-    }
+    output.push(overlaid);
   }
   return output;
 }
@@ -1222,30 +914,12 @@ function applyStoredItemState(
   item: LoopInboxItem,
   stored: LoopInboxStoredItemState,
   options: LoopInboxOptions,
-  nowMs: number,
 ): LoopInboxItem | undefined {
-  const assigned = applyAssignmentState(item, stored);
   if (!stored.disposition) {
-    return assigned;
-  }
-  if (stored.disposition === "snoozed") {
-    const untilMs = stored.snoozed_until ? Date.parse(stored.snoozed_until) : NaN;
-    if (!Number.isFinite(untilMs) || untilMs <= nowMs) {
-      return assigned;
-    }
-    const snoozed: LoopInboxItem = {
-      ...assigned,
-      status: "snoozed",
-      disposition: stored.disposition,
-      disposition_note: stored.note,
-      snoozed_until: stored.snoozed_until,
-      state_updated_at: stored.updated_at,
-      action: `snoozed until ${stored.snoozed_until}`,
-    };
-    return options.includeSnoozed || options.includeDone ? snoozed : undefined;
+    return item;
   }
   const done: LoopInboxItem = {
-    ...assigned,
+    ...item,
     priority: "low",
     status: "done",
     disposition: stored.disposition,
@@ -1256,92 +930,6 @@ function applyStoredItemState(
   return options.includeDone ? done : undefined;
 }
 
-function applyAssignmentState(item: LoopInboxItem, stored: LoopInboxStoredItemState): LoopInboxItem {
-  if (!stored.assignee) {
-    return item;
-  }
-  return {
-    ...item,
-    assignee: stored.assignee,
-    assignment_note: stored.assignment_note,
-    assigned_at: stored.assigned_at,
-    assignment_updated_at: stored.assignment_updated_at,
-    state_updated_at: stored.updated_at,
-  };
-}
-
-function applyRoutingRules(item: LoopInboxItem, routes: LoopInboxRoutingRule[]): LoopInboxItem {
-  if (item.assignee) {
-    return item;
-  }
-  const route = routes.find((candidate) => routeMatchesItem(candidate, item));
-  if (!route) {
-    return item;
-  }
-  return {
-    ...item,
-    assignee: route.assignee,
-    assignment_note: route.note,
-    assigned_at: route.created_at,
-    assignment_updated_at: route.updated_at,
-    routed_by: route.route_id,
-    routing_note: route.note,
-    state_updated_at: route.updated_at,
-  };
-}
-
-function routeMatchesItem(route: LoopInboxRoutingRule, item: LoopInboxItem): boolean {
-  if (route.kind && item.kind !== route.kind) {
-    return false;
-  }
-  if (route.source && item.source !== route.source) {
-    return false;
-  }
-  if (route.priority && item.priority !== route.priority) {
-    return false;
-  }
-  return true;
-}
-
-function applyMuteState(
-  item: LoopInboxItem,
-  stored: LoopInboxStoredMuteState | undefined,
-  options: LoopInboxOptions,
-  nowMs: number,
-): LoopInboxItem | undefined {
-  if (!stored) {
-    return item;
-  }
-  const muted: LoopInboxItem = {
-    ...item,
-    priority: "low",
-    status: "muted",
-    muted: true,
-    mute_key: stored.mute_key,
-    mute_note: stored.note,
-    muted_at: stored.created_at,
-    muted_until: stored.muted_until,
-    state_updated_at: stored.updated_at,
-    action: stored.muted_until ? `muted until ${stored.muted_until}` : "inferoa inbox unmute",
-  };
-  return options.includeMuted || options.includeDone ? muted : undefined;
-}
-
-function activeMuteState(stored: LoopInboxStoredMuteState | undefined, nowMs: number): LoopInboxStoredMuteState | undefined {
-  if (!stored) {
-    return undefined;
-  }
-  if (!stored.muted_until) {
-    return stored;
-  }
-  const untilMs = Date.parse(stored.muted_until);
-  return Number.isFinite(untilMs) && untilMs > nowMs ? stored : undefined;
-}
-
-function inboxMuteKey(item: LoopInboxItem): string {
-  return item.mute_key && item.mute_key.trim() ? item.mute_key.trim() : `item:${item.id}`;
-}
-
 async function readInboxStateFile(workspaceRoot: string): Promise<LoopInboxStateFile> {
   const target = inboxStatePath(workspaceRoot);
   try {
@@ -1349,12 +937,10 @@ async function readInboxStateFile(workspaceRoot: string): Promise<LoopInboxState
     return {
       version: 1,
       items: sanitizeInboxStateItems(parsed.items),
-      mutes: sanitizeInboxMuteStates(parsed.mutes),
-      routes: sanitizeInboxRoutingRules(parsed.routes),
     };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { version: 1, items: {}, mutes: {}, routes: {} };
+      return { version: 1, items: {} };
     }
     throw error;
   }
@@ -1363,7 +949,7 @@ async function readInboxStateFile(workspaceRoot: string): Promise<LoopInboxState
 async function writeInboxStateFile(workspaceRoot: string, state: LoopInboxStateFile): Promise<void> {
   const target = inboxStatePath(workspaceRoot);
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, `${JSON.stringify({ version: 1, items: state.items, mutes: state.mutes, routes: state.routes }, null, 2)}\n`, "utf8");
+  await fs.writeFile(target, `${JSON.stringify({ version: 1, items: state.items }, null, 2)}\n`, "utf8");
 }
 
 function inboxStatePath(workspaceRoot: string): string {
@@ -1382,84 +968,13 @@ function sanitizeInboxStateItems(value: unknown): Record<string, LoopInboxStored
     const candidate = raw as Record<string, unknown>;
     const disposition = parseDisposition(candidate.disposition);
     const updatedAt = typeof candidate.updated_at === "string" ? candidate.updated_at : undefined;
-    const assignee = cleanOptionalString(candidate.assignee);
-    if ((!disposition && !assignee) || !updatedAt) {
+    if (!disposition || !updatedAt) {
       continue;
     }
     output[itemId] = {
       item_id: itemId,
       disposition,
       note: cleanOptionalString(candidate.note),
-      snoozed_until: typeof candidate.snoozed_until === "string" ? candidate.snoozed_until : undefined,
-      assignee,
-      assignment_note: cleanOptionalString(candidate.assignment_note),
-      assigned_at: typeof candidate.assigned_at === "string" ? candidate.assigned_at : undefined,
-      assignment_updated_at: typeof candidate.assignment_updated_at === "string" ? candidate.assignment_updated_at : undefined,
-      updated_at: updatedAt,
-    };
-  }
-  return output;
-}
-
-function sanitizeInboxMuteStates(value: unknown): Record<string, LoopInboxStoredMuteState> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  const output: Record<string, LoopInboxStoredMuteState> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      continue;
-    }
-    const candidate = raw as Record<string, unknown>;
-    const muteKey = cleanOptionalString(candidate.mute_key) ?? cleanOptionalString(key);
-    const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : undefined;
-    const updatedAt = typeof candidate.updated_at === "string" ? candidate.updated_at : undefined;
-    if (!muteKey || !createdAt || !updatedAt) {
-      continue;
-    }
-    output[muteKey] = {
-      mute_key: muteKey,
-      item_id: cleanOptionalString(candidate.item_id),
-      note: cleanOptionalString(candidate.note),
-      muted_until: typeof candidate.muted_until === "string" ? candidate.muted_until : undefined,
-      created_at: createdAt,
-      updated_at: updatedAt,
-    };
-  }
-  return output;
-}
-
-function sanitizeInboxRoutingRules(value: unknown): Record<string, LoopInboxRoutingRule> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  const output: Record<string, LoopInboxRoutingRule> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      continue;
-    }
-    const candidate = raw as Record<string, unknown>;
-    const routeId = cleanOptionalString(candidate.route_id) ?? cleanOptionalString(key);
-    const assignee = cleanOptionalString(candidate.assignee);
-    const createdAt = typeof candidate.created_at === "string" ? candidate.created_at : undefined;
-    const updatedAt = typeof candidate.updated_at === "string" ? candidate.updated_at : undefined;
-    if (!routeId || !assignee || !createdAt || !updatedAt) {
-      continue;
-    }
-    const kind = parseInboxKind(candidate.kind);
-    const source = cleanOptionalString(candidate.source);
-    const priority = parseInboxPriority(candidate.priority);
-    if (!kind && !source && !priority) {
-      continue;
-    }
-    output[routeId] = {
-      route_id: routeId,
-      assignee,
-      note: cleanOptionalString(candidate.note),
-      kind,
-      source,
-      priority,
-      created_at: createdAt,
       updated_at: updatedAt,
     };
   }
@@ -1467,7 +982,7 @@ function sanitizeInboxRoutingRules(value: unknown): Record<string, LoopInboxRout
 }
 
 function parseDisposition(value: unknown): LoopInboxDisposition | undefined {
-  return value === "resolved" || value === "dismissed" || value === "snoozed" ? value : undefined;
+  return value === "resolved" || value === "dismissed" ? value : undefined;
 }
 
 function parseInboxKind(value: unknown): LoopInboxItemKind | undefined {
@@ -1477,7 +992,7 @@ function parseInboxKind(value: unknown): LoopInboxItemKind | undefined {
     || value === "verification_failure"
     || value === "stale_work"
     || value === "automation_review"
-    || value === "action_review"
+    || value === "external_action_approval"
     || value === "discovery_candidate"
     || value === "daemon_job"
     || value === "skill_proposal"
@@ -1486,19 +1001,12 @@ function parseInboxKind(value: unknown): LoopInboxItemKind | undefined {
     : undefined;
 }
 
-function parseInboxPriority(value: unknown): LoopInboxPriority | undefined {
-  return value === "high" || value === "medium" || value === "low" ? value : undefined;
-}
-
 function actionDisposition(action: LoopInboxAction): LoopInboxDisposition {
   if (action === "resolve") {
     return "resolved";
   }
   if (action === "dismiss") {
     return "dismissed";
-  }
-  if (action === "snooze") {
-    return "snoozed";
   }
   throw new Error(`Unsupported inbox action: ${action}`);
 }
@@ -1511,16 +1019,16 @@ function permissionDecisionPolicyKind(event: SessionEvent): string | undefined {
   return cleanOptionalString(jsonObject(event.data.decision)?.policy_kind);
 }
 
-function permissionDecisionConnector(event: SessionEvent): string | undefined {
-  return cleanOptionalString(jsonObject(event.data.decision)?.connector);
+function permissionDecisionExternalSystem(event: SessionEvent): string | undefined {
+  return cleanOptionalString(jsonObject(event.data.decision)?.external_system);
 }
 
-function permissionDecisionConnectorOperation(event: SessionEvent): string | undefined {
+function permissionDecisionExternalOperation(event: SessionEvent): string | undefined {
   const decision = jsonObject(event.data.decision);
-  const connector = cleanOptionalString(decision?.connector);
-  const area = cleanOptionalString(decision?.connector_area);
-  const operation = cleanOptionalString(decision?.connector_operation);
-  return [connector, area, operation].filter((item): item is string => Boolean(item)).join(".") || undefined;
+  const system = cleanOptionalString(decision?.external_system);
+  const area = cleanOptionalString(decision?.external_area);
+  const operation = cleanOptionalString(decision?.external_operation);
+  return [system, area, operation].filter((item): item is string => Boolean(item)).join(".") || undefined;
 }
 
 function permissionEventCommand(event: SessionEvent): string | undefined {
@@ -1536,24 +1044,6 @@ function redactCommandForInbox(command: string): string {
   return command.replace(/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s]+)/gi, "$1=<redacted>");
 }
 
-function defaultRouteId(
-  input: Pick<LoopInboxRoutingRule, "assignee" | "kind" | "source" | "priority">,
-  now: string,
-): string {
-  const parts = [
-    input.assignee,
-    input.kind,
-    input.source,
-    input.priority,
-    now.replace(/[^0-9A-Za-z]/g, "").slice(0, 14),
-  ].filter((part): part is string => Boolean(part));
-  return `route-${parts.join("-").replace(/[^0-9A-Za-z_-]+/g, "-").slice(0, 96)}`;
-}
-
-function sortRoutingRules(routes: LoopInboxRoutingRule[]): LoopInboxRoutingRule[] {
-  return [...routes].sort((left, right) => left.created_at.localeCompare(right.created_at) || left.route_id.localeCompare(right.route_id));
-}
-
 function discoveryCandidateSource(candidate: { source: JsonObject }): string {
   return cleanOptionalString(candidate.source.kind)
     ?? cleanOptionalString(candidate.source.source)
@@ -1567,164 +1057,25 @@ function discoveryCandidateSourceLabel(candidate: { source: JsonObject }): strin
   return repo ? `${source}:${repo}` : source;
 }
 
-function discoveryCandidateVerificationHint(candidate: { session_id: string; source: JsonObject }): LoopInboxVerificationHint | undefined {
+function discoveryCandidateVerificationHint(candidate: { source: JsonObject }): LoopInboxVerificationHint | undefined {
   const suggested = jsonObject(candidate.source.suggested_verifier);
   const verifierId = cleanOptionalString(suggested?.id);
   if (!verifierId) {
     return undefined;
   }
-  const definition = getConnectorVerifierDefinition(verifierId);
-  if (!definition) {
-    return undefined;
-  }
   const params = jsonObject(suggested?.params) ?? {};
-  const command = connectorVerifierCommand(definition.cli_command, candidate.session_id, verifierId, params);
   return {
     verifier_id: verifierId,
     params,
-    command,
   };
 }
 
 function appendVerificationHintDetail(detail: string | undefined, hint: LoopInboxVerificationHint | undefined): string | undefined {
-  if (!hint?.command) {
+  if (!hint) {
     return detail;
   }
-  const verify = `verify: ${hint.command}`;
+  const verify = "verification: use CLI/skill checks, then record structured goal.verify evidence";
   return detail ? `${detail}; ${verify}` : verify;
-}
-
-function connectorVerifierCommand(command: string, sessionId: string, verifierId: string, params: JsonObject): string | undefined {
-  const args = ["inferoa", command, sessionId];
-  switch (verifierId) {
-    case "github-pr-checks":
-    case "github-pr-status":
-    case "github-review-request": {
-      const pr = cleanOptionalString(params.pr);
-      if (!pr) {
-        return undefined;
-      }
-      args.push(pr);
-      appendOptionalFlag(args, "--repo", cleanOptionalString(params.repo));
-      appendOptionalFlag(args, "--reviewer", verifierId === "github-review-request" ? cleanOptionalString(params.reviewer) : undefined);
-      return args.map(shellArg).join(" ");
-    }
-    case "github-issue-status": {
-      const issue = cleanOptionalString(params.issue);
-      if (!issue) {
-        return undefined;
-      }
-      args.push(issue);
-      appendOptionalFlag(args, "--repo", cleanOptionalString(params.repo));
-      return args.map(shellArg).join(" ");
-    }
-    case "github-notification-status": {
-      const thread = cleanOptionalString(params.thread);
-      if (!thread) {
-        return undefined;
-      }
-      args.push(thread);
-      return args.map(shellArg).join(" ");
-    }
-    case "github-actions-run": {
-      const run = cleanOptionalString(params.run);
-      if (!run) {
-        return undefined;
-      }
-      args.push(run);
-      appendOptionalFlag(args, "--repo", cleanOptionalString(params.repo));
-      appendOptionalFlag(args, "--attempt", numberParamString(params.attempt));
-      return args.map(shellArg).join(" ");
-    }
-    case "github-deployment-status": {
-      const repo = cleanOptionalString(params.repo);
-      const deploymentId = cleanOptionalString(params.deployment_id);
-      const environment = cleanOptionalString(params.environment);
-      if (!repo || (!deploymentId && !environment)) {
-        return undefined;
-      }
-      appendOptionalFlag(args, "--repo", repo);
-      appendOptionalFlag(args, "--deployment-id", deploymentId);
-      appendOptionalFlag(args, "--environment", deploymentId ? undefined : environment);
-      appendOptionalFlag(args, "--ref", cleanOptionalString(params.ref));
-      appendOptionalFlag(args, "--expect", cleanOptionalString(params.expect));
-      return args.map(shellArg).join(" ");
-    }
-    case "github-release-status": {
-      const tag = cleanOptionalString(params.tag);
-      if (!tag) {
-        return undefined;
-      }
-      args.push(tag);
-      appendOptionalFlag(args, "--repo", cleanOptionalString(params.repo));
-      appendOptionalFlag(args, "--expect", cleanOptionalString(params.expect));
-      return args.map(shellArg).join(" ");
-    }
-    case "git-clean":
-      return args.map(shellArg).join(" ");
-    case "http-health": {
-      const url = cleanOptionalString(params.url);
-      if (!url) {
-        return undefined;
-      }
-      args.push(url);
-      appendOptionalFlag(args, "--status", numberParamString(params.expected_status));
-      appendOptionalFlag(args, "--timeout-ms", numberParamString(params.timeout_ms));
-      return args.map(shellArg).join(" ");
-    }
-    case "npm-package-status": {
-      const packageName = cleanOptionalString(params.package_name);
-      const version = cleanOptionalString(params.version);
-      if (!packageName || !version) {
-        return undefined;
-      }
-      args.push(packageName);
-      appendOptionalFlag(args, "--version", version);
-      appendOptionalFlag(args, "--tag", cleanOptionalString(params.tag));
-      appendOptionalFlag(args, "--timeout-ms", numberParamString(params.timeout_ms));
-      return args.map(shellArg).join(" ");
-    }
-    default:
-      return undefined;
-  }
-}
-
-function appendOptionalFlag(args: string[], flag: string, value: string | undefined): void {
-  if (!value) {
-    return;
-  }
-  args.push(flag, value);
-}
-
-function numberParamString(value: unknown): string | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? String(Math.trunc(value)) : undefined;
-}
-
-function shellArg(value: string): string {
-  return /^[A-Za-z0-9_./:@=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function appendInboxMuteEvent(
-  store: SessionStore,
-  item: LoopInboxItem,
-  action: "mute" | "unmute",
-  state: LoopInboxStoredMuteState,
-): void {
-  if (!item.session_id) {
-    return;
-  }
-  store.appendEvent({
-    session_id: item.session_id,
-    run_id: item.run_id,
-    type: "loop.inbox.item.muted",
-    data: {
-      item_id: item.id,
-      action,
-      mute_key: state.mute_key,
-      muted_until: state.muted_until,
-      note: state.note,
-    },
-  });
 }
 
 function promotionMetadata(item: LoopInboxItem, options: LoopInboxPromoteOptions): JsonObject {
@@ -1818,34 +1169,15 @@ function roundScore(value: number): string {
 
 function summarize(items: LoopInboxItem[]): LoopInboxSummary {
   const byKind: Record<string, number> = {};
-  const byAssignee: Record<string, number> = {};
   for (const item of items) {
     byKind[item.kind] = (byKind[item.kind] ?? 0) + 1;
-    if (item.assignee) {
-      byAssignee[item.assignee] = (byAssignee[item.assignee] ?? 0) + 1;
-    }
   }
   return {
     total: items.length,
-    open: items.filter((item) => item.status !== "done" && item.status !== "snoozed" && item.status !== "muted").length,
+    open: items.filter((item) => item.status !== "done").length,
     high: items.filter((item) => item.priority === "high").length,
-    assigned: items.filter((item) => Boolean(item.assignee)).length,
-    routed: items.filter((item) => Boolean(item.routed_by)).length,
-    muted: items.filter((item) => item.status === "muted").length,
     by_kind: byKind,
-    by_assignee: byAssignee,
   };
-}
-
-function filterInboxItems(items: LoopInboxItem[], options: LoopInboxOptions): LoopInboxItem[] {
-  const assignee = cleanOptionalString(options.assignee);
-  if (assignee) {
-    return items.filter((item) => item.assignee === assignee);
-  }
-  if (options.onlyUnassigned) {
-    return items.filter((item) => !item.assignee);
-  }
-  return items;
 }
 
 function compareInboxItems(left: LoopInboxItem, right: LoopInboxItem): number {
@@ -1865,7 +1197,5 @@ function statusRank(status: LoopInboxStatus): number {
   if (status === "open") return 0;
   if (status === "waiting") return 1;
   if (status === "running") return 2;
-  if (status === "snoozed") return 3;
-  if (status === "muted") return 4;
-  return 5;
+  return 3;
 }

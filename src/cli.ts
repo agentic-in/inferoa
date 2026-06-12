@@ -43,17 +43,10 @@ import {
   runDueDiscoverySchedules,
 } from "./loop/discovery.js";
 import {
-  parseLoopInboxSnoozeUntil,
   promoteLoopInboxItem,
   readLoopInbox,
-  readLoopInboxRouting,
-  updateLoopInboxAssignment,
   updateLoopInboxItemState,
-  updateLoopInboxMute,
-  updateLoopInboxRouting,
   type LoopInboxAction,
-  type LoopInboxItemKind,
-  type LoopInboxPriority,
   type LoopInboxPromotionIsolation,
 } from "./loop/inbox.js";
 import { readLoopHealth } from "./loop/health.js";
@@ -63,13 +56,8 @@ import { readLoopEvidence } from "./loop/evidence.js";
 import { readLoopTrace } from "./loop/trace.js";
 import { readLoopRoadmap } from "./loop/roadmap.js";
 import { readLoopWorkers } from "./loop/workers.js";
-import { readLoopConnectors } from "./loop/connectors.js";
 import { readLoopTasks } from "./loop/tasks.js";
-import { parseConnectorActionPreflightInput, recordConnectorActionPreflight } from "./loop/action-preflight.js";
-import { parseConnectorActionRunInput, runConnectorAction } from "./loop/actions.js";
-import { readLoopActions } from "./loop/action-log.js";
 import { queueGoalVerificationSuite, runGoalVerificationSuite } from "./loop/verifier-suite.js";
-import { runConnectorVerifier } from "./loop/connector-verifiers.js";
 import { readLoopPolicy, resolveLoopBackgroundIsolation } from "./loop/policy.js";
 import { runtimeAgenticOptimizer } from "./opt/agentic-propose.js";
 import { optLiteAdopt, optLiteLearn, optLitePropose, optLiteReplay, optLiteReport, optLiteRun, optLiteStatus } from "./opt/opt-lite.js";
@@ -104,19 +92,22 @@ interface ParsedCli extends AppOptions {
   discovery?: string[];
   worktree?: string[];
   verify?: string[];
-  verifyGithubPr?: string[];
-  verifyGithubPrStatus?: string[];
-  verifyGithubReviewRequest?: string[];
-  verifyGithubIssueStatus?: string[];
-  verifyGithubNotification?: string[];
-  verifyGithubRun?: string[];
-  verifyGithubWorkflow?: string[];
-  verifyGithubDeployment?: string[];
-  verifyGithubRelease?: string[];
-  verifyNpmPackage?: string[];
-  verifyGitClean?: string[];
-  verifyHttp?: string[];
 }
+
+const REMOVED_CONNECTOR_VERIFIER_COMMANDS = new Set([
+  "verify-github-pr",
+  "verify-github-pr-status",
+  "verify-github-review-request",
+  "verify-github-issue-status",
+  "verify-github-notification",
+  "verify-github-run",
+  "verify-github-workflow",
+  "verify-github-deployment",
+  "verify-github-release",
+  "verify-npm-package",
+  "verify-git-clean",
+  "verify-http",
+]);
 
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
@@ -152,54 +143,6 @@ async function main(): Promise<void> {
     await runWorktree(parsed);
     return;
   }
-  if (parsed.verifyGithubPr) {
-    await runVerifyGithubPr(parsed);
-    return;
-  }
-  if (parsed.verifyGithubPrStatus) {
-    await runVerifyGithubPrStatus(parsed);
-    return;
-  }
-  if (parsed.verifyGithubReviewRequest) {
-    await runVerifyGithubReviewRequest(parsed);
-    return;
-  }
-  if (parsed.verifyGithubIssueStatus) {
-    await runVerifyGithubIssueStatus(parsed);
-    return;
-  }
-  if (parsed.verifyGithubNotification) {
-    await runVerifyGithubNotification(parsed);
-    return;
-  }
-  if (parsed.verifyGithubRun) {
-    await runVerifyGithubRun(parsed);
-    return;
-  }
-  if (parsed.verifyGithubWorkflow) {
-    await runVerifyGithubWorkflow(parsed);
-    return;
-  }
-  if (parsed.verifyGithubDeployment) {
-    await runVerifyGithubDeployment(parsed);
-    return;
-  }
-  if (parsed.verifyGithubRelease) {
-    await runVerifyGithubRelease(parsed);
-    return;
-  }
-  if (parsed.verifyNpmPackage) {
-    await runVerifyNpmPackage(parsed);
-    return;
-  }
-  if (parsed.verifyGitClean) {
-    await runVerifyGitClean(parsed);
-    return;
-  }
-  if (parsed.verifyHttp) {
-    await runVerifyHttp(parsed);
-    return;
-  }
   if (parsed.verify) {
     await runVerify(parsed);
     return;
@@ -231,6 +174,9 @@ function parseArgs(argv: string[]): ParsedCli {
   const prompt: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
+    if (REMOVED_CONNECTOR_VERIFIER_COMMANDS.has(arg) && prompt.length === 0) {
+      throw new Error(`${arg} was removed. Use inferoa verify <session> for structured goal verification; use normal CLI/skills for external facts and record the result as goal.verify evidence.`);
+    }
     if (arg === "--help" || arg === "-h") {
       parsed.help = true;
       continue;
@@ -307,78 +253,6 @@ function parseArgs(argv: string[]): ParsedCli {
       parsed.verify = rest.filter((item) => item !== "--json");
       break;
     }
-    if (arg === "verify-github-pr" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubPr = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-pr-status" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubPrStatus = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-review-request" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubReviewRequest = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-issue-status" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubIssueStatus = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-notification" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubNotification = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-run" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubRun = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-workflow" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubWorkflow = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-deployment" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubDeployment = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-github-release" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGithubRelease = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-npm-package" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyNpmPackage = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-git-clean" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyGitClean = rest.filter((item) => item !== "--json");
-      break;
-    }
-    if (arg === "verify-http" && prompt.length === 0) {
-      const rest = argv.slice(i + 1);
-      parsed.json = parsed.json || rest.includes("--json");
-      parsed.verifyHttp = rest.filter((item) => item !== "--json");
-      break;
-    }
     if (arg === "setup" && prompt.length === 0) {
       parsed.initialView = "setup";
       continue;
@@ -444,7 +318,7 @@ Self-improve commands:
   adopt [proposal_id]              Preview and adopt staged learned skills
 
 Inbox options:
-  --all                            Include terminal/done and snoozed items
+  --all                            Include terminal/done items
   resolve <item_id> [note]          Mark an item resolved
   dismiss <item_id> [note]          Hide an item without marking its source complete
   promote [--worktree] <item_id>    Queue runnable item for background work
@@ -561,10 +435,6 @@ async function runInbox(options: ParsedCli): Promise<void> {
     if (command === "show" || command === "list" || command === "status" || command === "all") {
       print(await readLoopInbox(app.store, app.workspace, {
         includeDone: parsed.includeDone,
-        includeSnoozed: parsed.includeDone,
-        includeMuted: parsed.includeMuted,
-        assignee: parsed.assignee,
-        onlyUnassigned: parsed.onlyUnassigned,
       }), options.json);
       return;
     }
@@ -591,195 +461,26 @@ async function runInbox(options: ParsedCli): Promise<void> {
       );
       return;
     }
-    if (command === "assign") {
-      const itemId = requiredArg(rest, 0, "item_id");
-      const assignee = requiredArg(rest, 1, "owner");
-      print(
-        await updateLoopInboxAssignment(app.store, app.workspace, {
-          item_id: itemId,
-          assignee,
-          note: rest.slice(2).join(" "),
-        }),
-        options.json,
-      );
-      return;
-    }
-    if (command === "unassign") {
-      const itemId = requiredArg(rest, 0, "item_id");
-      print(
-        await updateLoopInboxAssignment(app.store, app.workspace, {
-          item_id: itemId,
-        }),
-        options.json,
-      );
-      return;
-    }
-    if (command === "routes") {
-      print(await readLoopInboxRouting(app.workspace), options.json);
-      return;
-    }
-    if (command === "route") {
-      const subcommand = requiredArg(rest, 0, "add|remove");
-      if (subcommand === "list" || subcommand === "show") {
-        print(await readLoopInboxRouting(app.workspace), options.json);
-        return;
-      }
-      if (subcommand === "add") {
-        const route = parseInboxRouteAddFlags(rest.slice(1));
-        print(await updateLoopInboxRouting(app.workspace, { action: "add", ...route }), options.json);
-        return;
-      }
-      if (subcommand === "remove" || subcommand === "delete") {
-        print(await updateLoopInboxRouting(app.workspace, { action: "remove", route_id: requiredArg(rest, 1, "route_id") }), options.json);
-        return;
-      }
-      throw new Error("Usage: inferoa inbox route list|add|remove ...");
-    }
-    if (command === "mute") {
-      const itemId = requiredArg(rest, 0, "item_id");
-      print(
-        await updateLoopInboxMute(app.store, app.workspace, {
-          action: "mute",
-          item_id: itemId,
-          note: rest.slice(1).join(" "),
-        }),
-        options.json,
-      );
-      return;
-    }
-    if (command === "unmute") {
-      const itemId = requiredArg(rest, 0, "item_id_or_mute_key");
-      print(
-        await updateLoopInboxMute(app.store, app.workspace, {
-          action: "unmute",
-          item_id: itemId,
-        }),
-        options.json,
-      );
-      return;
-    }
-    if (command === "snooze") {
-      const itemId = requiredArg(rest, 0, "item_id");
-      const until = parseLoopInboxSnoozeUntil(requiredArg(rest, 1, "duration"));
-      print(
-        await updateLoopInboxItemState(app.store, app.workspace, {
-          action: "snooze",
-          item_id: itemId,
-          snoozed_until: until,
-          note: rest.slice(2).join(" "),
-        }),
-        options.json,
-      );
-      return;
-    }
-    throw new Error("Usage: inferoa inbox [--all|--muted]|resolve|dismiss|snooze|assign|unassign|routes|route|mute|unmute|reopen|promote [--worktree] ...");
+    throw new Error("Usage: inferoa inbox [--all]|resolve|dismiss|reopen|promote [--worktree] ...");
   } finally {
     closeApp(app);
   }
 }
 
-function parseInboxArgs(args: string[]): { args: string[]; includeDone: boolean; includeMuted: boolean; assignee?: string; onlyUnassigned?: boolean } {
+function parseInboxArgs(args: string[]): { args: string[]; includeDone: boolean } {
   const output: string[] = [];
   let includeDone = false;
-  let includeMuted = false;
-  let assignee: string | undefined;
-  let onlyUnassigned = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--all" || arg === "all") {
       includeDone = true;
-      includeMuted = true;
-      continue;
-    }
-    if (arg === "--muted" || arg === "muted") {
-      includeMuted = true;
-      continue;
-    }
-    if (arg === "--unassigned") {
-      onlyUnassigned = true;
-      continue;
-    }
-    if (arg === "--assignee") {
-      assignee = requiredArg(args, index + 1, "owner");
-      index += 1;
-      continue;
-    }
-    if (arg?.startsWith("--assignee=")) {
-      assignee = arg.slice("--assignee=".length);
       continue;
     }
     if (arg) {
       output.push(arg);
     }
   }
-  if (assignee) {
-    onlyUnassigned = false;
-  }
-  return { args: output, includeDone, includeMuted, assignee, onlyUnassigned };
-}
-
-function parseInboxRouteAddFlags(args: string[]): {
-  route_id?: string;
-  assignee: string;
-  note?: string;
-  kind?: LoopInboxItemKind;
-  source?: string;
-  priority?: LoopInboxPriority;
-} {
-  const owner = requiredArg(args, 0, "owner");
-  let rest = args.slice(1);
-  const id = consumeFlagValue(rest, "--id");
-  rest = id.rest;
-  const kind = consumeFlagValue(rest, "--kind");
-  rest = kind.rest;
-  const source = consumeFlagValue(rest, "--source");
-  rest = source.rest;
-  const priority = consumeFlagValue(rest, "--priority");
-  rest = priority.rest;
-  const unknown = rest.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown inbox route option: ${unknown}`);
-  }
-  return {
-    route_id: id.value,
-    assignee: owner,
-    note: rest.join(" "),
-    kind: parseInboxKindFlag(kind.value),
-    source: source.value,
-    priority: parseInboxPriorityFlag(priority.value),
-  };
-}
-
-function parseInboxKindFlag(value: string | undefined): LoopInboxItemKind | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (
-    value === "goal_review"
-    || value === "goal_blocker"
-    || value === "goal_paused"
-    || value === "verification_failure"
-    || value === "stale_work"
-    || value === "automation_review"
-    || value === "action_review"
-    || value === "discovery_candidate"
-    || value === "daemon_job"
-    || value === "skill_proposal"
-    || value === "self_improve_replay"
-  ) {
-    return value;
-  }
-  throw new Error(`Unknown inbox item kind: ${value}`);
-}
-
-function parseInboxPriorityFlag(value: string | undefined): LoopInboxPriority | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === "high" || value === "medium" || value === "low") {
-    return value;
-  }
-  throw new Error(`Unknown inbox priority: ${value}`);
+  return { args: output, includeDone };
 }
 
 async function runLoop(options: ParsedCli): Promise<void> {
@@ -804,33 +505,6 @@ async function runLoop(options: ParsedCli): Promise<void> {
     }
     if (command === "policy") {
       print(await readLoopPolicy(app.config, app.workspace), options.json);
-      return;
-    }
-    if (command === "action-preflight" || command === "action") {
-      const sessionPrefix = requiredArg(rest, 0, "session");
-      const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-      if (!session) {
-        throw new Error(`No session matches ${sessionPrefix}`);
-      }
-      const input = parseConnectorActionPreflightInput(rest.slice(1));
-      print(recordConnectorActionPreflight(app.store, session, input), options.json);
-      return;
-    }
-    if (command === "action-run" || command === "action-execute") {
-      const sessionPrefix = requiredArg(rest, 0, "session");
-      const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-      if (!session) {
-        throw new Error(`No session matches ${sessionPrefix}`);
-      }
-      const input = parseConnectorActionRunInput(rest.slice(1));
-      print(await runConnectorAction(app.store, session, input, {
-        cwd: app.workspace.root,
-        env: process.env,
-      }), options.json);
-      return;
-    }
-    if (command === "actions" || command === "action-log") {
-      print(readLoopActions(app.store, app.workspace), options.json);
       return;
     }
     if (command === "roadmap" || command === "coverage") {
@@ -859,11 +533,7 @@ async function runLoop(options: ParsedCli): Promise<void> {
       print(readLoopWorkers(app.store, app.workspace), options.json);
       return;
     }
-    if (command === "connectors" || command === "connector") {
-      print(readLoopConnectors(app.store, app.workspace), options.json);
-      return;
-    }
-    throw new Error("Usage: inferoa loop health");
+    throw new Error("Usage: inferoa loop health|status|dashboard|metrics|tasks|policy|roadmap|evidence|trace|workers");
   } finally {
     closeApp(app);
   }
@@ -1322,321 +992,6 @@ async function runVerify(options: ParsedCli): Promise<void> {
   }
 }
 
-async function runVerifyGithubPr(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubPr ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-pr <session> <pr> [--repo owner/name]");
-  }
-  const parsed = parseGitHubPrVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-pr-checks", {
-      session_id: session.session_id,
-      params: { pr: parsed.pr, repo: parsed.repo },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubPrStatus(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubPrStatus ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-pr-status <session> <pr> [--repo owner/name]");
-  }
-  const parsed = parseGitHubPrVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-pr-status", {
-      session_id: session.session_id,
-      params: { pr: parsed.pr, repo: parsed.repo },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubReviewRequest(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubReviewRequest ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-review-request <session> <pr> [--repo owner/name] [--reviewer login]");
-  }
-  const parsed = parseGitHubReviewRequestVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-review-request", {
-      session_id: session.session_id,
-      params: { pr: parsed.pr, repo: parsed.repo, reviewer: parsed.reviewer },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubIssueStatus(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubIssueStatus ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-issue-status <session> <issue> [--repo owner/name]");
-  }
-  const parsed = parseGitHubIssueVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-issue-status", {
-      session_id: session.session_id,
-      params: { issue: parsed.issue, repo: parsed.repo },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubNotification(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubNotification ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-notification <session> <thread_id>");
-  }
-  const parsed = parseGitHubNotificationVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-notification-status", {
-      session_id: session.session_id,
-      params: { thread: parsed.thread },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubRun(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubRun ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-run <session> <run_id> [--repo owner/name] [--attempt N]");
-  }
-  const parsed = parseGitHubRunVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-actions-run", {
-      session_id: session.session_id,
-      params: { run: parsed.run, repo: parsed.repo, attempt: parsed.attempt },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubWorkflow(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubWorkflow ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-workflow <session> --workflow WORKFLOW [--repo owner/name] [--branch BRANCH] [--event EVENT] [--commit SHA]");
-  }
-  const parsed = parseGitHubWorkflowVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-workflow-run-status", {
-      session_id: session.session_id,
-      params: {
-        workflow: parsed.workflow,
-        repo: parsed.repo,
-        branch: parsed.branch,
-        event: parsed.event,
-        commit: parsed.commit,
-      },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubDeployment(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubDeployment ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-deployment <session> --repo owner/name (--deployment-id ID|--environment ENV) [--ref REF] [--expect success|inactive|failure|any]");
-  }
-  const parsed = parseGitHubDeploymentVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-deployment-status", {
-      session_id: session.session_id,
-      params: {
-        repo: parsed.repo,
-        deployment_id: parsed.deployment_id,
-        environment: parsed.environment,
-        ref: parsed.ref,
-        expect: parsed.expect,
-      },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGithubRelease(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyGithubRelease ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-github-release <session> <tag> [--repo owner/name] [--expect published|draft|any]");
-  }
-  const parsed = parseGitHubReleaseVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "github-release-status", {
-      session_id: session.session_id,
-      params: { tag: parsed.tag, repo: parsed.repo, expect: parsed.expect },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyNpmPackage(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyNpmPackage ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-npm-package <session> <package> --version X [--tag latest] [--timeout-ms N]");
-  }
-  const parsed = parseNpmPackageVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "npm-package-status", {
-      session_id: session.session_id,
-      params: {
-        package_name: parsed.package_name,
-        version: parsed.version,
-        tag: parsed.tag,
-        timeout_ms: parsed.timeout_ms,
-      },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyGitClean(options: ParsedCli): Promise<void> {
-  const [sessionPrefix] = options.verifyGitClean ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-git-clean <session>");
-  }
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "git-clean", {
-      session_id: session.session_id,
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
-async function runVerifyHttp(options: ParsedCli): Promise<void> {
-  const [sessionPrefix, ...rest] = options.verifyHttp ?? [];
-  if (!sessionPrefix) {
-    throw new Error("Usage: inferoa verify-http <session> <url> [--status N] [--timeout-ms N]");
-  }
-  const parsed = parseHttpVerifierFlags(rest);
-  const app = await loadApp(options);
-  try {
-    const session = app.store.getSession(sessionPrefix) ?? app.store.findSessionByPrefix(app.workspace.id, sessionPrefix);
-    if (!session) {
-      throw new Error(`No session matches ${sessionPrefix}`);
-    }
-    const verification = await runConnectorVerifier(app.store, app.workspace, "http-health", {
-      session_id: session.session_id,
-      params: { url: parsed.url, expected_status: parsed.status, timeout_ms: parsed.timeout_ms },
-    });
-    print({
-      session: publicSession(session),
-      verification,
-    }, options.json);
-  } finally {
-    closeApp(app);
-  }
-}
-
 async function runDebug(options: ParsedCli): Promise<void> {
   const [command, ...rest] = options.debug ?? [];
   if (!command) {
@@ -1939,309 +1294,6 @@ function parseInboxPromoteFlags(args: string[]): { isolation?: LoopInboxPromotio
     isolation,
     item_id: requiredArg(output, 0, "item_id"),
   };
-}
-
-function parseGitHubPrVerifierFlags(args: string[]): { pr: string; repo?: string } {
-  const output: string[] = [];
-  let repo: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const pr = requiredArg(output, 0, "pr");
-  if (!pr.trim()) {
-    throw new Error("Usage: inferoa verify-github-pr <session> <pr> [--repo owner/name]");
-  }
-  return { pr, repo };
-}
-
-function parseGitHubReviewRequestVerifierFlags(args: string[]): { pr: string; repo?: string; reviewer?: string } {
-  const output: string[] = [];
-  let repo: string | undefined;
-  let reviewer: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg === "--reviewer") {
-      reviewer = requiredArg(args, index + 1, "reviewer");
-      index += 1;
-    } else if (arg?.startsWith("--reviewer=")) {
-      reviewer = arg.slice("--reviewer=".length);
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const pr = requiredArg(output, 0, "pr");
-  if (!pr.trim()) {
-    throw new Error("Usage: inferoa verify-github-review-request <session> <pr> [--repo owner/name] [--reviewer login]");
-  }
-  return { pr, repo, reviewer };
-}
-
-function parseGitHubIssueVerifierFlags(args: string[]): { issue: string; repo?: string } {
-  const output: string[] = [];
-  let repo: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const issue = requiredArg(output, 0, "issue");
-  if (!issue.trim()) {
-    throw new Error("Usage: inferoa verify-github-issue-status <session> <issue> [--repo owner/name]");
-  }
-  return { issue, repo };
-}
-
-function parseGitHubNotificationVerifierFlags(args: string[]): { thread: string } {
-  const unknown = args.find((arg) => arg.startsWith("--"));
-  if (unknown) {
-    throw new Error(`Unknown GitHub notification verifier option: ${unknown}`);
-  }
-  const thread = requiredArg(args, 0, "thread_id");
-  if (!thread.trim()) {
-    throw new Error("Usage: inferoa verify-github-notification <session> <thread_id>");
-  }
-  return { thread };
-}
-
-function parseGitHubRunVerifierFlags(args: string[]): { run: string; repo?: string; attempt?: number } {
-  const output: string[] = [];
-  let repo: string | undefined;
-  let attempt: number | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg === "--attempt") {
-      attempt = parsePositiveInteger(requiredArg(args, index + 1, "attempt"), "--attempt");
-      index += 1;
-    } else if (arg?.startsWith("--attempt=")) {
-      attempt = parsePositiveInteger(arg.slice("--attempt=".length), "--attempt");
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const run = requiredArg(output, 0, "run_id");
-  if (!run.trim()) {
-    throw new Error("Usage: inferoa verify-github-run <session> <run_id> [--repo owner/name] [--attempt N]");
-  }
-  return { run, repo, attempt };
-}
-
-function parseGitHubWorkflowVerifierFlags(args: string[]): { workflow: string; repo?: string; branch?: string; event?: string; commit?: string } {
-  const output: string[] = [];
-  let workflow: string | undefined;
-  let repo: string | undefined;
-  let branch: string | undefined;
-  let event: string | undefined;
-  let commit: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--workflow") {
-      workflow = requiredArg(args, index + 1, "workflow");
-      index += 1;
-    } else if (arg?.startsWith("--workflow=")) {
-      workflow = arg.slice("--workflow=".length);
-    } else if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg === "--branch") {
-      branch = requiredArg(args, index + 1, "branch");
-      index += 1;
-    } else if (arg?.startsWith("--branch=")) {
-      branch = arg.slice("--branch=".length);
-    } else if (arg === "--event") {
-      event = requiredArg(args, index + 1, "event");
-      index += 1;
-    } else if (arg?.startsWith("--event=")) {
-      event = arg.slice("--event=".length);
-    } else if (arg === "--commit") {
-      commit = requiredArg(args, index + 1, "commit");
-      index += 1;
-    } else if (arg?.startsWith("--commit=")) {
-      commit = arg.slice("--commit=".length);
-    } else if (arg?.startsWith("--")) {
-      throw new Error(`Unknown GitHub workflow verifier option: ${arg}`);
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  workflow ??= output[0];
-  if (!workflow?.trim()) {
-    throw new Error("Usage: inferoa verify-github-workflow <session> --workflow WORKFLOW [--repo owner/name] [--branch BRANCH] [--event EVENT] [--commit SHA]");
-  }
-  return { workflow, repo, branch, event, commit };
-}
-
-function parseGitHubDeploymentVerifierFlags(args: string[]): { repo: string; deployment_id?: string; environment?: string; ref?: string; expect?: string } {
-  let repo: string | undefined;
-  let deploymentId: string | undefined;
-  let environment: string | undefined;
-  let ref: string | undefined;
-  let expect: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg === "--deployment-id") {
-      deploymentId = requiredArg(args, index + 1, "deployment-id");
-      index += 1;
-    } else if (arg?.startsWith("--deployment-id=")) {
-      deploymentId = arg.slice("--deployment-id=".length);
-    } else if (arg === "--environment") {
-      environment = requiredArg(args, index + 1, "environment");
-      index += 1;
-    } else if (arg?.startsWith("--environment=")) {
-      environment = arg.slice("--environment=".length);
-    } else if (arg === "--ref") {
-      ref = requiredArg(args, index + 1, "ref");
-      index += 1;
-    } else if (arg?.startsWith("--ref=")) {
-      ref = arg.slice("--ref=".length);
-    } else if (arg === "--expect") {
-      expect = parseGitHubDeploymentExpectedFlag(requiredArg(args, index + 1, "expect"));
-      index += 1;
-    } else if (arg?.startsWith("--expect=")) {
-      expect = parseGitHubDeploymentExpectedFlag(arg.slice("--expect=".length));
-    } else if (arg?.startsWith("--")) {
-      throw new Error(`Unknown GitHub deployment verifier option: ${arg}`);
-    } else if (arg) {
-      throw new Error(`Unexpected GitHub deployment verifier argument: ${arg}`);
-    }
-  }
-  if (!repo?.trim() || (!deploymentId?.trim() && !environment?.trim())) {
-    throw new Error("Usage: inferoa verify-github-deployment <session> --repo owner/name (--deployment-id ID|--environment ENV) [--ref REF] [--expect success|inactive|failure|any]");
-  }
-  return { repo, deployment_id: deploymentId, environment, ref, expect };
-}
-
-function parseGitHubReleaseVerifierFlags(args: string[]): { tag: string; repo?: string; expect?: string } {
-  const output: string[] = [];
-  let repo: string | undefined;
-  let expect: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--repo") {
-      repo = requiredArg(args, index + 1, "repo");
-      index += 1;
-    } else if (arg?.startsWith("--repo=")) {
-      repo = arg.slice("--repo=".length);
-    } else if (arg === "--expect") {
-      expect = parseGitHubReleaseExpectedFlag(requiredArg(args, index + 1, "expect"));
-      index += 1;
-    } else if (arg?.startsWith("--expect=")) {
-      expect = parseGitHubReleaseExpectedFlag(arg.slice("--expect=".length));
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const tag = requiredArg(output, 0, "tag");
-  if (!tag.trim()) {
-    throw new Error("Usage: inferoa verify-github-release <session> <tag> [--repo owner/name] [--expect published|draft|any]");
-  }
-  return { tag, repo, expect };
-}
-
-function parseGitHubReleaseExpectedFlag(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "published" || normalized === "draft" || normalized === "any") {
-    return normalized;
-  }
-  throw new Error("--expect must be published, draft, or any");
-}
-
-function parseGitHubDeploymentExpectedFlag(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "success" || normalized === "inactive" || normalized === "failure" || normalized === "any") {
-    return normalized;
-  }
-  throw new Error("--expect must be success, inactive, failure, or any");
-}
-
-function parseNpmPackageVerifierFlags(args: string[]): { package_name: string; version: string; tag?: string; timeout_ms?: number } {
-  const output: string[] = [];
-  let version: string | undefined;
-  let tag: string | undefined;
-  let timeoutMs: number | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--version") {
-      version = requiredArg(args, index + 1, "version");
-      index += 1;
-    } else if (arg?.startsWith("--version=")) {
-      version = arg.slice("--version=".length);
-    } else if (arg === "--tag") {
-      tag = requiredArg(args, index + 1, "tag");
-      index += 1;
-    } else if (arg?.startsWith("--tag=")) {
-      tag = arg.slice("--tag=".length);
-    } else if (arg === "--timeout-ms") {
-      timeoutMs = parsePositiveInteger(requiredArg(args, index + 1, "timeout_ms"), "--timeout-ms");
-      index += 1;
-    } else if (arg?.startsWith("--timeout-ms=")) {
-      timeoutMs = parsePositiveInteger(arg.slice("--timeout-ms=".length), "--timeout-ms");
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const packageName = requiredArg(output, 0, "package");
-  if (!packageName.trim() || !version?.trim()) {
-    throw new Error("Usage: inferoa verify-npm-package <session> <package> --version X [--tag latest] [--timeout-ms N]");
-  }
-  return { package_name: packageName, version, tag, timeout_ms: timeoutMs };
-}
-
-function parseHttpVerifierFlags(args: string[]): { url: string; status?: number; timeout_ms?: number } {
-  const output: string[] = [];
-  let status: number | undefined;
-  let timeoutMs: number | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--status") {
-      status = parseHttpStatus(requiredArg(args, index + 1, "status"));
-      index += 1;
-    } else if (arg?.startsWith("--status=")) {
-      status = parseHttpStatus(arg.slice("--status=".length));
-    } else if (arg === "--timeout-ms") {
-      timeoutMs = parsePositiveInteger(requiredArg(args, index + 1, "timeout_ms"), "--timeout-ms");
-      index += 1;
-    } else if (arg?.startsWith("--timeout-ms=")) {
-      timeoutMs = parsePositiveInteger(arg.slice("--timeout-ms=".length), "--timeout-ms");
-    } else if (arg) {
-      output.push(arg);
-    }
-  }
-  const url = requiredArg(output, 0, "url");
-  if (!url.trim()) {
-    throw new Error("Usage: inferoa verify-http <session> <url> [--status N] [--timeout-ms N]");
-  }
-  return { url, status, timeout_ms: timeoutMs };
 }
 
 function parseHttpStatus(value: string): number {

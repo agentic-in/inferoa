@@ -252,8 +252,8 @@ export async function verifyGitHubPullRequestChecks(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-pr-checks",
       pr,
       repo: options.repo,
@@ -342,8 +342,8 @@ export async function verifyGitHubPullRequestStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-pr-status",
       pr,
       repo: options.repo,
@@ -431,8 +431,8 @@ export async function verifyGitHubReviewRequestStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-review-request",
       pr,
       repo: options.repo,
@@ -530,8 +530,8 @@ export async function verifyGitHubIssueStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-issue-status",
       issue,
       repo: options.repo,
@@ -618,8 +618,8 @@ export async function verifyGitHubNotificationStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-notification-status",
       thread,
     },
@@ -697,8 +697,8 @@ export async function verifyGitHubActionsRun(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-actions-run",
       github_run_id: run,
       repo: options.repo,
@@ -796,8 +796,8 @@ export async function verifyGitHubWorkflowRunStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-workflow-run-status",
       workflow,
       repo,
@@ -929,8 +929,8 @@ export async function verifyGitHubDeploymentStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-deployment-status",
       repo,
       deployment_id: deploymentId,
@@ -1038,8 +1038,8 @@ export async function verifyGitHubReleaseStatus(
     data: {
       goal_id: state.goal.id,
       horizon_generation: state.goal.horizon_generation,
-      provider: "connector",
-      connector: "github",
+      provider: "checker",
+      system: "github",
       role: "github-release-status",
       tag,
       repo: options.repo,
@@ -1131,7 +1131,7 @@ function recordGitHubVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-pr-checks",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1139,7 +1139,7 @@ function recordGitHubVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-pr-checks",
       pr: input.pr,
       repo: input.repo,
@@ -1184,7 +1184,7 @@ function recordGitHubRunVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-actions-run",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1192,7 +1192,7 @@ function recordGitHubRunVerification(
     horizon_generation: horizonGeneration,
     run_id: verificationRunId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-actions-run",
       github_run_id: input.run,
       repo: input.repo,
@@ -1248,7 +1248,7 @@ function recordGitHubWorkflowRunStatusVerification(
 ): GoalLoopVerification {
   const runBucket = normalizeBucket(input.actions_run?.conclusion ?? input.actions_run?.status);
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-workflow-run-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1256,7 +1256,7 @@ function recordGitHubWorkflowRunStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-workflow-run-status",
       workflow: input.workflow,
       repo: input.repo,
@@ -1318,7 +1318,7 @@ function recordGitHubDeploymentStatusVerification(
 ): GoalLoopVerification {
   const statusBucket = normalizeDeploymentStatus(input.deployment_status?.state);
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-deployment-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1326,7 +1326,7 @@ function recordGitHubDeploymentStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-deployment-status",
       repo: input.repo,
       requested_deployment_id: input.deployment_id,
@@ -1386,7 +1386,7 @@ function recordGitHubReleaseStatusVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-release-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1394,7 +1394,7 @@ function recordGitHubReleaseStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-release-status",
       tag: input.tag,
       repo: input.repo,
@@ -1443,7 +1443,7 @@ function recordGitHubPrStatusVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-pr-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1451,7 +1451,7 @@ function recordGitHubPrStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-pr-status",
       pr: input.pr,
       repo: input.repo,
@@ -1506,7 +1506,7 @@ function recordGitHubReviewRequestVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-review-request",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1514,7 +1514,7 @@ function recordGitHubReviewRequestVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-review-request",
       pr: input.pr,
       repo: input.repo,
@@ -1565,7 +1565,7 @@ function recordGitHubIssueStatusVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-issue-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1573,7 +1573,7 @@ function recordGitHubIssueStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-issue-status",
       issue: input.issue,
       repo: input.repo,
@@ -1619,7 +1619,7 @@ function recordGitHubNotificationStatusVerification(
   },
 ): GoalLoopVerification {
   return recordGoalVerification(store, sessionId, {
-    provider: "connector",
+    provider: "checker",
     verifier_role: "github-notification-status",
     verdict: input.verdict,
     confidence: input.confidence,
@@ -1627,7 +1627,7 @@ function recordGitHubNotificationStatusVerification(
     horizon_generation: horizonGeneration,
     run_id: runId,
     evidence: {
-      connector: "github",
+      system: "github",
       verifier: "github-notification-status",
       thread: input.thread,
       exit_code: input.exit_code,
