@@ -362,15 +362,19 @@ export class TuiApp {
   #promptWorker: Promise<void> | undefined;
   #promptWorkerScheduled = false;
   #selfImproveWorker: Promise<void> | undefined;
+  #selfImproveStatusWorker: Promise<void> | undefined;
   #selfImproveAbort: AbortController | undefined;
   #goalSupervisorActive = false;
   #activeAbort: AbortController | undefined;
   #activeRunStartedAtMs: number | undefined;
   #lastGoalMetadataRedrawAtMs = 0;
   #composerMetadataRightCache: ComposerMetadataRightCache | undefined;
+  #composerSkills: SkillDescriptor[] = [];
+  #composerSkillsLoad: Promise<SkillDescriptor[]> | undefined;
   #inputHistory = createComposerInputHistory();
   #welcomeCodeIntelligenceStarted = false;
   #welcomeCodeIntelligenceStop: (() => void) | undefined;
+  #lastSelfImproveOptimizerSessionId: string | undefined;
   #shutdownStarted = false;
 
   constructor(
@@ -669,7 +673,8 @@ export class TuiApp {
     const selfImproveAborted = this.abortSelfImprove(reason);
     const worker = this.#promptWorker;
     const selfImproveWorker = this.#selfImproveWorker;
-    if (!worker && !selfImproveWorker) {
+    const selfImproveStatusWorker = this.#selfImproveStatusWorker;
+    if (!worker && !selfImproveWorker && !selfImproveStatusWorker) {
       if (aborted || selfImproveAborted) {
         this.#composerActivity = undefined;
         this.#activeComposerRedraw?.();
@@ -686,6 +691,9 @@ export class TuiApp {
     await selfImproveWorker?.catch((error) => {
       this.writeTranscript(`\n${fg256(203, error instanceof Error ? error.message : String(error))}\n\n`);
     });
+    await selfImproveStatusWorker?.catch((error) => {
+      this.writeTranscript(`\n${fg256(203, error instanceof Error ? error.message : String(error))}\n\n`);
+    });
     this.#composerActivity = undefined;
     this.#activeComposerRedraw?.();
   }
@@ -696,7 +704,7 @@ export class TuiApp {
   }
 
   private async readComposer(options: ReadComposerOptions = {}): Promise<string> {
-    const skills = await new SkillRegistry(this.app.workspace, this.app.config).discover().catch(() => [] as SkillDescriptor[]);
+    let skills = this.#composerSkills;
     let buffer = options.initialBuffer ?? "";
     let cursor = buffer.length;
     let compactRanges: ComposerCompactRange[] = [];
@@ -802,7 +810,9 @@ export class TuiApp {
         stdout.write(ansi.showCursor);
         return true;
       };
+      let closed = false;
       const cleanup = () => {
+        closed = true;
         erase();
         stdin.off("data", onData);
         stdout.off("resize", onResize);
@@ -938,6 +948,17 @@ export class TuiApp {
       this.#activeComposerActivityRedraw = redrawActivity;
       this.#activeWelcomeCodeIntelligenceRedraw = redrawWelcomeCodeIntelligence;
       const composerItems = () => options.suggestions === false ? [] : this.composerSuggestions(buffer, skills);
+      const refreshSkills = () => {
+        void this.loadComposerSkills().then((nextSkills) => {
+          if (closed) {
+            return;
+          }
+          skills = nextSkills;
+          if (buffer.startsWith("$")) {
+            render();
+          }
+        });
+      };
       const completeSelection = (): boolean => {
         const items = composerItems();
         const item = items[selected];
@@ -1170,11 +1191,28 @@ export class TuiApp {
       stdin.on("data", onData);
       stdout.on("resize", onResize);
       render();
+      refreshSkills();
     });
   }
 
   private shouldRenderWelcomeComposer(): boolean {
     return !this.#hasTranscript && !this.#sessionId && !this.#activeAbort && !this.#promptWorker && !this.#promptWorkerScheduled && !this.#selfImproveWorker;
+  }
+
+  private loadComposerSkills(): Promise<SkillDescriptor[]> {
+    if (this.#composerSkillsLoad) {
+      return this.#composerSkillsLoad;
+    }
+    this.#composerSkillsLoad = new SkillRegistry(this.app.workspace, this.app.config).discover()
+      .then((skills) => {
+        this.#composerSkills = skills;
+        return skills;
+      })
+      .catch(() => this.#composerSkills)
+      .finally(() => {
+        this.#composerSkillsLoad = undefined;
+      });
+    return this.#composerSkillsLoad;
   }
 
   private composerSuggestions(buffer: string, skills: SkillDescriptor[]): ComposerItem[] {
@@ -2673,14 +2711,20 @@ export class TuiApp {
   }
 
   private async renderTokenmaxxingView(args = ""): Promise<void> {
-    const session = this.optionalSession();
+    const action = args.trim().toLowerCase().split(/\s+/)[0] ?? "";
+    const wantsSelfImprove = action === "self-improve" || action === "learn";
+    const selfImproveSession = this.latestSelfImproveOptimizerSession();
+    const session = wantsSelfImprove
+      ? selfImproveSession
+      : this.#selfImproveWorker && selfImproveSession
+        ? selfImproveSession
+        : this.optionalSession() ?? selfImproveSession;
     if (!session) {
-      this.renderPanel("Tokenmaxxing", ["No active session yet. Run a prompt first."]);
+      this.renderPanel("Tokenmaxxing", ["No active session yet. Run a prompt or /self-improve learn first."]);
       return;
     }
-    const action = args.trim().toLowerCase().split(/\s+/)[0] ?? "";
-    if (action && action !== "signals" && action !== "signal") {
-      this.renderPanel("Tokenmaxxing", [`Unknown tokenmaxxing view '${action}'.`, fg256(244, "Use /tokenmaxxing or /tokenmaxxing signals.")]);
+    if (action && action !== "signals" && action !== "signal" && !wantsSelfImprove) {
+      this.renderPanel("Tokenmaxxing", [`Unknown tokenmaxxing view '${action}'.`, fg256(244, "Use /tokenmaxxing, /tokenmaxxing signals, or /tokenmaxxing self-improve.")]);
       return;
     }
     await this.renderTokenmaxxingFullscreen(session, { signals: action === "signals" || action === "signal" });
@@ -4649,12 +4693,11 @@ export class TuiApp {
     const action = (tokens[0] ?? "status").toLowerCase();
     try {
       if (action === "help") {
-        this.renderLoopTranscriptPanel("Self-Improve", selfImproveStatusLines(await optLiteStatus(this.app.store, this.app.workspace)));
+        this.startSelfImproveStatusWorker();
         return;
       }
       if (action === "status" || action === "show") {
-        const status = await optLiteStatus(this.app.store, this.app.workspace);
-        this.renderLoopTranscriptPanel("Self-Improve", selfImproveStatusLines(status));
+        this.startSelfImproveStatusWorker();
         return;
       }
       if (action === "learn") {
@@ -4694,6 +4737,47 @@ export class TuiApp {
     }
   }
 
+  private startSelfImproveStatusWorker(): void {
+    if (this.#selfImproveStatusWorker) {
+      this.renderLoopTranscriptPanel("Self-Improve", [
+        `${fg256(220, "●")} self-improve status already loading`,
+      ]);
+      return;
+    }
+    this.renderLoopTranscriptPanel("Self-Improve", [
+      `${fg256(220, "●")} loading self-improve status`,
+      `${fg256(39, "Status")} reading evidence, proposals, and replay reports`,
+    ]);
+    const activity = this.startActivityIndicator("Loading self-improve status");
+    let worker!: Promise<void>;
+    worker = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const status = await optLiteStatus(this.app.store, this.app.workspace);
+            activity.stop({ redraw: false });
+            if (this.#running) {
+              this.renderLoopTranscriptPanel("Self-Improve", selfImproveStatusLines(status));
+            }
+          } catch (error) {
+            activity.stop({ redraw: false });
+            if (this.#running) {
+              this.renderLoopTranscriptPanel("Self-Improve", [
+                fg256(203, error instanceof Error ? error.message : String(error)),
+              ]);
+            }
+          }
+        })().finally(() => {
+          if (this.#selfImproveStatusWorker === worker) {
+            this.#selfImproveStatusWorker = undefined;
+          }
+          resolve();
+        });
+      }, 0);
+    });
+    this.#selfImproveStatusWorker = worker;
+  }
+
   private selfImproveProposeOptions(signal?: AbortSignal, activity?: ActivityIndicator): Parameters<typeof optLiteLearn>[2] {
     const optimizer = runtimeAgenticOptimizer(this.app.config, {
       run: async (options) => await this.runVisibleSelfImproveOptimizer(options, activity),
@@ -4708,8 +4792,18 @@ export class TuiApp {
     const activity = sharedActivity ?? this.startActivityIndicator("Self-improve optimizer");
     const ownsActivity = sharedActivity === undefined;
     try {
-      return await this.app.runtime.run({
+      const createRuntimeSession = (this.app.runtime as { createSession?: (title?: string) => Promise<SessionRecord> }).createSession;
+      const preparedSession = createRuntimeSession
+        ? await createRuntimeSession.call(this.app.runtime, options.title ?? "self-improve optimizer")
+        : undefined;
+      const preparedRunId = preparedSession ? randomId("run") : undefined;
+      if (preparedSession) {
+        this.rememberSelfImproveOptimizerRun(preparedSession.session_id);
+      }
+      const result = await this.app.runtime.run({
         prompt: options.prompt,
+        session_id: preparedSession?.session_id,
+        run_id: preparedRunId,
         title: options.title,
         request_class: options.request_class,
         visibility: options.visibility,
@@ -4746,6 +4840,8 @@ export class TuiApp {
           return await this.askClarification(request);
         },
       });
+      this.rememberSelfImproveOptimizerRun(result.session.session_id);
+      return result;
     } finally {
       if (ownsActivity) {
         activity.stop({ redraw: false });
@@ -6357,6 +6453,15 @@ export class TuiApp {
 
   private optionalSession(): SessionRecord | undefined {
     return this.#sessionId ? this.app.store.getSession(this.#sessionId) : undefined;
+  }
+
+  private rememberSelfImproveOptimizerRun(sessionId: string): void {
+    this.#lastSelfImproveOptimizerSessionId = sessionId;
+  }
+
+  private latestSelfImproveOptimizerSession(): SessionRecord | undefined {
+    const sessionId = this.#lastSelfImproveOptimizerSessionId;
+    return sessionId ? this.app.store.getSession(sessionId) : undefined;
   }
 
   private requiredSession(): SessionRecord {

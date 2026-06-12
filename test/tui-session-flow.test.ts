@@ -927,6 +927,7 @@ test("self-improve status renders a compact transcript without command checklist
     const transcripts: Array<{ title: string; body: string[] }> = [];
     const view = tui as unknown as {
       renderSelfImproveView: (args?: string) => Promise<void>;
+      shutdownBackgroundWork: (reason: string) => Promise<void>;
       renderPanel: (title: string, body: string[]) => void;
       renderLoopTranscriptPanel: (title: string, body: string[]) => void;
       composerSuggestions: (buffer: string, skills: []) => Array<{ value: string }>;
@@ -941,6 +942,10 @@ test("self-improve status renders a compact transcript without command checklist
     await view.renderSelfImproveView("");
 
     assert.deepEqual(panels, []);
+    assert.match(stripAnsi(transcripts[0]?.body.join("\n") ?? ""), /loading self-improve status/i);
+    for (let index = 0; index < 20 && transcripts.length < 2; index += 1) {
+      await delay(10);
+    }
     const latest = transcripts.at(-1);
     assert.equal(latest?.title, "Self-Improve");
     const plain = stripAnsi(latest?.body.join("\n") ?? "");
@@ -953,6 +958,7 @@ test("self-improve status renders a compact transcript without command checklist
       view.composerSuggestions("/self-improve ", []).map((item) => item.value),
       ["/self-improve status", "/self-improve learn", "/self-improve adopt"],
     );
+    await view.shutdownBackgroundWork("test done");
   } finally {
     store.close();
     await rm(stateDir, { recursive: true, force: true });
@@ -977,6 +983,7 @@ test("self-improve from welcome keeps the chat banner before command output", as
     const view = tui as unknown as {
       openView: (command: "self-improve", args: string) => Promise<void>;
       shouldRenderWelcomeComposer: () => boolean;
+      shutdownBackgroundWork: (reason: string) => Promise<void>;
     };
     let output = "";
     process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -993,6 +1000,8 @@ test("self-improve from welcome keeps the chat banner before command output", as
     assert.ok(panelIndex >= 0);
     assert.ok(bannerIndex < panelIndex);
     assert.equal(view.shouldRenderWelcomeComposer(), false);
+
+    await view.shutdownBackgroundWork("test done");
   } finally {
     process.stdout.write = originalStdoutWrite;
     store.close();
