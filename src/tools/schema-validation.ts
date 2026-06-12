@@ -20,6 +20,17 @@ export function validateToolArguments(definition: ToolDefinition, args: JsonObje
 }
 
 function validateSchema(schema: JsonObject, value: JsonValue, path: string, issues: ValidationIssue[]): void {
+  const variants = Array.isArray(schema.oneOf) ? schema.oneOf.filter(isPlainObject) : [];
+  if (variants.length) {
+    validateOneOf(variants, value, path, issues);
+    return;
+  }
+
+  if (schema.const !== undefined && !jsonEqual(value, schema.const as JsonValue)) {
+    issues.push({ path, message: `must be ${JSON.stringify(schema.const)}` });
+    return;
+  }
+
   const type = typeof schema.type === "string" ? schema.type : undefined;
   if (type === "object") {
     if (!isPlainObject(value)) {
@@ -89,6 +100,49 @@ function validateSchema(schema: JsonObject, value: JsonValue, path: string, issu
   validateEnum(schema, value, path, issues);
 }
 
+function validateOneOf(variants: JsonObject[], value: JsonValue, path: string, issues: ValidationIssue[]): void {
+  const failures: ValidationIssue[][] = [];
+  const opMatchedFailures: ValidationIssue[][] = [];
+  let matches = 0;
+  for (const variant of variants) {
+    const variantIssues: ValidationIssue[] = [];
+    validateSchema(variant, value, path, variantIssues);
+    if (variantIssues.length === 0) {
+      matches += 1;
+    } else {
+      failures.push(variantIssues);
+      if (variantMatchesOpConst(variant, value)) {
+        opMatchedFailures.push(variantIssues);
+      }
+    }
+  }
+  if (matches === 1) {
+    return;
+  }
+  if (matches > 1) {
+    issues.push({ path, message: "must match exactly one supported argument shape" });
+    return;
+  }
+  const candidates = opMatchedFailures.length ? opMatchedFailures : failures;
+  const closest = candidates
+    .slice()
+    .sort((left, right) => left.length - right.length)[0];
+  if (closest?.length) {
+    issues.push(...closest);
+    return;
+  }
+  issues.push({ path, message: "must match one supported argument shape" });
+}
+
+function variantMatchesOpConst(variant: JsonObject, value: JsonValue): boolean {
+  if (!isPlainObject(value) || typeof value.op !== "string") {
+    return false;
+  }
+  const properties = isPlainObject(variant.properties) ? variant.properties : {};
+  const opSchema = properties.op;
+  return isPlainObject(opSchema) && opSchema.const === value.op;
+}
+
 function validateEnum(schema: JsonObject, value: JsonValue, path: string, issues: ValidationIssue[]): void {
   const values = Array.isArray(schema.enum) ? schema.enum : undefined;
   if (!values?.length) {
@@ -97,6 +151,10 @@ function validateEnum(schema: JsonObject, value: JsonValue, path: string, issues
   if (!values.includes(value)) {
     issues.push({ path, message: `must be one of ${values.map((item) => JSON.stringify(item)).join(", ")}` });
   }
+}
+
+function jsonEqual(left: JsonValue, right: JsonValue): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function isPlainObject(value: unknown): value is JsonObject {

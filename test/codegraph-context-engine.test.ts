@@ -24,9 +24,14 @@ test("ToolRegistry exposes CodeGraph native tools by default in a git workspace 
     const workspace = gitWorkspace("w_codegraph_tools", dir, "codegraph-tools");
     const registry = new ToolRegistry(config(), workspace, store);
     const names = registry.list().map((tool) => tool.name);
+    const codegraph = registry.list().find((tool) => tool.name === "codegraph");
+    const variants = (codegraph?.parameters.oneOf as Array<{ properties?: Record<string, { const?: string }>; required?: string[] }> | undefined) ?? [];
 
     assert.ok(names.includes("codegraph"));
     assert.equal(names.some((name) => name.startsWith("codegraph_")), false);
+    assert.deepEqual(variants.map((variant) => variant.properties?.op?.const), ["explore", "search", "node", "callers", "callees", "impact", "files", "status"]);
+    assert.deepEqual(variants[0]?.required, ["op", "query"]);
+    assert.deepEqual(variants[2]?.required, ["op", "symbol"]);
     assert.ok(names.includes("lsp"));
     assert.ok(names.includes("ast_grep"));
     assert.ok(names.includes("ast_edit"));

@@ -411,24 +411,85 @@ export function normalizeContextEngineConfig(config: VllmAgentConfig): ContextEn
 const CODEGRAPH_TOOL_DEFINITIONS: ToolDefinition[] = ([
   {
     name: "codegraph",
-    description: "Repository-wide code intelligence. Use op=explore first for architecture, bug investigation, call flows, and cross-file understanding; use targeted ops for indexed follow-up.",
+    description: "Repository-wide code intelligence. Pick exactly one op shape. Start with op=explore for architecture, bug investigation, call flows, and cross-file understanding; use targeted ops for follow-up.",
     permission: "read",
-    parameters: objectSchema({
-      op: { type: "string", description: "Codegraph operation.", enum: ["explore", "search", "node", "callers", "callees", "impact", "files", "status"] },
-      query: stringSchema("For op=explore, natural-language question, symbol names, file names, or code terms; for op=search, symbol name or partial name."),
-      symbol: stringSchema("Function, method, class, or symbol name for op=node, callers, callees, or impact."),
-      kind: { type: "string", description: "For op=search, optional node kind filter.", enum: ["function", "method", "class", "interface", "type", "variable", "route", "component"] },
-      path: stringSchema("For op=search/files, optional indexed file path, path prefix, basename, or file tree prefix."),
-      pattern: stringSchema("For op=files, optional wildcard pattern such as *.ts or **/*.test.ts."),
-      format: { type: "string", description: "For op=files, output format.", enum: ["tree", "flat", "grouped"] },
-      maxFiles: numberSchema("For op=explore, maximum source files/code blocks to include. Defaults to 8."),
-      limit: numberSchema("Maximum results for op=search, callers, or callees."),
-      depth: numberSchema("Traversal depth for op=impact. Defaults to 2."),
-      includeCode: { type: "boolean", description: "For op=node, include source code. Defaults to false." },
-      file: stringSchema("For op=node, optional file path or basename to disambiguate."),
-      line: numberSchema("For op=node, optional line number to disambiguate."),
-      projectPath: projectPathSchema(),
-    }, ["op"]),
+    parameters: oneOfSchema([
+      objectSchema(
+        {
+          op: constStringSchema("explore", "Explore architecture, bug hypotheses, call flows, or cross-file behavior."),
+          query: stringSchema("Required natural-language question, symbol names, file names, or code terms."),
+          maxFiles: numberSchema("Maximum source files/code blocks to include. Defaults to 8."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "query"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("search", "Search indexed symbols by name."),
+          query: stringSchema("Required symbol name or partial name."),
+          kind: { type: "string", description: "Optional node kind filter.", enum: ["function", "method", "class", "interface", "type", "variable", "route", "component"] },
+          path: stringSchema("Optional indexed file path, path prefix, or basename filter."),
+          limit: numberSchema("Maximum results. Defaults to 10."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "query"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("node", "Read details for one symbol."),
+          symbol: stringSchema("Required symbol name."),
+          includeCode: { type: "boolean", description: "Include source code. Defaults to false." },
+          file: stringSchema("Optional file path or basename to disambiguate."),
+          line: numberSchema("Optional line number to disambiguate."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "symbol"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("callers", "List functions that call a symbol."),
+          symbol: stringSchema("Required function, method, class, or symbol name."),
+          limit: numberSchema("Maximum callers. Defaults to 20."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "symbol"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("callees", "List functions called by a symbol."),
+          symbol: stringSchema("Required function, method, class, or symbol name."),
+          limit: numberSchema("Maximum callees. Defaults to 20."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "symbol"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("impact", "List symbols affected by changing a symbol. Use before refactors."),
+          symbol: stringSchema("Required symbol to analyze."),
+          depth: numberSchema("Traversal depth. Defaults to 2."),
+          projectPath: projectPathSchema(),
+        },
+        ["op", "symbol"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("files", "Show indexed file tree with language and symbol counts."),
+          path: stringSchema("Optional file tree prefix."),
+          pattern: stringSchema("Optional wildcard pattern such as *.ts or **/*.test.ts."),
+          format: { type: "string", description: "Output format.", enum: ["tree", "flat", "grouped"] },
+          projectPath: projectPathSchema(),
+        },
+        ["op"],
+      ),
+      objectSchema(
+        {
+          op: constStringSchema("status", "Show context index health, graph size, language coverage, and watcher state."),
+          projectPath: projectPathSchema(),
+        },
+        ["op"],
+      ),
+    ]),
   },
 ] satisfies ToolDefinition[]).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -457,6 +518,14 @@ function codegraphNativeToolName(args: JsonObject): { ok: true; name: string } |
 
 function objectSchema(properties: Record<string, JsonObject>, required: string[] = []): JsonObject {
   return { type: "object", additionalProperties: false, properties, required };
+}
+
+function oneOfSchema(variants: JsonObject[]): JsonObject {
+  return { oneOf: variants };
+}
+
+function constStringSchema(value: string, description: string): JsonObject {
+  return { type: "string", const: value, description };
 }
 
 function stringSchema(description: string): JsonObject {

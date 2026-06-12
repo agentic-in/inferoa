@@ -9,7 +9,12 @@ function objectSchema(properties: Record<string, JsonObject>, required: string[]
   };
 }
 
+function oneOfSchema(variants: JsonObject[]): JsonObject {
+  return { oneOf: variants };
+}
+
 const string = (description: string): JsonObject => ({ type: "string", description });
+const constString = (value: string, description: string): JsonObject => ({ type: "string", const: value, description });
 const stringEnum = (description: string, values: string[]): JsonObject => ({ type: "string", description, enum: values });
 const number = (description: string): JsonObject => ({ type: "number", description });
 const boolean = (description: string): JsonObject => ({ type: "boolean", description });
@@ -174,18 +179,35 @@ const DEFINITIONS = [
   },
   {
     name: "git",
-    description: "Read bounded git state. Use op=status for status, op=diff for workspace or staged diff, and op=show for a revision or file at revision.",
+    description: "Read bounded git state. Pick exactly one op shape: status, diff, or show. Use run_command for unusual git commands.",
     permission: "read",
-    parameters: objectSchema(
-      {
-        op: stringEnum("Git operation.", ["status", "diff", "show"]),
-        cwd: string("Optional workspace-relative cwd."),
-        staged: boolean("For op=diff, show staged diff."),
-        path: string("Optional path filter. Omit or pass empty for the whole workspace diff or revision."),
-        rev: string("Revision or object for op=show."),
-      },
-      ["op"],
-    ),
+    parameters: oneOfSchema([
+      objectSchema(
+        {
+          op: constString("status", "Show `git status --short --branch`."),
+          cwd: string("Optional workspace-relative cwd."),
+        },
+        ["op"],
+      ),
+      objectSchema(
+        {
+          op: constString("diff", "Show a workspace diff."),
+          cwd: string("Optional workspace-relative cwd."),
+          staged: boolean("Show staged diff instead of unstaged diff."),
+          path: string("Optional path filter. Omit for the whole workspace diff."),
+        },
+        ["op"],
+      ),
+      objectSchema(
+        {
+          op: constString("show", "Show one revision or object with stat and patch."),
+          cwd: string("Optional workspace-relative cwd."),
+          rev: string("Required revision, commit, tag, or object, for example HEAD or HEAD~1."),
+          path: string("Optional path filter within the revision."),
+        },
+        ["op", "rev"],
+      ),
+    ]),
   },
   {
     name: "glob",
@@ -470,20 +492,41 @@ const DEFINITIONS = [
   },
   {
     name: "skill",
-    description: "Manage skills: list discovered skills, read a skill body before relying on it, or enable/disable skill ids in the persisted workspace selection.",
+    description: "List or read skills, or persistently enable/disable skill ids. Pick exactly one op shape; read the skill body before relying on a skill.",
     permission: "write",
-    parameters: objectSchema(
-      {
-        op: stringEnum("Skill operation.", ["list", "read", "enable", "disable"]),
-        id: string("Skill id or exact skill name for op=read."),
-        ids: { type: "array", items: string("Skill id or exact skill name for op=enable or op=disable.") },
-        query: string("Optional case-insensitive filter over id, name, or description for op=list."),
-        include_disabled: boolean("For op=list, include skills that are not enabled in config. Defaults to true."),
-        limit: number("For op=list, maximum skills."),
-        line_count: number("For op=read, maximum lines to return."),
-      },
-      ["op"],
-    ),
+    parameters: oneOfSchema([
+      objectSchema(
+        {
+          op: constString("list", "List discovered skills."),
+          query: string("Optional case-insensitive filter over id, name, or description."),
+          include_disabled: boolean("Include skills that are not enabled in config. Defaults to true."),
+          limit: number("Maximum skills."),
+        },
+        ["op"],
+      ),
+      objectSchema(
+        {
+          op: constString("read", "Read a skill body before relying on it."),
+          id: string("Required skill id or exact skill name."),
+          line_count: number("Maximum lines to return."),
+        },
+        ["op", "id"],
+      ),
+      objectSchema(
+        {
+          op: constString("enable", "Persistently enable one or more skills."),
+          ids: { type: "array", items: string("Required skill id or exact skill name.") },
+        },
+        ["op", "ids"],
+      ),
+      objectSchema(
+        {
+          op: constString("disable", "Persistently disable one or more skills."),
+          ids: { type: "array", items: string("Required skill id or exact skill name.") },
+        },
+        ["op", "ids"],
+      ),
+    ]),
   },
   {
     name: "stop_process",
