@@ -51,6 +51,7 @@ test("SkillRegistry discovers native and imported skills and tools read details 
     const tools = new ToolRegistry(config, workspace, store);
     const listed = await tools.call({ id: "tc1", name: "skill_list", arguments: { query: "demo" } }, { session_id: session.session_id });
     assert.equal(listed.ok, true);
+    assert.equal(listed.summary, "Listed 1 skill");
     assert.match(JSON.stringify(listed.data), /demo-skill/);
     const read = await tools.call({ id: "tc2", name: "skill_read", arguments: { id: "demo-skill" } }, { session_id: session.session_id });
     assert.equal(read.ok, true);

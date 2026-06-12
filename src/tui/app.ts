@@ -141,7 +141,7 @@ import { renderSessionTranscript } from "./session-transcript.js";
 import { renderUnknownSlashCommandNotice } from "./slash-notice.js";
 import { effectiveWorkspacePermission, setWorkspacePermissionMode } from "../tools/permissions.js";
 import { terminalBlockPatchSequence } from "./redraw.js";
-import { renderToolCards } from "./tool-renderer.js";
+import { renderToolCards, toolTraceAction } from "./tool-renderer.js";
 import { withConversationGap } from "./transcript-spacing.js";
 import { MarkdownStreamRenderer } from "./markdown.js";
 import { renderHomeFrame } from "./home.js";
@@ -4823,7 +4823,7 @@ export class TuiApp {
             activity.status("Compacted self-improve context");
           }
           if (event.type === "tool_start") {
-            activity.status(event.summary ?? toolActivityAction(event.tool_name));
+            activity.status(event.summary ?? toolTraceAction(event.tool_name));
           }
           if (event.type === "tool_end") {
             const toolBlock = this.toolTraceForCallBlock(event.session_id, event.run_id, event.tool_call_id, true);
@@ -6043,7 +6043,7 @@ export class TuiApp {
             }
           }
           if (event.type === "tool_start") {
-            activity.status(event.summary ?? toolActivityAction(event.tool_name));
+            activity.status(event.summary ?? toolTraceAction(event.tool_name));
           }
           if (event.type === "tool_end") {
             if (options.suppressTranscript && !renderSuppressedToolTrace) {
@@ -8291,7 +8291,7 @@ function isCancellableJob(job: SupervisorJob): boolean {
 
 function formatToolActivityLine(toolName: string, ok: boolean, summary: string, durationMs: number): string {
   const duration = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
-  const action = toolActivityAction(toolName, ok);
+  const action = toolTraceAction(toolName, ok);
   return renderActivityRecordLine({
     marker: ok ? "•" : "×",
     markerColor: ok ? 48 : 203,
@@ -8329,70 +8329,6 @@ function codeIntelligenceProgress(status: ContextEngineStatus): string {
     return `${phase}${status.files} files`;
   }
   return `${phase || status.state}`.trim();
-}
-
-function toolActivityAction(name: string, ok = true): string {
-  const failed = ok ? "" : " failed";
-  switch (name) {
-    case "run_command":
-      return `Ran command${failed}`;
-    case "file_search":
-      return `Searched workspace${failed}`;
-    case "glob":
-      return `Scanned files${failed}`;
-    case "list_dir":
-      return `Listed directory${failed}`;
-    case "read_file":
-    case "read_resource":
-      return `Read file${failed}`;
-    case "codegraph_explore":
-      return `Explored context${failed}`;
-    case "codegraph_search":
-      return `Searched semantic index${failed}`;
-    case "codegraph_node":
-      return `Read indexed symbol${failed}`;
-    case "codegraph_callers":
-    case "codegraph_callees":
-    case "codegraph_impact":
-      return `Traced semantic index${failed}`;
-    case "codegraph_files":
-    case "codegraph_status":
-      return `Checked context engine${failed}`;
-    case "write_file":
-      return `Wrote file${failed}`;
-    case "edit_file":
-    case "ast_edit":
-      return `Edited file${failed}`;
-    case "apply_patch":
-      return `Applied patch${failed}`;
-    case "git_status":
-      return `Checked git status${failed}`;
-    case "git_diff":
-    case "git_show":
-      return `Read git data${failed}`;
-    case "todo_write":
-      return `Updated todo${failed}`;
-    case "goal":
-      return `Updated loop${failed}`;
-    case "plan":
-      return `Updated plan${failed}`;
-    case "complete_step":
-      return `Recorded evidence${failed}`;
-    case "web_search":
-      return `Searched web${failed}`;
-    case "web_fetch":
-      return `Fetched URL${failed}`;
-    case "web_open":
-      return `Opened URL${failed}`;
-    default:
-      if (name.includes("skill")) {
-        return `Updated skills${failed}`;
-      }
-      if (name.includes("image") || name.includes("video") || name.includes("vision") || name.includes("audio")) {
-        return `Used Omni${failed}`;
-      }
-      return `Used tool${failed}`;
-  }
 }
 
 function compactToolSummary(summary: string): string {
@@ -8641,22 +8577,49 @@ function selfImproveStatusLines(status: Awaited<ReturnType<typeof optLiteStatus>
   ];
 }
 
-function selfImproveLearnLines(learn: Awaited<ReturnType<typeof optLiteLearn>>): string[] {
+export function selfImproveLearnLines(learn: Awaited<ReturnType<typeof optLiteLearn>>): string[] {
   const proposal = learn.proposal;
   const replay = learn.replay;
   const targets = proposal.skill_targets?.map((target) => target.skill_id).join(", ") || proposal.skill_id;
   const warningCount = proposal.normalization_warnings?.length ?? 0;
+  const accepted = replay.status === "accepted";
+  const scoreChange = `${formatOptScore(replay.baseline_score)} -> ${formatOptScore(replay.candidate_score)}`;
   return [
-    `${fg256(48, "•")} learned ${proposal.id}`,
+    `${fg256(accepted ? 48 : 220, "•")} ${accepted ? "skill change ready for review" : "no skill change applied"}`,
+    `${fg256(39, "Proposal")} ${proposal.id} · ${accepted ? "accepted by replay" : "kept as a rejected candidate"}`,
+    `${fg256(39, "Why")} ${selfImproveReplayExplanation(replay)}`,
+    `${fg256(39, "Score")} current ${formatOptScore(replay.baseline_score)} · candidate ${formatOptScore(replay.candidate_score)} · ${scoreChange}`,
+    `${fg256(39, "Checks")} heldout ${replay.gate.heldout_not_regressed ? "not regressed" : "regressed"} · hard failures ${replay.gate.hard_failures}${replay.gate.edit_gate_passed === undefined ? "" : ` · edit syntax ${replay.gate.edit_gate_passed ? "passed" : "blocked"}`}`,
     `${fg256(39, "Source")} ${proposal.proposal_source ?? "deterministic_fallback"}${proposal.agentic_error ? ` · fallback ${proposal.agentic_error}` : ""}`,
     proposal.agentic_run ? `${fg256(39, "Optimizer run")} ${proposal.agentic_run.session_id} · ${proposal.agentic_run.run_id}` : undefined,
-    warningCount ? `${fg256(39, "Normalized")} ${warningCount} proposal shape ${warningCount === 1 ? "issue" : "issues"}; raw model output was preserved in the proposal artifact` : undefined,
+    warningCount ? `${fg256(39, "Format")} fixed ${warningCount} minor proposal shape ${warningCount === 1 ? "issue" : "issues"}; original model output saved with the proposal` : undefined,
     `${fg256(39, "Targets")} ${targets}`,
     `${fg256(39, "Evidence")} sessions ${proposal.evidence.goal_sessions} · verifications ${proposal.evidence.verification_records} · signals ${proposal.evidence.learning_signal_records}`,
-    `${fg256(39, "Replay")} ${replay.id} · ${replay.status} · samples ${replay.sample_count} · ${formatOptScore(replay.baseline_score)} -> ${formatOptScore(replay.candidate_score)}`,
-    `${fg256(39, "Gate")} validation ${replay.gate.validation_improved ? "improved" : "not improved"} · heldout ${replay.gate.heldout_not_regressed ? "not regressed" : "regressed"} · hard failures ${replay.gate.hard_failures}${replay.gate.edit_gate_passed === undefined ? "" : ` · edit gate ${replay.gate.edit_gate_passed ? "passed" : "blocked"}`}`,
-    `${fg256(39, "Next")} ${replay.status === "accepted" ? "review staged skill changes below" : "collect stronger verified loop evidence, then /self-improve learn"}`,
+    `${fg256(39, "Replay")} ${replay.id} · ${replay.sample_count} samples`,
+    `${fg256(39, "Next")} ${accepted ? "review staged skill changes below" : "keep working; run /self-improve learn again after stronger verified evidence"}`,
   ].filter((line): line is string => Boolean(line));
+}
+
+function selfImproveReplayExplanation(replay: Awaited<ReturnType<typeof optLiteLearn>>["replay"]): string {
+  if (replay.status === "accepted") {
+    if (replay.gate.validation_improved) {
+      return "candidate improved validation replay and did not regress heldout samples";
+    }
+    return "candidate passed replay gates";
+  }
+  if (!replay.gate.validation_improved) {
+    return "candidate did not improve validation replay, so it was not offered for adoption";
+  }
+  if (!replay.gate.heldout_not_regressed) {
+    return "candidate regressed heldout replay samples, so it was rejected";
+  }
+  if (replay.gate.hard_failures > 0) {
+    return "candidate introduced hard replay failures, so it was rejected";
+  }
+  if (replay.gate.edit_gate_passed === false) {
+    return "candidate edit failed validation, so it was rejected";
+  }
+  return "candidate failed the replay gate, so it was not offered for adoption";
 }
 
 function selfImproveAdoptPreviewLines(preview: Awaited<ReturnType<typeof optLiteAdoptPreview>>): string[] {

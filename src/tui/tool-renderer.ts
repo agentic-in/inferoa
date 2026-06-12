@@ -20,6 +20,8 @@ export interface ToolRenderOptions {
   collapseCompact?: boolean;
 }
 
+type ToolActionContext = "card" | "activity";
+
 const COMPACT_TOOL_FOLD_THRESHOLD = 5;
 const HIDDEN_FAILED_TOOL_TRACE_TOOLS = new Set(["read_file", "read_resource", "write_file"]);
 const COMPACT_SUCCESS_TOOLS = new Set([
@@ -78,7 +80,7 @@ function renderToolGroup(group: ToolEventGroup, store: SessionStore): string[] {
   const width = terminalWidth();
   const action = toolGroupAction(group);
   const detail = toolGroupDetail(group, summary);
-  const separator = detail ? (group.name === "run_command" ? " " : ` ${fg256(244, "·")} `) : "";
+  const separator = detail ? ` ${fg256(244, "·")} ` : "";
   const title = `  ${marker} ${fg256(result?.ok === false ? 203 : 255, ansi.bold + action + ansi.reset)}${separator}${fg256(result?.ok === false ? 203 : 250, truncateToWidth(detail, Math.max(20, width - visibleWidth(action) - 12)))}`;
   const body = renderToolBody(group, store);
   if (!shouldExpandToolGroup(group, body)) {
@@ -193,8 +195,15 @@ function renderToolBody(group: ToolEventGroup, store: SessionStore): string[] {
     case "init_experiment":
     case "run_experiment":
     case "log_experiment":
+    case "update_experiment":
     case "update_notes":
       lines.push(...renderAutoresearchTool(group.name, data));
+      break;
+    case "session_note":
+      lines.push(...renderTextPreview(stringField(data.note) ?? stringField(group.args.note) ?? ""));
+      break;
+    case "subagent":
+      lines.push(...renderSubagentTool(data));
       break;
     case "complete_step":
       lines.push(`${fg256(39, "step")} ${stringField(data.step_id) ?? stringField(group.args.step_id) ?? "unknown"}`);
@@ -838,6 +847,16 @@ function planStatusField(value: unknown): "drafting" | "paused" | "approved" | "
 }
 
 function renderAutoresearchTool(name: string, data: JsonObject): string[] {
+  if (name === "update_experiment") {
+    const experiment = objectField(data.experiment);
+    const progress = objectField(data.progress);
+    return [
+      `${fg256(39, "experiment")} ${stringField(experiment.name) ?? "unknown"}`,
+      `${fg256(39, "status")} ${stringField(experiment.status) ?? "unknown"}`,
+      ...renderAutoresearchProgressLines(progress),
+      ...(stringField(experiment.notes) ? renderIndentedPreview(stringField(experiment.notes) ?? "", 4, "notes") : []),
+    ];
+  }
   if (name === "log_experiment") {
     const result = objectField(data.result);
     const progress = objectField(data.progress);
@@ -897,6 +916,18 @@ function renderAutoresearchTool(name: string, data: JsonObject): string[] {
   }
   const notes = stringField(data.notes);
   return notes ? renderIndentedPreview(notes, 6, "notes") : [fg256(243, "Research notes updated.")];
+}
+
+function renderSubagentTool(data: JsonObject): string[] {
+  return [
+    `${fg256(39, "subagent")} ${stringField(data.subagent_id) ?? "unknown"}`,
+    `${fg256(39, "session")} ${stringField(data.child_session_id) ?? "unknown"}`,
+    `${fg256(39, "job")} ${stringField(data.job_id) ?? "unknown"}`,
+    `${fg256(39, "run")} ${stringField(data.run_id) ?? "unknown"}`,
+    ...(numberField(data.tool_rounds) === undefined ? [] : [`${fg256(39, "tool rounds")} ${numberField(data.tool_rounds)}`]),
+    ...(numberField(data.tool_calls) === undefined ? [] : [`${fg256(39, "tool calls")} ${numberField(data.tool_calls)}`]),
+    ...(stringField(data.content) ? renderIndentedPreview(stringField(data.content) ?? "", 6, "result") : []),
+  ];
 }
 
 function renderAutoresearchProgressLines(progress: JsonObject): string[] {
@@ -1093,13 +1124,11 @@ function resourceText(uri: string | undefined, store: SessionStore): string | un
   return store.readResource(uri)?.content;
 }
 
-function toolGroupAction(group: ToolEventGroup): string {
-  const name = group.name;
-  const ok = group.result?.ok;
+export function toolTraceAction(name: string, ok: boolean | undefined = true, context: ToolActionContext = "activity"): string {
   const failed = ok === false ? " failed" : "";
   switch (name) {
     case "run_command":
-      return `Ran${failed}`;
+      return context === "card" && ok === false ? "Command failed" : `Ran command${failed}`;
     case "list_dir":
       return `Listed directory${failed}`;
     case "glob":
@@ -1107,21 +1136,36 @@ function toolGroupAction(group: ToolEventGroup): string {
     case "file_search":
       return `Searched workspace${failed}`;
     case "read_file":
-    case "read_resource":
       return `Read file${failed}`;
+    case "read_resource":
+      return `Read resource${failed}`;
+    case "export_resource":
+      return `Exported resource${failed}`;
+    case "read_process":
+      return `Read process${failed}`;
+    case "write_process":
+      return `Wrote process${failed}`;
+    case "stop_process":
+      return `Stopped process${failed}`;
+    case "ast_grep":
+      return `Searched AST${failed}`;
     case "codegraph_explore":
       return `Explored context${failed}`;
     case "codegraph_search":
-      return `Searched semantic index${failed}`;
+      return `Searched context index${failed}`;
     case "codegraph_node":
-      return `Read indexed symbol${failed}`;
+      return `Read context symbol${failed}`;
     case "codegraph_callers":
     case "codegraph_callees":
     case "codegraph_impact":
-      return `Traced semantic index${failed}`;
+      return `Traced context index${failed}`;
     case "codegraph_files":
     case "codegraph_status":
-      return `Checked context engine${failed}`;
+      return `Checked context index${failed}`;
+    case "lsp":
+      return `Queried language server${failed}`;
+    case "lsp_rename":
+      return `Renamed symbol${failed}`;
     case "write_file":
       return `Wrote file${failed}`;
     case "edit_file":
@@ -1139,15 +1183,21 @@ function toolGroupAction(group: ToolEventGroup): string {
     case "clarify":
       return ok === false ? "Question failed" : "Questions answered";
     case "goal":
-      return goalToolAction(group, failed);
+      return `Updated loop${failed}`;
     case "plan":
       return `Updated plan${failed}`;
+    case "session_note":
+      return `Recorded session note${failed}`;
+    case "subagent":
+      return `Ran subagent${failed}`;
     case "init_experiment":
       return `Initialized experiment${failed}`;
     case "run_experiment":
       return `Ran experiment${failed}`;
     case "log_experiment":
       return `Logged experiment${failed}`;
+    case "update_experiment":
+      return `Updated experiment${failed}`;
     case "update_notes":
       return `Updated notes${failed}`;
     case "complete_step":
@@ -1158,12 +1208,46 @@ function toolGroupAction(group: ToolEventGroup): string {
       return `Fetched URL${failed}`;
     case "web_open":
       return `Opened URL${failed}`;
+    case "skill_list":
+      return `Listed skills${failed}`;
+    case "skill_read":
+      return `Read skill${failed}`;
+    case "skill_enable":
+      return `Enabled skills${failed}`;
+    case "skill_disable":
+      return `Disabled skills${failed}`;
+    case "image_generation":
+      return `Generated image${failed}`;
+    case "image_edit":
+      return `Edited image${failed}`;
+    case "vision_understanding":
+      return `Analyzed image${failed}`;
+    case "video_generation":
+      return `Generated video${failed}`;
+    case "video_understanding":
+      return `Analyzed video${failed}`;
+    case "audio_generation":
+      return `Generated audio${failed}`;
+    case "audio_understanding":
+      return `Analyzed audio${failed}`;
+    case "speech_generation":
+      return `Generated speech${failed}`;
+    case "speech_voices":
+      return `Listed voices${failed}`;
     default:
-      if (name.includes("skill")) return `Updated skills${failed}`;
+      if (name.includes("skill")) return `Used skill tool${failed}`;
       if (name.includes("process")) return `Managed process${failed}`;
-      if (name.includes("image") || name.includes("video") || name.includes("vision") || name.includes("audio")) return `Used Omni${failed}`;
+      if (name.includes("image") || name.includes("video") || name.includes("vision") || name.includes("audio") || name.includes("speech")) return `Used Omni${failed}`;
       return ok === undefined ? `Running ${name}` : `Used tool${failed}`;
   }
+}
+
+function toolGroupAction(group: ToolEventGroup): string {
+  if (group.name === "goal") {
+    const failed = group.result?.ok === false ? " failed" : "";
+    return goalToolAction(group, failed);
+  }
+  return toolTraceAction(group.name, group.result?.ok, "card");
 }
 
 function toolGroupDetail(group: ToolEventGroup, summary: string): string {
@@ -1187,8 +1271,15 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
     case "export_resource":
       return stringField(data.path) ?? stringField(group.args.uri) ?? compactSummary(summary);
     case "read_file":
+      return stringField(group.args.path) ?? stringField(data.path) ?? compactSummary(summary);
     case "read_resource":
-      return stringField(group.args.path) ?? stringField(group.args.uri) ?? compactSummary(summary);
+      return stringField(group.args.uri) ?? stringField(data.uri) ?? compactSummary(summary);
+    case "read_process":
+    case "write_process":
+    case "stop_process":
+      return stringField(data.process_id) ?? stringField(group.args.process_id) ?? compactSummary(summary);
+    case "ast_grep":
+      return stringField(group.args.selector) ?? stringField(group.args.query) ?? compactSummary(summary);
     case "codegraph_explore":
       return stringField(group.args.query) ?? compactSummary(summary);
     case "codegraph_search":
@@ -1202,6 +1293,10 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
       return stringField(group.args.path) ?? stringField(group.args.pattern) ?? compactSummary(summary);
     case "codegraph_status":
       return compactSummary(summary);
+    case "lsp":
+      return [stringField(group.args.action), stringField(group.args.path)].filter(Boolean).join(" · ") || compactSummary(summary);
+    case "lsp_rename":
+      return [stringField(group.args.symbol) ?? stringField(group.args.query), stringField(group.args.new_name), stringField(group.args.path)].filter(Boolean).join(" · ") || compactSummary(summary);
     case "write_file":
     case "edit_file":
     case "ast_edit":
@@ -1220,6 +1315,10 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
       const plan = objectField(data.plan);
       return [stringField(plan.objective), stringField(plan.status)].filter(Boolean).join(" · ") || compactSummary(summary);
     }
+    case "session_note":
+      return stringField(data.note) ?? stringField(group.args.note) ?? compactSummary(summary);
+    case "subagent":
+      return stringField(data.child_session_id) ?? stringField(data.session_id) ?? compactSummary(summary);
     case "log_experiment": {
       const result = objectField(data.result);
       const run = numberField(result.run_id);
@@ -1250,14 +1349,41 @@ function toolGroupDetail(group: ToolEventGroup, summary: string): string {
     }
     case "update_notes":
       return compactSummary(summary);
+    case "update_experiment": {
+      const experiment = objectField(data.experiment);
+      return [stringField(experiment.name), stringField(experiment.status)].filter(Boolean).join(" · ") || compactSummary(summary);
+    }
     case "web_search":
       return stringField(group.args.query) ?? compactSummary(summary);
     case "web_fetch":
     case "web_open":
       return stringField(group.args.url) ?? stringField(data.final_url) ?? compactSummary(summary);
+    case "skill_list": {
+      const skills = Array.isArray(data.skills) ? data.skills : undefined;
+      return skills ? formatCount(skills.length, "skill") : compactSummary(summary);
+    }
+    case "skill_read":
+      return stringField(data.id) ?? stringField(group.args.id) ?? compactSummary(summary);
+    case "skill_enable":
+    case "skill_disable":
+      return compactSummary(summary);
+    case "image_generation":
+    case "image_edit":
+    case "vision_understanding":
+    case "video_generation":
+    case "video_understanding":
+    case "audio_generation":
+    case "audio_understanding":
+    case "speech_generation":
+    case "speech_voices":
+      return stringField(data.resource_uri) ?? stringField(data.status) ?? compactSummary(summary);
     default:
       return compactSummary(summary);
   }
+}
+
+function formatCount(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
 }
 
 function compactSummary(summary: string): string {

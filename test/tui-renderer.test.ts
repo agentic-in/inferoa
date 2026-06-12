@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { SessionStore } from "../src/session/store.js";
-import { renderToolCards } from "../src/tui/tool-renderer.js";
+import { renderToolCards, toolTraceAction } from "../src/tui/tool-renderer.js";
 import { stripAnsi } from "../src/tui/ansi.js";
 import type { SessionEvent, WorkspaceIdentity } from "../src/types.js";
 
@@ -84,8 +84,7 @@ test("TUI tool renderer formats shell, diff, and todo cards", async () => {
     ];
     const output = renderToolCards(events, store).join("\n");
     const plain = stripAnsi(output);
-    assert.match(plain, /Ran printf ok · exited 0/);
-    assert.doesNotMatch(plain, /Ran command/);
+    assert.match(plain, /Ran command · printf ok · exited 0/);
     assert.doesNotMatch(plain, /\bcmd printf ok\b/);
     assert.doesNotMatch(plain, /\bcwd \./);
     assert.doesNotMatch(plain, /\n\s*exit 0\b/);
@@ -100,6 +99,86 @@ test("TUI tool renderer formats shell, diff, and todo cards", async () => {
     assert.match(plain, /2\s+\s+-\s+│ ··value = "old"/);
     assert.match(plain, /\s+2\s+\+\s+│ ··value = "new"/);
     assert.match(plain, /\s+1\s+\+\s+│ created/);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TUI tool action labels cover built-in tools with concrete wording", () => {
+  const labels = new Map([
+    ["ast_grep", "Searched AST"],
+    ["audio_generation", "Generated audio"],
+    ["audio_understanding", "Analyzed audio"],
+    ["export_resource", "Exported resource"],
+    ["image_edit", "Edited image"],
+    ["image_generation", "Generated image"],
+    ["lsp", "Queried language server"],
+    ["lsp_rename", "Renamed symbol"],
+    ["read_process", "Read process"],
+    ["read_resource", "Read resource"],
+    ["session_note", "Recorded session note"],
+    ["speech_generation", "Generated speech"],
+    ["speech_voices", "Listed voices"],
+    ["stop_process", "Stopped process"],
+    ["subagent", "Ran subagent"],
+    ["update_experiment", "Updated experiment"],
+    ["video_generation", "Generated video"],
+    ["video_understanding", "Analyzed video"],
+    ["vision_understanding", "Analyzed image"],
+    ["write_process", "Wrote process"],
+  ]);
+  for (const [tool, expected] of labels) {
+    assert.equal(toolTraceAction(tool), expected);
+    assert.doesNotMatch(toolTraceAction(tool), /Used tool|Updated skills|Used Omni/);
+  }
+  assert.equal(toolTraceAction("run_command", false, "card"), "Command failed");
+});
+
+test("TUI tool renderer labels skill list and read without update wording", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-tui-renderer-skills-"));
+  const store = await SessionStore.open(dir);
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_tui_renderer_skills", root: dir, alias: "renderer-skills" };
+    const session = store.createSession(workspace, "renderer skills");
+    const events: SessionEvent[] = [
+      {
+        session_id: session.session_id,
+        run_id: "run",
+        type: "tool.result",
+        data: {
+          tool_call_id: "skill-list-one",
+          tool_name: "skill_list",
+          result: { ok: true, summary: "Listed 1 skill", data: { skills: [{ id: "workspace-learned-loop-policy" }] } },
+        },
+      },
+      {
+        session_id: session.session_id,
+        run_id: "run",
+        type: "tool.result",
+        data: {
+          tool_call_id: "skill-list-two",
+          tool_name: "skill_list",
+          result: { ok: true, summary: "Listed 2 skills", data: { skills: [{ id: "workspace-learned-loop-policy" }, { id: "coding-workflow" }] } },
+        },
+      },
+      {
+        session_id: session.session_id,
+        run_id: "run",
+        type: "tool.result",
+        data: {
+          tool_call_id: "skill-read",
+          tool_name: "skill_read",
+          result: { ok: true, summary: "Read skill coding-workflow", data: { id: "coding-workflow" } },
+        },
+      },
+    ];
+
+    const plain = stripAnsi(renderToolCards(events, store, { collapseCompact: false }).join("\n"));
+    assert.match(plain, /Listed skills · 1 skill/);
+    assert.match(plain, /Listed skills · 2 skills/);
+    assert.match(plain, /Read skill · coding-workflow/);
+    assert.doesNotMatch(plain, /Updated skills/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -191,7 +270,7 @@ test("TUI tool renderer hides failed basic file read, write, and list cards", as
     assert.doesNotMatch(plain, /blocked\.md/);
     assert.doesNotMatch(plain, /\/missing/);
     assert.match(plain, /Read file .*visible\.md/);
-    assert.match(plain, /Ran failed false · exited 1/);
+    assert.match(plain, /Command failed · false · exited 1/);
     assert.doesNotMatch(plain, /\bcmd false\b/);
     assert.doesNotMatch(plain, /No display data/);
   } finally {

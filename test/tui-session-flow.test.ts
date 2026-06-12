@@ -6,7 +6,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { DEFAULT_CONFIG } from "../src/config/defaults.js";
 import { SessionStore } from "../src/session/store.js";
-import { TuiApp } from "../src/tui/app.js";
+import { selfImproveLearnLines, TuiApp } from "../src/tui/app.js";
 import { buildGoalWorkPrompt } from "../src/goals/supervisor-prompts.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { stripAnsi } from "../src/tui/ansi.js";
@@ -20,7 +20,7 @@ import {
   stageGoalReviewDecision,
   writeGoalState,
 } from "../src/goals/state.js";
-import { optLitePropose } from "../src/opt/opt-lite.js";
+import { optLitePropose, type OptLiteLearnReport, type OptReplayStatus } from "../src/opt/opt-lite.js";
 
 test("clear starts a clean default session without prompting or rendering creation details", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "inferoa-clear-session-"));
@@ -963,6 +963,29 @@ test("self-improve status renders a compact transcript without command checklist
     store.close();
     await rm(stateDir, { recursive: true, force: true });
   }
+});
+
+test("self-improve learn result explains rejected candidates without success wording", () => {
+  const plain = stripAnsi(selfImproveLearnLines(fakeSelfImproveLearnReport("rejected")).join("\n"));
+
+  assert.match(plain, /no skill change applied/);
+  assert.match(plain, /Proposal self_improve_test · kept as a rejected candidate/);
+  assert.match(plain, /candidate did not improve validation replay, so it was not offered for adoption/);
+  assert.match(plain, /Score current 0\.00 · candidate 0\.00 · 0\.00 -> 0\.00/);
+  assert.match(plain, /Checks heldout not regressed · hard failures 0 · edit syntax passed/);
+  assert.match(plain, /Next keep working; run \/self-improve learn again after stronger verified evidence/);
+  assert.doesNotMatch(plain, /\blearned\b/);
+  assert.doesNotMatch(plain, /\bGate\b/);
+});
+
+test("self-improve learn result marks accepted candidates as reviewable skill changes", () => {
+  const plain = stripAnsi(selfImproveLearnLines(fakeSelfImproveLearnReport("accepted")).join("\n"));
+
+  assert.match(plain, /skill change ready for review/);
+  assert.match(plain, /Proposal self_improve_test · accepted by replay/);
+  assert.match(plain, /candidate improved validation replay and did not regress heldout samples/);
+  assert.match(plain, /Score current 0\.30 · candidate 0\.70 · 0\.30 -> 0\.70/);
+  assert.match(plain, /Next review staged skill changes below/);
 });
 
 test("self-improve from welcome keeps the chat banner before command output", async () => {
@@ -2049,3 +2072,75 @@ test("inline panels patch stable-height redraws without clearing the region", as
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+function fakeSelfImproveLearnReport(status: OptReplayStatus): OptLiteLearnReport {
+  const accepted = status === "accepted";
+  return {
+    kind: "learn",
+    proposal: {
+      id: "self_improve_test",
+      status: "staged",
+      created_at: "2026-06-12T00:00:00.000Z",
+      skill_id: "inferoa-workspace-skill",
+      skill_targets: [
+        {
+          target: "workspace_skill",
+          skill_id: "inferoa-workspace-skill",
+          skill_name: "Inferoa Workspace Skill",
+          staged_skill_path: "/tmp/proposed.workspace.SKILL.md",
+          edit_count: 1,
+          body: "# Inferoa Workspace Skill\n",
+          edits: [
+            {
+              target: "workspace_skill",
+              op: "add",
+              section: "Verification",
+              content: "Run the repo test command before closing loop work.",
+              rationale: "Verified loop evidence cited repo tests.",
+              source_event_indexes: [0],
+            },
+          ],
+        },
+      ],
+      proposal_source: "agentic",
+      agentic_run: {
+        session_id: "s_optimizer",
+        run_id: "run_optimizer",
+        request_class: "background",
+      },
+      normalization_warnings: ["normalized shorthand edit shape"],
+      evidence: {
+        goal_sessions: 5,
+        verification_records: 5,
+        human_feedback_records: 0,
+        learning_signal_records: 5,
+        skill_snapshots: 0,
+      },
+      source_sessions: [],
+      source_events: [],
+      skill_body: "# Inferoa Workspace Skill\n",
+      staged_skill_path: "/tmp/proposed.workspace.SKILL.md",
+    },
+    replay: {
+      id: "replay_test",
+      proposal_id: "self_improve_test",
+      status,
+      created_at: "2026-06-12T00:00:00.000Z",
+      sample_count: 5,
+      baseline_score: accepted ? 0.3 : 0,
+      candidate_score: accepted ? 0.7 : 0,
+      report_path: "/tmp/replay_test.json",
+      gate: {
+        validation_improved: accepted,
+        heldout_not_regressed: true,
+        hard_failures: 0,
+        edit_gate_passed: true,
+      },
+      splits: {
+        train: [],
+        validation: [],
+        heldout: [],
+      },
+    },
+  };
+}

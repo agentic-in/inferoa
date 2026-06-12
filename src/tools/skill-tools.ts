@@ -37,7 +37,7 @@ export async function skillList(args: JsonObject, context: ToolExecutionContext)
       required_tools: skill.required_tools,
       activation: skill.activation,
     }));
-  return ok(`Listed ${filtered.length} skills`, { skills: filtered });
+  return ok(`Listed ${formatSkillCount(filtered.length)}`, { skills: filtered });
 }
 
 export async function skillRead(args: JsonObject, context: ToolExecutionContext): Promise<ToolResult> {
@@ -122,7 +122,7 @@ export async function skillEnable(args: JsonObject, context: ToolExecutionContex
   }
   context.config.skills.enabled = [...enabled].sort();
   const target = await saveUserConfig(context.config);
-  return ok(`Enabled ${resolved.ids.length} skills`, {
+  return ok(`Enabled ${formatSkillCount(resolved.ids.length)}`, {
     enabled: context.config.skills.enabled,
     config_path: target,
   });
@@ -141,12 +141,16 @@ export async function skillDisable(args: JsonObject, context: ToolExecutionConte
   }
   context.config.skills.enabled = [...enabled].sort();
   const target = await saveUserConfig(context.config);
-  return ok(`Disabled ${resolved.ids.length} skills`, {
+  return ok(`Disabled ${formatSkillCount(resolved.ids.length)}`, {
     disabled: resolved.ids,
     missing: resolved.missing,
     enabled: context.config.skills.enabled,
     config_path: target,
   });
+}
+
+function formatSkillCount(count: number): string {
+  return `${count} ${count === 1 ? "skill" : "skills"}`;
 }
 
 function parseSkillIds(args: JsonObject): string[] {
