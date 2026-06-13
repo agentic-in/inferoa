@@ -7068,14 +7068,14 @@ function renderGoalSetupSummaryLines(wizard: GoalSetupWizardContext | undefined,
     ["preference", wizard.selections?.preference],
     ["runtime", wizard.selections?.runtime],
     ["attempts", wizard.selections?.attempts],
-    ["hil", wizard.selections?.hil],
+    ["human", wizard.selections?.hil],
   ];
-  const lines = rows
-    .filter((row): row is [string, string] => Boolean(row[1]))
-    .map(([label, value]) => {
-      const safeValue = truncateToWidth(oneLine(value), Math.max(12, width - 9));
-      return `${fg256(244, padRight(label, 5))} ${fg256(250, safeValue)}`;
-    });
+  const visibleRows = rows.filter((row): row is [string, string] => Boolean(row[1]));
+  const labelWidth = Math.max(5, ...visibleRows.map(([label]) => visibleWidth(label)));
+  const lines = visibleRows.map(([label, value]) => {
+    const safeValue = truncateToWidth(oneLine(value), Math.max(12, width - labelWidth - 1));
+    return `${fg256(244, padRight(label, labelWidth))} ${fg256(250, safeValue)}`;
+  });
   return lines.length ? ["", ...lines] : [];
 }
 

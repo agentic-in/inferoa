@@ -941,48 +941,24 @@ export function renderLoopContext(state: GoalState | undefined): string | undefi
   if (goal.preference === "replay") {
     return undefined;
   }
-  const budgetLine =
-    goal.token_budget === undefined
-      ? "token budget: none"
-      : `token budget: ${goal.token_budget}; tokens used: ${goal.tokens_used}; remaining tokens: ${Math.max(0, goal.token_budget - goal.tokens_used)}`;
-  const loopLine = `tool loops used: ${goal.tool_rounds_used}; tool calls used: ${goal.tool_calls_used}`;
-  const statusLine =
-    goal.status === "budget-limited"
-      ? "status: budget-limited; finish with a concise final answer or complete the loop when the objective is actually done."
-      : `status: ${goal.status}`;
   return [
     "A loop objective is active for this session.",
     renderTrustedObjective(goal.objective),
-    goal.owner ? `loop owner: ${escapeXmlText(goal.owner)}` : undefined,
-    goal.review_owner ? `loop review owner: ${escapeXmlText(goal.review_owner)}` : undefined,
     `preference: ${loopPreferenceLabel(goal.preference)}`,
     `runtime: ${renderLoopRuntimePolicy(goal.runtime_policy)}`,
     renderLoopRuntimeProgress(goal),
-    `review policy: ${goal.hil_policy}`,
-    statusLine,
-    budgetLine,
-    loopLine,
-    `time used seconds: ${goal.time_used_seconds}`,
-    `time used ms: ${goalDurationMs(goal)}`,
-    `loop task: ${goal.horizon_generation}`,
-    renderGoalVerifierPolicy(goal.verifier_policy),
-    renderDefaultVerifierPolicy(),
-    renderGoalLedger(goal.ledger),
-    renderPendingReviewDecision(goal.pending_review_decision),
+    renderLoopPlanContext(goal),
     goal.planning ? renderGoalPlanning(goal.planning) : "Internal loop task plan: not decomposed yet.",
-    renderLatestReflection(goal),
     goal.plan ? renderApprovedPlan(goal.plan, Boolean(goal.planning)) : undefined,
-    goal.planning
-      ? "Keep the internal loop task plan current with goal op=update_step as findings, edits, and verification change."
-      : "For broad or multi-step work, call goal op=decompose with concrete steps before risky edits.",
+    renderGoalLedger(goal.ledger),
     renderLoopCompletionGates(goal),
-    "Work on the objective until it is genuinely handled. Use the goal tool to inspect and update current loop work; user-facing loop creation, review, resume, completion, and drop are handled by /loop.",
-    "When the current loop task appears exhausted, a tool-enabled internal decision run must decide whether more loop task, verification, decomposition, or polish work with substantive impact on the original objective remains before completion.",
-    "When the loop appears complete, record goal op=reflect decision=done with concrete verification evidence so the loop supervisor can close or request more work.",
-    "Do not mark the loop complete merely because the current checklist is empty, the turn is ending, or the budget is low.",
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
+}
+
+function renderLoopPlanContext(goal: GoalRecord): string {
+  return `loop task: ${goal.horizon_generation}`;
 }
 
 export function loopPreferenceLabel(preference: LoopPreference): "Deliver" | "Discover" | "Replay" {

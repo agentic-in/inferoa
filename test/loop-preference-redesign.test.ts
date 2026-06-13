@@ -96,18 +96,20 @@ test("loop prompt builders expose execution and decision contracts", () => {
     createGoalState({ objective: "Ship a hard feature" } as never).goal,
   );
   assert.match(deliverExecution, /Execution turn/i);
-  assert.match(deliverExecution, /multi-layer plan/i);
-  assert.match(deliverExecution, /high-value frontier/i);
-  assert.match(deliverExecution, /verification/i);
+  assert.match(deliverExecution, /highest-leverage next action/i);
+  assert.match(deliverExecution, /top-level objective/i);
+  assert.match(deliverExecution, /Verify/i);
+  assert.match(deliverExecution, /loop step, ledger, or decomposition/i);
   assert.doesNotMatch(deliverExecution, /infer the loop approach|set_strategy|focus|timebox/i);
 
   const decision = (buildDecision as (goal: unknown) => string)(
     createGoalState({ objective: "Ship a hard feature", runtime_policy: { mode: "at_least", min_duration_ms: 86_400_000 } } as never).goal,
   );
   assert.match(decision, /Decision turn/i);
-  assert.match(decision, /premature completion/i);
-  assert.match(decision, /At least runtime/i);
-  assert.match(decision, /expand \/ done \/ blocked/i);
+  assert.match(decision, /Independently judge/i);
+  assert.match(decision, /At least runtime is pending/i);
+  assert.match(decision, /decision=expand, done, or blocked/i);
+  assert.match(decision, /never use bare expand/i);
   assert.doesNotMatch(decision, /Do not optimize endlessly/i);
 });
 

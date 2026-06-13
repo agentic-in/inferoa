@@ -68,28 +68,18 @@ test("goal decision prompt treats completed plans as a hypothesis, not a boundar
   const prompt = buildGoalReflectionPrompt("Ship reliable goal mode");
 
   assert.match(prompt, /Decision turn/i);
-  assert.match(prompt, /Step back/i);
-  assert.match(prompt, /Use current evidence first/i);
-  assert.match(prompt, /Inspect only narrowly missing evidence/i);
-  assert.match(prompt, /current plan as a hypothesis/i);
-  assert.match(prompt, /not as the boundary/i);
-  assert.match(prompt, /best-effort/i);
-  assert.match(prompt, /as complete, polished, and semantically faithful/i);
-  assert.match(prompt, /Generate competing next-step hypotheses/i);
-  assert.match(prompt, /durable frontier/i);
-  assert.match(prompt, /work surface/i);
-  assert.match(prompt, /local convergence/i);
-  assert.match(prompt, /deferred scope/i);
-  assert.match(prompt, /substantive impact on the original objective/i);
-  assert.match(prompt, /otherwise choose decision=done/i);
+  assert.match(prompt, /Independently judge whether to expand, complete, or block/i);
+  assert.match(prompt, /inspect narrowly only if missing evidence can change the decision/i);
+  assert.match(prompt, /goal op=reflect exactly once/i);
+  assert.match(prompt, /completion gates are satisfied/i);
+  assert.match(prompt, /no material frontier remains/i);
+  assert.match(prompt, /verification is weak/i);
+  assert.match(prompt, /local slice/i);
   assert.doesNotMatch(prompt, /read-only/i);
   assert.doesNotMatch(prompt, /Do not edit files/i);
   assert.doesNotMatch(prompt, /audit/i);
-  assert.doesNotMatch(prompt, /material/i);
+  assert.doesNotMatch(prompt, /Do not perform implementation work/i);
   assert.doesNotMatch(prompt, /Do not optimize endlessly/i);
-  assert.match(prompt, /Do not call goal op=complete/i);
-  assert.match(prompt, /Do not call goal op=decompose/i);
-  assert.match(prompt, /goal op=reflect exactly once/i);
   assert.doesNotMatch(prompt, /decision=continue/i);
 });
 
@@ -97,14 +87,14 @@ test("deliver work prompt seeds a general frontier during bootstrap", () => {
   const prompt = buildGoalWorkPrompt("Improve a project end to end");
 
   assert.match(prompt, /Deliver loop/i);
-  assert.match(prompt, /map the relevant work surfaces/i);
-  assert.match(prompt, /rank the high-value frontier by impact, uncertainty, and risk/i);
-  assert.match(prompt, /durable task topology/i);
-  assert.match(prompt, /code areas, user paths, APIs, documents, tests, design options, data flows, verification gaps/i);
-  assert.match(prompt, /local progress with global completion/i);
-  assert.match(prompt, /candidate ledger/i);
+  assert.match(prompt, /highest-leverage next action/i);
+  assert.match(prompt, /top-level objective/i);
+  assert.match(prompt, /strongest practical evidence/i);
+  assert.match(prompt, /update the loop step, ledger, or decomposition/i);
+  assert.match(prompt, /next execution slice/i);
   assert.doesNotMatch(prompt, /bug hunting/i);
   assert.doesNotMatch(prompt, /audit/i);
+  assert.doesNotMatch(prompt, /each turn/i);
 });
 
 test("goal creation starts with a visible Deliver bootstrap and no strategy fields", () => {
@@ -204,7 +194,9 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
     assert.doesNotMatch(system, /<goal.mode>/);
     const goalContext = findContextMessage(context.messages, "<goal.mode>");
     assert.match(goalContext, /Ship &lt;fast&gt; mode/);
-    assert.match(goalContext, /token budget: 200/);
+    assert.match(goalContext, /preference: Deliver/);
+    assert.match(goalContext, /Completion gates:/);
+    assert.doesNotMatch(goalContext, /token budget: 200/);
 
     const reflected = await registry.call(
       {
@@ -238,7 +230,7 @@ test("goal tool persists state and PromptBuilder injects active goal context", a
   }
 });
 
-test("goal owner is explicit state and appears in goal prompt context", async () => {
+test("goal owner is explicit state without adding owner noise to loop context", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-owner-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
@@ -265,8 +257,9 @@ test("goal owner is explicit state and appears in goal prompt context", async ()
       "continue",
       CORE_TOOL_DEFINITIONS,
     );
-    assert.match(findContextMessage(context.messages, "<goal.mode>"), /loop owner: alice/);
-    assert.match(findContextMessage(context.messages, "<goal.mode>"), /loop review owner: carol/);
+    const goalContext = findContextMessage(context.messages, "<goal.mode>");
+    assert.doesNotMatch(goalContext, /loop owner: alice/);
+    assert.doesNotMatch(goalContext, /loop review owner: carol/);
 
     const reassigned = await registry.call(
       { id: "goal_owner_set", name: "goal", arguments: { op: "set_owner", owner: "bob" } },
@@ -1760,7 +1753,7 @@ test("goal completion force cannot bypass unfinished horizon steps", async () =>
   }
 });
 
-test("internal reflection raw history is excluded from prompt replay while reflection summary remains", async () => {
+test("internal reflection raw history is excluded from prompt replay and loop context stays compact", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-reflection-prompt-"));
   const store = await SessionStore.open(path.join(dir, "state"));
   try {
@@ -1808,8 +1801,10 @@ test("internal reflection raw history is excluded from prompt replay while refle
     assert.doesNotMatch(replay, /INTERNAL REFLECTION PROMPT SHOULD NOT REPLAY/);
     assert.doesNotMatch(replay, /INTERNAL REFLECTION MODEL SHOULD NOT REPLAY/);
     assert.doesNotMatch(replay, /INTERNAL TOOL RESULT/);
-    assert.match(findContextMessage(context.messages, "<goal.mode>"), /Reflection summary survives\./);
-    assert.match(findContextMessage(context.messages, "<goal.mode>"), /resource_uri/);
+    const goalContext = findContextMessage(context.messages, "<goal.mode>");
+    assert.doesNotMatch(goalContext, /Reflection summary survives\./);
+    assert.doesNotMatch(goalContext, /resource_uri/);
+    assert.match(goalContext, /Completion gates:/);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });

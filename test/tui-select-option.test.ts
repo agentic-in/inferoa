@@ -134,8 +134,9 @@ test("loop setup choice panel keeps wizard height stable across steps", () => {
   assert.equal(typeLines.length, reviewLines.length);
   assert.match(plainReview, /Preference .*Runtime .*Human in the Loop .*Review/);
   assert.match(plainReview, /goal\s+Improve cache observability/);
-  assert.match(plainReview, /pref…\s+Discover/);
-  assert.match(plainReview, /runt…\s+Auto/);
-  assert.match(plainReview, /hil\s+Review/);
+  assert.match(plainReview, /preference\s+Discover/);
+  assert.match(plainReview, /runtime\s+Auto/);
+  assert.match(plainReview, /human\s+Review/);
+  assert.doesNotMatch(plainReview, /pref…|runt…/);
   assert.match(plainReview, /enter start · esc cancels/);
 });
