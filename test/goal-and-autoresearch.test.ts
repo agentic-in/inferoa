@@ -831,6 +831,69 @@ test("goal tool maintains native decomposition and dynamic step updates", async 
   }
 });
 
+test("goal ledger seeds concrete frontier steps during deliver bootstrap", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-ledger-bootstrap-plan-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_ledger_bootstrap_plan", root: dir, alias: "goal-ledger-bootstrap-plan" };
+    const session = store.createSession(workspace, "goal-ledger-bootstrap-plan");
+    const registry = new ToolRegistry(config(), workspace, store);
+
+    const goal = await registry.call(
+      { id: "glbp_1", name: "goal", arguments: { op: "create", objective: "Fix security issues" } },
+      { session_id: session.session_id, run_id: "run_glbp", control_plane: true },
+    );
+    assert.equal(goal.ok, true, JSON.stringify(goal));
+    for (const stepId of ["read_objective_and_constraints", "map_work_surfaces"]) {
+      const updated = await registry.call(
+        { id: `glbp_${stepId}`, name: "goal", arguments: { op: "update_step", step_id: stepId, status: "completed" } },
+        { session_id: session.session_id, run_id: "run_glbp" },
+      );
+      assert.equal(updated.ok, true, JSON.stringify(updated));
+    }
+
+    const ledger = await registry.call(
+      {
+        id: "glbp_ledger",
+        name: "goal",
+        arguments: {
+          op: "update_ledger",
+          open: [
+            {
+              id: "sql-injection-routerreplay",
+              title: "SQL injection via unvalidated table name",
+              source: "src/routerreplay/postgres.go",
+              value: "high",
+              reason: "tableName is interpolated into SQL.",
+            },
+            {
+              id: "http-server-hardening",
+              title: "No HTTP security headers",
+              source: "src/apiserver/server.go",
+              value: "medium",
+              reason: "server lacks common security headers.",
+            },
+          ],
+        },
+      },
+      { session_id: session.session_id, run_id: "run_glbp" },
+    );
+    assert.equal(ledger.ok, true, JSON.stringify(ledger));
+
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.planning?.summary, "Loop task 0 · Frontier execution");
+    assert.equal(current?.planning?.active_step_id, "sql-injection-routerreplay");
+    assert.deepEqual(current?.planning?.steps.map((step) => [step.id, step.title, step.status]).slice(0, 2), [
+      ["sql-injection-routerreplay", "SQL injection via unvalidated table name", "in_progress"],
+      ["http-server-hardening", "No HTTP security headers", "pending"],
+    ]);
+    assert.match(current?.planning?.steps[0]?.notes ?? "", /src\/routerreplay\/postgres\.go/);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("incomplete goal planning message is bounded for UI and tools", async () => {
   const state = createGoalState({ objective: "Ship bounded completion guard" });
   state.goal.planning = {

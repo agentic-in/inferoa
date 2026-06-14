@@ -30,6 +30,7 @@ import {
   updateGoalLedger,
   validateTokenBudget,
   writeGoalState,
+  type GoalCandidate,
   type GoalCandidateInput,
   type GoalCandidateValue,
   type GoalPlanningStepInput,
@@ -355,15 +356,71 @@ function updateLedger(args: JsonObject, context: ToolExecutionContext): ToolResu
     return fail("goal_closed", `Cannot update a ${state.goal.status} goal.`);
   }
   try {
-    const next = updateGoalLedger(state, {
+    let next = updateGoalLedger(state, {
       open: candidatesArg(args.open),
       done: candidatesArg(args.done),
       rejected: candidatesArg(args.rejected),
     });
+    next = promoteBootstrapFrontierCandidates(next);
     return describeGoal(writeGoalState(context.store, context.session_id, next, context.run_id), "Goal ledger updated", context);
   } catch (error) {
     return failGoalWithState(state, "goal_ledger_update_failed", error instanceof Error ? error.message : String(error));
   }
+}
+
+function promoteBootstrapFrontierCandidates(state: GoalState): GoalState {
+  const planning = state.goal.planning;
+  if (!planning || state.goal.preference !== "deliver" || state.goal.horizon_generation !== 0) {
+    return state;
+  }
+  if (planning.summary !== "Loop task 0 · Deliver bootstrap") {
+    return state;
+  }
+  if (planning.active_step_id !== "seed_frontier_candidates" && planning.active_step_id !== "choose_first_execution_slice") {
+    return state;
+  }
+  const candidates = openFrontierCandidates(state.goal).slice(0, 6);
+  if (!candidates.length) {
+    return state;
+  }
+  const steps: GoalPlanningStepInput[] = candidates.map((candidate, index) => ({
+    id: candidate.id,
+    title: candidate.title,
+    status: index === 0 ? "in_progress" : "pending",
+    notes: candidateNotes(candidate),
+    evidence: candidate.evidence,
+  }));
+  steps.push({
+    id: "verify_frontier_outcomes",
+    title: "Verify frontier outcomes and update ledger",
+    status: "pending",
+    notes: "Run focused verification, move completed or rejected candidates out of open, and leave the next frontier explicit.",
+  });
+  return replaceGoalPlanning(state, {
+    summary: "Loop task 0 · Frontier execution",
+    active_step_id: steps[0]?.id,
+    steps,
+  });
+}
+
+function openFrontierCandidates(goal: GoalRecord): GoalCandidate[] {
+  const candidates = goal.ledger?.open ?? [];
+  return candidates
+    .filter((candidate) => candidate.value === "high" || candidate.value === "medium")
+    .slice()
+    .sort((a, b) => frontierCandidateRank(b.value) - frontierCandidateRank(a.value));
+}
+
+function frontierCandidateRank(value: GoalCandidateValue): number {
+  return value === "high" ? 2 : value === "medium" ? 1 : 0;
+}
+
+function candidateNotes(candidate: GoalCandidate): string {
+  return [
+    `${candidate.value} value frontier.`,
+    candidate.source ? `Source: ${candidate.source}.` : undefined,
+    candidate.reason ? `Reason: ${candidate.reason}.` : undefined,
+  ].filter((part): part is string => Boolean(part)).join(" ");
 }
 
 function recordGoalReflection(args: JsonObject, context: ToolExecutionContext): ToolResult {

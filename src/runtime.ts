@@ -1637,7 +1637,7 @@ function isRetryableModelError(error: unknown): boolean {
   if (status !== undefined) {
     return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
   }
-  return /fetch failed|network|socket|timeout|timed out|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|UND_ERR|terminated/i.test(message);
+  return /fetch failed|network|socket|timeout|timed out|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|UND_ERR|terminated|empty model stream/i.test(message);
 }
 
 function modelErrorStatus(message: string): number | undefined {

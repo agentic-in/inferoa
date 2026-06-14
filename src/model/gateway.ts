@@ -124,6 +124,7 @@ export class ModelGateway {
     const toolCalls = new Map<number, OpenAiToolCallAccumulator>();
     let lastToolCallIndex: number | undefined;
     let lastRaw: JsonObject | undefined;
+    let sawChoice = false;
     const streamWarnings: string[] = [];
 
     while (true) {
@@ -154,6 +155,9 @@ export class ModelGateway {
         responseModel = typeof json.model === "string" ? json.model : responseModel;
         usage = normalizeUsage(json.usage) ?? usage;
         const choices = Array.isArray(json.choices) ? (json.choices as Record<string, unknown>[]) : [];
+        if (choices.length > 0) {
+          sawChoice = true;
+        }
         for (const choice of choices) {
           const delta = choice.delta as Record<string, unknown> | undefined;
           const text = typeof delta?.content === "string" ? delta.content : "";
@@ -194,6 +198,17 @@ export class ModelGateway {
       .sort(([a], [b]) => a - b)
       .map(([, call], index) => parseToolCall(call, index))
       .filter((call): call is ToolCall => Boolean(call));
+
+    if (!content && parsedToolCalls.length === 0) {
+      throw new ModelGatewayError("empty model stream: provider returned no content or tool calls", {
+        http_status: response.status,
+        response_id: responseId,
+        model: responseModel ?? request.model,
+        saw_choice: sawChoice,
+        usage: usage as never,
+        raw: lastRaw as never,
+      });
+    }
 
     return {
       content,

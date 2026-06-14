@@ -813,6 +813,57 @@ test("runtime retries transient provider failures and continues the same run", a
   }
 });
 
+test("runtime retries OpenAI-compatible usage-only empty streams", async () => {
+  let chatCalls = 0;
+  const modelServer = createServer((req, res) => {
+    if (serveEndpointSignal(req.url, res)) {
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      chatCalls += 1;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      if (chatCalls === 1) {
+        writeSse(res, {
+          id: "resp_empty_usage_only",
+          model: "long-horizon-test",
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      } else {
+        writeSse(res, { id: "resp_after_empty_stream", model: "long-horizon-test", choices: [{ delta: { content: "recovered from empty stream" } }] });
+        writeSse(res, { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 5 } });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  modelServer.listen(0, "127.0.0.1");
+  await once(modelServer, "listening");
+  const address = modelServer.address() as AddressInfo;
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-model-empty-stream-retry-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_model_empty_stream_retry", root: dir, alias: "model-empty-stream-retry" };
+    const runtime = new Runtime(retryConfig(`http://127.0.0.1:${address.port}/v1`), workspace, store);
+
+    const result = await runtime.run({ prompt: "answer after an empty model stream" });
+
+    assert.equal(result.content, "recovered from empty stream");
+    assert.equal(chatCalls, 2);
+    const events = store.listEvents(result.session.session_id);
+    const retry = events.find((event) => event.type === "model.request.retry");
+    assert.equal(retry?.data.error, "empty model stream: provider returned no content or tool calls");
+    assert.equal(retry?.data.retryable, undefined);
+    assert.equal(events.filter((event) => event.type === "model.response.settled").length, 1);
+    assert.equal(events.filter((event) => event.type === "model.request.failed").length, 0);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+  }
+});
+
 test("runtime times out a stuck provider request and retries the same run", async () => {
   let chatCalls = 0;
   const modelServer = createServer((req, res) => {
