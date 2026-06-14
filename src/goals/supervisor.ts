@@ -519,63 +519,117 @@ function expandGoalForRuntimeMinimum(state: GoalState, blockedCompletion: string
 function runtimeMinimumPlanningInput(goal: GoalState["goal"], generation: number, blockedCompletion: string): GoalPlanningInput {
   const remaining = loopRuntimeRemainingMs(goal);
   const remainingNote = remaining === undefined ? "runtime minimum is still pending" : `${remaining}ms of minimum runtime remains`;
-  const frontier = nextHorizonCandidates(goal)
-    .slice(0, 3)
-    .map((candidate) => `${candidate.value}: ${candidate.title}`)
-    .join("; ");
+  const candidates = nextHorizonCandidates(goal).slice(0, 3);
+  const frontier = candidates.map((candidate) => `${candidate.value}: ${candidate.title}`).join("; ");
   const frontierNote = frontier ? ` Existing unresolved frontier: ${frontier}.` : "";
   const notes = `${blockedCompletion} Continue because At least runtime is a lower bound, not a stop timer; ${remainingNote}.${frontierNote}`;
-  if (goal.preference === "discover") {
-    return {
-      summary: `Loop task ${generation} · Runtime continuation`,
-      active_step_id: `runtime_reassess_research_${generation}`,
-      steps: [
-        {
-          id: `runtime_reassess_research_${generation}`,
-          title: "Reassess research coverage and unresolved uncertainty",
-          status: "pending",
-          notes,
-        },
-        {
-          id: `runtime_next_experiment_${generation}`,
-          title: "Run or design the next highest-information experiment",
-          status: "pending",
-          notes: "Prefer a benchmark, comparison, ablation, failure analysis, or guardrail that could materially change the conclusion.",
-        },
-        {
-          id: `runtime_compare_alternatives_${generation}`,
-          title: "Explore a distinct hypothesis or evidence surface",
-          status: "pending",
-          notes: "Avoid repeating stale candidates; record competing hypotheses, rejected branches, and remaining evidence gaps in the ledger.",
-        },
-        {
-          id: `runtime_research_decision_ready_${generation}`,
-          title: "Prepare decisive research evidence for the next decision",
-          status: "pending",
-          notes: "Leave metrics, caveats, and the next slice visible before the decision turn.",
-        },
-      ],
-    };
+  if (candidates.length > 0) {
+    return runtimeCandidatePlanningInput(goal, generation, notes, candidates);
   }
+  if (goal.preference === "discover") {
+    return runtimeSurfacePlanningInput(generation, notes, RUNTIME_DISCOVER_SURFACES, "Research continuation");
+  }
+  return runtimeSurfacePlanningInput(generation, notes, RUNTIME_DELIVER_SURFACES, "Runtime continuation");
+}
+
+const RUNTIME_DELIVER_SURFACES = [
+  {
+    label: "external input and auth boundaries",
+    examples: "APIs, request parsing, authz/authn assumptions, SSRF, injection, uploads, and user-controlled identifiers.",
+  },
+  {
+    label: "persistence, file paths, and secret handling",
+    examples: "storage paths, config rollback, credentials, logs, cache keys, database writes, and cleanup paths.",
+  },
+  {
+    label: "network and integration trust boundaries",
+    examples: "proxying, gRPC/TLS, webhooks, operator-runtime integrations, telemetry, and cross-service defaults.",
+  },
+  {
+    label: "deployment, operator, and runtime defaults",
+    examples: "Helm values, Kubernetes security context, OpenShift behavior, environment defaults, and rollback safety.",
+  },
+  {
+    label: "tests, CI, error paths, and regression coverage",
+    examples: "missing regression tests, negative cases, build coverage, lint/AST checks, and failure-mode handling.",
+  },
+];
+
+const RUNTIME_DISCOVER_SURFACES = [
+  {
+    label: "benchmark design and controls",
+    examples: "metrics, baselines, ablations, reproducibility, sampling, and failure criteria.",
+  },
+  {
+    label: "alternative hypotheses",
+    examples: "competing explanations, rejected branches, counterexamples, and uncertainty reduction.",
+  },
+  {
+    label: "evidence quality and generalization",
+    examples: "dataset coverage, edge cases, sensitivity checks, confounders, and robustness checks.",
+  },
+  {
+    label: "implementation implications",
+    examples: "prototype changes, integration paths, guardrails, rollout risk, and measurement hooks.",
+  },
+];
+
+function runtimeCandidatePlanningInput(
+  goal: GoalState["goal"],
+  generation: number,
+  notes: string,
+  candidates: GoalCandidate[],
+): GoalPlanningInput {
+  const verb = goal.preference === "discover" ? "Investigate frontier" : "Resolve frontier";
+  const steps: GoalPlanningInput["steps"] = candidates.map((candidate, index) => ({
+    id: `runtime_frontier_${generation}_${index + 1}_${goalStepSlug(candidate.id || candidate.title)}`,
+    title: `${verb}: ${candidate.title}`,
+    status: "pending",
+    notes: candidateNotes(candidate, index === 0 ? notes : undefined),
+  }));
+  steps.push({
+    id: `runtime_verify_frontier_${generation}`,
+    title: "Verify frontier outcomes and update ledger",
+    status: "pending",
+    notes: "Run targeted checks, reconcile stale open/done/rejected candidates, and leave concrete evidence for the next decision.",
+  });
   return {
-    summary: `Loop task ${generation} · Runtime continuation`,
-    active_step_id: `runtime_reassess_scope_${generation}`,
+    summary: `Loop task ${generation} · Frontier continuation`,
+    active_step_id: steps[0]?.id ?? `runtime_verify_frontier_${generation}`,
+    steps,
+  };
+}
+
+function runtimeSurfacePlanningInput(
+  generation: number,
+  notes: string,
+  surfaces: Array<{ label: string; examples: string }>,
+  summaryKind: string,
+): GoalPlanningInput {
+  const surface = surfaces[Math.abs(generation - 1) % surfaces.length] ?? {
+    label: "workspace risk surface",
+    examples: "uninspected modules, tests, integrations, configuration, and user-visible behavior.",
+  };
+  const surfaceId = goalStepSlug(surface.label);
+  return {
+    summary: `Loop task ${generation} · ${summaryKind}: ${surface.label}`,
+    active_step_id: `runtime_surface_${generation}_${surfaceId}`,
     steps: [
       {
-        id: `runtime_reassess_scope_${generation}`,
-        title: "Reassess delivered scope against the full objective",
+        id: `runtime_surface_${generation}_${surfaceId}`,
+        title: `Audit ${surface.label}`,
         status: "pending",
-        notes,
+        notes: `${notes} Focus surface: ${surface.examples}`,
       },
       {
-        id: `runtime_audit_surfaces_${generation}`,
-        title: "Map and audit distinct remaining work surfaces",
+        id: `runtime_act_${generation}_${surfaceId}`,
+        title: `Act on findings from ${surface.label}`,
         status: "pending",
-        notes: "Look beyond the last local fix: modules, integrations, user-visible behavior, tests, docs, configuration, rollback, and omitted paths.",
+        notes: "Implement, document, reject with evidence, or add ledger candidates for concrete findings from this surface.",
       },
       {
-        id: `runtime_strengthen_verification_${generation}`,
-        title: "Strengthen verification with targeted checks",
+        id: `runtime_verify_${generation}_${surfaceId}`,
+        title: `Verify ${surface.label}`,
         status: "pending",
         notes: "Run, add, or justify focused verification that can raise confidence in end-to-end completion.",
       },
@@ -587,6 +641,25 @@ function runtimeMinimumPlanningInput(goal: GoalState["goal"], generation: number
       },
     ],
   };
+}
+
+function candidateNotes(candidate: GoalCandidate, prefix?: string): string {
+  return [
+    prefix,
+    `${candidate.value} value frontier.`,
+    candidate.source ? `Source: ${candidate.source}.` : undefined,
+    candidate.reason ? `Reason: ${candidate.reason}.` : undefined,
+    "Resolve it with implementation, verification, rejection evidence, or a narrower follow-up candidate.",
+  ].filter((part): part is string => Boolean(part)).join(" ");
+}
+
+function goalStepSlug(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return slug || "frontier";
 }
 
 function nextHorizonCandidates(goal: GoalState["goal"]): GoalCandidate[] {

@@ -1363,7 +1363,8 @@ test("at least runtime recovers from repeated no-progress turns by expanding the
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.horizon_generation, 1);
-    assert.equal(current?.planning?.active_step_id, "runtime_reassess_scope_1");
+    assert.match(current?.planning?.active_step_id ?? "", /^runtime_surface_1_/);
+    assert.match(current?.planning?.summary ?? "", /Runtime continuation: /);
     const events = store.listEvents(session.session_id).filter((event) => event.type === "goal.runtime.no_progress");
     assert.deepEqual(events.map((event) => event.data.consecutive), [1, 2]);
     assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded" && event.data.reason === "runtime_minimum"));
@@ -1700,8 +1701,73 @@ test("at least runtime expands instead of completing before the minimum duration
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.horizon_generation, 1);
-    assert.equal(current?.planning?.active_step_id, "runtime_reassess_scope_1");
+    assert.match(current?.planning?.active_step_id ?? "", /^runtime_surface_1_/);
+    assert.match(current?.planning?.summary ?? "", /Runtime continuation: /);
     assert.equal(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded" && event.data.reason === "runtime_minimum"), true);
+  } finally {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("at least runtime continuation promotes open frontier candidates into concrete steps", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "inferoa-goal-runtime-frontier-ledger-"));
+  const store = await SessionStore.open(path.join(dir, "state"));
+  try {
+    const workspace: WorkspaceIdentity = { id: "w_goal_runtime_frontier_ledger", root: dir, alias: "goal-runtime-frontier-ledger" };
+    const session = store.createSession(workspace, "goal-runtime-frontier-ledger");
+    const registry = new ToolRegistry(config(), workspace, store);
+    const state = replaceGoalPlanning(createGoalState({ objective: "Improve a large repo", runtime_policy: { mode: "at_least", min_duration_ms: 60_000 } }), {
+      summary: "Loop task 1 · Candidate work",
+      steps: [{ id: "done", title: "Current slice complete", status: "completed" }],
+    });
+    state.goal.horizon_generation = 1;
+    state.goal.time_used_ms = 10_000;
+    const goal = state.goal as any;
+    goal.ledger = {
+      open: [
+        {
+          id: "dashboard-ssrf",
+          title: "SSRF risk in dashboard backend proxying to external URLs",
+          source: "dashboard/backend/main.go",
+          value: "medium",
+          status: "open",
+          reason: "Dashboard proxies operator-configured URLs without validation.",
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      done: [],
+      rejected: [],
+      updated_at: new Date().toISOString(),
+    };
+    writeGoalState(store, session.session_id, state, "run_seed");
+    let reflectionCalls = 0;
+
+    const result = await runGoalSupervisor({
+      store,
+      sessionId: session.session_id,
+      supervisor: "test",
+      maxIterations: 3,
+      shouldContinue: () => reflectionCalls < 1,
+      runTurn: async (request) => {
+        reflectionCalls += 1;
+        const reflected = await registry.call(
+          { id: "runtime_frontier_done_reflection", name: "goal", arguments: { op: "reflect", decision: "done", summary: "Current slice is done.", verification_evidence: { checked: true } } },
+          { session_id: session.session_id, run_id: request.runId ?? "run_reflection", request_class: "reflection", visibility: "internal" },
+        );
+        assert.equal(reflected.ok, true, JSON.stringify(reflected));
+        return { run_id: request.runId ?? "run_reflection" };
+      },
+    });
+
+    assert.equal(result.status, "stopped");
+    const current = readGoalState(store, session.session_id)?.goal;
+    assert.equal(current?.status, "active");
+    assert.equal(current?.horizon_generation, 2);
+    assert.equal(current?.planning?.summary, "Loop task 2 · Frontier continuation");
+    assert.match(current?.planning?.active_step_id ?? "", /^runtime_frontier_2_1_/);
+    assert.match(current?.planning?.steps[0]?.title ?? "", /SSRF risk in dashboard backend/i);
+    assert.match(current?.planning?.steps[0]?.notes ?? "", /dashboard\/backend\/main\.go/i);
   } finally {
     store.close();
     await rm(dir, { recursive: true, force: true });
@@ -1769,8 +1835,8 @@ test("at least runtime continuation does not recycle stale duplicate ledger cand
     const current = readGoalState(store, session.session_id)?.goal;
     assert.equal(current?.status, "active");
     assert.equal(current?.horizon_generation, 3);
-    assert.equal(current?.planning?.summary, "Loop task 3 · Runtime continuation");
-    assert.equal(current?.planning?.active_step_id, "runtime_reassess_scope_3");
+    assert.match(current?.planning?.summary ?? "", /^Loop task 3 · Runtime continuation: /);
+    assert.match(current?.planning?.active_step_id ?? "", /^runtime_surface_3_/);
     assert.equal(current?.planning?.steps.some((step) => /duplicate signal handler/i.test(step.title)), false);
     assert.ok(store.listEvents(session.session_id).some((event) => event.type === "goal.horizon.expanded" && event.data.reason === "runtime_minimum"));
   } finally {
