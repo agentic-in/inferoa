@@ -26,6 +26,7 @@ interface DebugModelTurn {
   category?: string;
   confidence?: string;
   phase?: string;
+  learning?: string;
   replay_id?: string;
   route_cache_hit?: string;
   prompt_tokens?: number;
@@ -295,6 +296,7 @@ function collectDebugModelTurns(events: SessionEvent[]): DebugModelTurn[] {
         turn.category = stringField(route["x-vsr-selected-category"]) ?? turn.category;
         turn.confidence = stringField(route["x-vsr-selected-confidence"]) ?? turn.confidence;
         turn.phase = stringField(route["x-vsr-session-phase"]) ?? turn.phase;
+        turn.learning = learningSummaryFromRoute(route) ?? turn.learning;
         turn.replay_id = stringField(route["x-vsr-replay-id"]) ?? turn.replay_id;
         turn.route_cache_hit = stringField(route["x-vsr-cache-hit"]) ?? turn.route_cache_hit;
       }
@@ -373,6 +375,7 @@ function debugRunSessionSummary(runs: JsonObject[]): JsonObject {
     models: countDebugTurnsBy(turns, (turn) => turn.selected_model ?? turn.model),
     decisions: countDebugTurnsBy(turns, (turn) => turn.decision),
     phases: countDebugTurnsBy(turns, (turn) => turn.phase),
+    learning: countDebugTurnsBy(turns, (turn) => learningActionFromHeader(turn.learning)),
     cache: debugCacheSummary(turns),
   };
 }
@@ -383,6 +386,7 @@ function debugModelTurnSummary(turns: DebugModelTurn[]): JsonObject {
     models: countDebugTurnsBy(turns, (turn) => turn.selected_model ?? turn.model),
     decisions: countDebugTurnsBy(turns, (turn) => turn.decision),
     phases: countDebugTurnsBy(turns, (turn) => turn.phase),
+    learning: countDebugTurnsBy(turns, (turn) => learningActionFromHeader(turn.learning)),
     cache: debugCacheSummary(turns),
   };
 }
@@ -412,6 +416,59 @@ function countDebugTurnsBy(turns: DebugModelTurn[], field: (turn: DebugModelTurn
     counts[value] = (counts[value] ?? 0) + 1;
   }
   return counts;
+}
+
+function learningActionFromHeader(header: string | undefined): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+  const parts = header.split(/[;\s]+/).map((part) => part.trim()).filter(Boolean);
+  const adaptation = parts[0];
+  const action = parts.find((part) => part.startsWith("action="))?.slice("action=".length);
+  if (!adaptation || !action) {
+    return adaptation;
+  }
+  return `${adaptation}.${action}`;
+}
+
+function learningSummaryFromRoute(route: JsonObject): string | undefined {
+  const adaptation = firstLearningMethod(stringField(route["x-vsr-learning-methods"]));
+  const mode = methodHeaderValue(stringField(route["x-vsr-learning-modes"]), adaptation);
+  const action = methodHeaderValue(stringField(route["x-vsr-learning-actions"]), adaptation);
+  const scope = methodHeaderValue(stringField(route["x-vsr-learning-scopes"]), adaptation);
+  const reason = methodHeaderValue(stringField(route["x-vsr-learning-reasons"]), adaptation);
+  if (!adaptation) {
+    return undefined;
+  }
+  return [
+    adaptation,
+    mode ? `mode=${mode}` : undefined,
+    action ? `action=${action}` : undefined,
+    reason ? `reason=${reason}` : undefined,
+    scope ? `scope=${scope}` : undefined,
+  ].filter((part): part is string => Boolean(part)).join(" ");
+}
+
+function firstLearningMethod(header: string | undefined): string | undefined {
+  return header?.split(",").map((part) => part.trim()).find(Boolean);
+}
+
+function methodHeaderValue(header: string | undefined, method: string | undefined): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+  for (const part of header.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = part.slice(0, separator);
+    const value = part.slice(separator + 1);
+    if (!method || key === method) {
+      return value || undefined;
+    }
+  }
+  return undefined;
 }
 
 function previewDebugText(text: string, maxChars: number): string {

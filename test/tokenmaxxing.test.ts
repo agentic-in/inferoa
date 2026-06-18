@@ -117,6 +117,74 @@ test("tokenmaxxing fullscreen highlights headers and boundaries without zebra st
   assert.equal(renderTokenmaxxingScreen(signalRows, 80, 8, 0).length, 8);
 });
 
+test("tokenmaxxing signals expose vllm-sr learning route decisions", () => {
+  const events: SessionEvent[] = [
+    event("model.route.selected", {
+      step_index: 2,
+      route: {
+        "x-vsr-selected-model": "google/gemini-3.1-pro",
+        "x-vsr-selected-decision": "domain_code_complex",
+        "x-vsr-learning-methods": "session_aware",
+        "x-vsr-learning-actions": "session_aware=hard_lock",
+        "x-vsr-learning-reasons": "session_aware=hard_lock=tool_loop",
+        "x-vsr-learning-scopes": "session_aware=conversation",
+        "x-vsr-learning-modes": "session_aware=apply",
+      },
+    }, "run_1"),
+  ];
+
+  const rows = renderTokenmaxxingRows(events, [], 260, { activityOnly: true });
+  const plain = stripAnsi(rows.map((row) => row.text).join("\n"));
+
+  assert.match(plain, /route\s+turn 1\.2\s+hard lock\/run\s+tool-loop pinned/);
+  assert.match(plain, /action hard lock .*scope run .*reason tool loop .*model google\/gemini-3\.1-pro .*decision domain_code_complex/);
+});
+
+test("tokenmaxxing keeps initial learning routes out of the overview", () => {
+  const events: SessionEvent[] = [
+    event("user.prompt", { prompt: "hi" }, "run_initial"),
+    event("model.request.started", { step_id: "step_1", step_index: 1, prompt_epoch_id: "pe_initial", model: "auto" }, "run_initial"),
+    event("model.route.selected", {
+      step_id: "step_1",
+      step_index: 1,
+      route: {
+        "x-vsr-selected-model": "qwen/qwen3.6-rocm",
+        "x-vsr-selected-decision": "simple_general",
+        "x-vsr-learning-methods": "session_aware",
+        "x-vsr-learning-actions": "session_aware=select",
+        "x-vsr-learning-reasons": "session_aware=missing_previous_model",
+        "x-vsr-learning-scopes": "session_aware=conversation",
+        "x-vsr-learning-modes": "session_aware=apply",
+      },
+    }, "run_initial"),
+    event("model.response.settled", {
+      step_id: "step_1",
+      step_index: 1,
+      prompt_epoch_id: "pe_initial",
+      model: "auto",
+      route: {
+        "x-vsr-selected-model": "qwen/qwen3.6-rocm",
+        "x-vsr-selected-decision": "simple_general",
+        "x-vsr-learning-methods": "session_aware",
+        "x-vsr-learning-actions": "session_aware=select",
+        "x-vsr-learning-reasons": "session_aware=missing_previous_model",
+        "x-vsr-learning-scopes": "session_aware=conversation",
+        "x-vsr-learning-modes": "session_aware=apply",
+      },
+      usage: { prompt_tokens: 900, cached_prompt_tokens: 0, completion_tokens: 20, total_tokens: 920 },
+      tool_calls: [],
+    }, "run_initial"),
+  ];
+
+  const overview = stripAnsi(renderTokenmaxxingLines(events, [], 180, { detailLimit: Number.POSITIVE_INFINITY }).join("\n"));
+  const signals = stripAnsi(renderTokenmaxxingLines(events, [], 220, { activityOnly: true }).join("\n"));
+
+  assert.match(overview, /turn 1\.1\s+user\s+qwen3\.6-rocm\s+tokens 920\/920/);
+  assert.doesNotMatch(overview, /initial route|new run\s+tokens/);
+  assert.match(signals, /route\s+turn 1\.1\s+new run\s+first route for this run/);
+  assert.doesNotMatch(signals, /reason missing previous model/);
+});
+
 test("tokenmaxxing wide summary uses left and right columns", () => {
   const events: SessionEvent[] = [
     event("user.prompt", { prompt: "warmup" }, "run_1"),
@@ -229,7 +297,7 @@ test("tokenmaxxing view exposes model-call cache and RTK inside a long run", () 
   const leftAlignedTurn = renderTokenmaxxingRows(events, [], 160, { detailLimit: Number.POSITIVE_INFINITY })
     .map((row) => stripAnsi(row.text))
     .find((line) => line.includes("turn 1.2"));
-  assert.match(leftAlignedTurn ?? "", /^turn 1\.2\s+tool-loop\s+tokens 130\/130/);
+  assert.match(leftAlignedTurn ?? "", /^turn 1\.2\s+tool-loop\s+-\s+tokens 130\/130/);
 });
 
 test("tokenmaxxing marks loop-origin execution prompts and shows model latency columns", () => {
@@ -260,8 +328,8 @@ test("tokenmaxxing marks loop-origin execution prompts and shows model latency c
   const plain = stripAnsi(renderTokenmaxxingLines(events, [], 220, { detailLimit: Number.POSITIVE_INFINITY }).join("\n"));
 
   assert.match(plain, /TTFT\s+TPOT\s+Duration/);
-  assert.match(plain, /turn 1\.1\s+execution\s+tokens 930\/930/);
-  assert.match(plain, /turn 1\.2\s+tool-loop\s+tokens 950\/950/);
+  assert.match(plain, /turn 1\.1\s+execution\s+-\s+tokens 930\/930/);
+  assert.match(plain, /turn 1\.2\s+tool-loop\s+-\s+tokens 950\/950/);
   assert.match(plain, /300ms\s+30ms\s+1\.2s/);
   assert.doesNotMatch(plain, /turn 1\.1\s+user/);
 });
@@ -270,6 +338,11 @@ test("tokenmaxxing surfaces model changes in turns and signals", () => {
   const events: SessionEvent[] = [
     event("user.prompt", { prompt: "route with auto model" }, "run_route"),
     event("model.request.started", { step_id: "step_1", step_index: 1, prompt_epoch_id: "pe_route", model: "auto" }, "run_route"),
+    event("model.route.selected", {
+      step_id: "step_1",
+      step_index: 1,
+      route: { "x-vsr-selected-model": "qwen/qwen3.6-rocm" },
+    }, "run_route"),
     event("model.response.settled", {
       step_id: "step_1",
       step_index: 1,
@@ -280,12 +353,31 @@ test("tokenmaxxing surfaces model changes in turns and signals", () => {
       tool_calls: [],
     }, "run_route"),
     event("model.request.started", { step_id: "step_2", step_index: 2, prompt_epoch_id: "pe_route", model: "auto" }, "run_route"),
+    event("model.route.selected", {
+      step_id: "step_2",
+      step_index: 2,
+      route: {
+        "x-vsr-selected-model": "deepseek-v4-pro-tokenhub",
+        "x-vsr-learning-methods": "session_aware",
+        "x-vsr-learning-actions": "session_aware=switch",
+        "x-vsr-learning-reasons": "session_aware=switch_allowed",
+        "x-vsr-learning-scopes": "session_aware=conversation",
+        "x-vsr-learning-modes": "session_aware=apply",
+      },
+    }, "run_route"),
     event("model.response.settled", {
       step_id: "step_2",
       step_index: 2,
       prompt_epoch_id: "pe_route",
       model: "auto",
-      route: { "x-vsr-selected-model": "deepseek-v4-pro-tokenhub" },
+      route: {
+        "x-vsr-selected-model": "deepseek-v4-pro-tokenhub",
+        "x-vsr-learning-methods": "session_aware",
+        "x-vsr-learning-actions": "session_aware=switch",
+        "x-vsr-learning-reasons": "session_aware=switch_allowed",
+        "x-vsr-learning-scopes": "session_aware=conversation",
+        "x-vsr-learning-modes": "session_aware=apply",
+      },
       usage: { prompt_tokens: 950, cached_prompt_tokens: 900, completion_tokens: 20, total_tokens: 970 },
       tool_calls: [],
     }, "run_route"),
@@ -294,9 +386,9 @@ test("tokenmaxxing surfaces model changes in turns and signals", () => {
   const overview = stripAnsi(renderTokenmaxxingLines(events, [], 220, { detailLimit: Number.POSITIVE_INFINITY }).join("\n"));
   const signals = stripAnsi(renderTokenmaxxingLines(events, [], 220, { activityOnly: true }).join("\n"));
 
-  assert.match(overview, /Model changes/);
-  assert.match(overview, /model changed\s+.*turn 1\.2\s+.*qwen\/qwen3\.6-rocm -> deepseek-v4-pro-tokenhub/);
-  assert.match(signals, /model changed\s+turn 1\.2\s+.*route\s+qwen\/qwen3\.6-rocm -> deepseek-v4-pro-tokenhub/);
+  assert.doesNotMatch(overview, /Model changes/);
+  assert.match(overview, /turn 1\.2\s+tool-loop\s+qwen3\.6-rocm -> deepseek-v4-pro .*switch\/run/);
+  assert.match(signals, /route\s+turn 1\.2\s+switch\/run\s+model switched .*action switch .*scope run .*reason switch allowed .*model deepseek-v4-pro-tokenhub/);
 });
 
 test("tokenmaxxing infers hidden loop execution prompts without origin metadata", () => {
@@ -330,8 +422,8 @@ test("tokenmaxxing infers hidden loop execution prompts without origin metadata"
 
   const plain = stripAnsi(renderTokenmaxxingLines(events, [], 220, { detailLimit: Number.POSITIVE_INFINITY }).join("\n"));
 
-  assert.match(plain, /turn 1\.1\s+execution\s+tokens 920\/920/);
-  assert.match(plain, /turn 1\.2\s+tool-loop\s+tokens 960\/960/);
+  assert.match(plain, /turn 1\.1\s+execution\s+-\s+tokens 920\/920/);
+  assert.match(plain, /turn 1\.2\s+tool-loop\s+-\s+tokens 960\/960/);
   assert.doesNotMatch(plain, /turn 1\.1\s+user/);
 });
 

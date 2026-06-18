@@ -95,6 +95,11 @@ export function signalHeaders(headers: Headers): Record<string, string> {
     "x-vsr-selected-reasoning",
     "x-vsr-selected-modality",
     "x-vsr-session-phase",
+    "x-vsr-learning-methods",
+    "x-vsr-learning-actions",
+    "x-vsr-learning-scopes",
+    "x-vsr-learning-reasons",
+    "x-vsr-learning-modes",
     "x-vsr-cache-hit",
     "x-vsr-replay-id",
   ];

@@ -49,6 +49,11 @@ test("debug run-session runs multiple prompts in one session and reports route/c
       "x-vsr-selected-category": "decision",
       "x-vsr-selected-confidence": isSecondRequest ? "0.91" : "0.86",
       "x-vsr-session-phase": isSecondRequest ? "user_turn" : "new_session",
+      "x-vsr-learning-methods": "session_aware",
+      "x-vsr-learning-actions": isSecondRequest ? "session_aware=stay" : "session_aware=select",
+      "x-vsr-learning-reasons": isSecondRequest ? "session_aware=cache_protected" : "session_aware=select",
+      "x-vsr-learning-scopes": "session_aware=conversation",
+      "x-vsr-learning-modes": "session_aware=apply",
       "x-vsr-cache-hit": isSecondRequest ? "true" : "false",
       "x-vsr-replay-id": isSecondRequest ? "replay_2" : "replay_1",
     });
@@ -116,6 +121,7 @@ test("debug run-session runs multiple prompts in one session and reports route/c
           selected_model?: string;
           decision?: string;
           phase?: string;
+          learning?: string;
           prompt_tokens?: number;
           cached_prompt_tokens?: number;
           cache_hit_rate?: number;
@@ -123,7 +129,10 @@ test("debug run-session runs multiple prompts in one session and reports route/c
           cache_gap_rate?: number;
         }>;
       }>;
-      summary: { cache: { prompt_tokens?: number; cached_prompt_tokens?: number; cache_gap_tokens?: number; cache_hit_rate?: number } };
+      summary: {
+        learning?: Record<string, number>;
+        cache: { prompt_tokens?: number; cached_prompt_tokens?: number; cache_gap_tokens?: number; cache_hit_rate?: number };
+      };
     };
 
     assert.match(report.session.session_id, /^s_/);
@@ -138,6 +147,7 @@ test("debug run-session runs multiple prompts in one session and reports route/c
     assert.equal(firstTurn?.selected_model, "qwen/qwen3.6-small");
     assert.equal(firstTurn?.decision, "simple_general");
     assert.equal(firstTurn?.phase, "new_session");
+    assert.match(firstTurn?.learning ?? "", /action=select/);
     assert.equal(firstTurn?.prompt_tokens, 100);
     assert.equal(firstTurn?.cached_prompt_tokens, 80);
     assert.equal(firstTurn?.cache_hit_rate, 0.8);
@@ -148,6 +158,7 @@ test("debug run-session runs multiple prompts in one session and reports route/c
     assert.equal(secondTurn?.selected_model, "qwen/qwen3.6-rocm");
     assert.equal(secondTurn?.decision, "complex_general");
     assert.equal(secondTurn?.phase, "user_turn");
+    assert.match(secondTurn?.learning ?? "", /action=stay/);
     assert.equal(secondTurn?.prompt_tokens, 120);
     assert.equal(secondTurn?.cached_prompt_tokens, 90);
     assert.equal(secondTurn?.cache_gap_tokens, 30);
@@ -155,6 +166,8 @@ test("debug run-session runs multiple prompts in one session and reports route/c
     assert.equal(report.summary.cache.cached_prompt_tokens, 170);
     assert.equal(report.summary.cache.cache_gap_tokens, 50);
     assert.equal(report.summary.cache.cache_hit_rate, 0.7727);
+    assert.equal(report.summary.learning?.["session_aware.select"], 1);
+    assert.equal(report.summary.learning?.["session_aware.stay"], 1);
   } finally {
     server.close();
     await rm(fixture, { recursive: true, force: true });

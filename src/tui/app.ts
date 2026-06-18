@@ -290,6 +290,7 @@ export interface ComposerRouteSelection {
   selectedModel: string;
   selectedCategory?: string;
   selectedDecision?: string;
+  learningLabel?: string;
   requestClass?: RuntimeRunOptions["request_class"];
   origin?: RuntimeRunOptions["origin"];
 }
@@ -9028,10 +9029,12 @@ export function composerRouteSelectionFromRoute(
   }
   const selectedCategory = headerField(route["x-vsr-selected-category"]);
   const selectedDecision = headerField(route["x-vsr-selected-decision"]);
+  const learningLabel = learningLabelFromRoute(route);
   return {
     selectedModel,
     selectedCategory,
     selectedDecision,
+    learningLabel,
     requestClass: options.requestClass,
     origin: options.origin,
   };
@@ -9041,15 +9044,158 @@ export function renderComposerRouteSelection(selection: ComposerRouteSelection |
   if (!selection) {
     return [];
   }
-  const label = selection.selectedCategory ?? composerRouteRequestLabel(selection.requestClass, selection.origin);
+  const label = selection.selectedCategory
+    ? `category: ${selection.selectedCategory}`
+    : composerRouteRequestLabel(selection.requestClass, selection.origin);
   return [
     fg256(238, "·"),
     fg256(75, selection.selectedModel),
     label ? fg256(238, "·") : undefined,
     label ? fg256(252, label) : undefined,
     selection.selectedDecision ? fg256(238, "·") : undefined,
-    selection.selectedDecision ? fg256(75, selection.selectedDecision) : undefined,
+    selection.selectedDecision ? fg256(75, `decision: ${selection.selectedDecision}`) : undefined,
+    selection.learningLabel ? fg256(238, "·") : undefined,
+    selection.learningLabel ? fg256(252, selection.learningLabel) : undefined,
   ].filter((part): part is string => Boolean(part));
+}
+
+interface LearningRouteFields {
+  adaptation?: string;
+  mode?: string;
+  action?: string;
+  scope?: string;
+  reason?: string;
+}
+
+function learningLabelFromRoute(route: JsonObject): string | undefined {
+  const fields = learningFieldsFromRoute(route);
+  return learningLabelFromFields(fields);
+}
+
+function learningFieldsFromRoute(route: JsonObject): LearningRouteFields {
+  const adaptation = firstLearningMethod(headerField(route["x-vsr-learning-methods"]));
+  return {
+    adaptation,
+    mode: methodHeaderValue(headerField(route["x-vsr-learning-modes"]), adaptation),
+    action: methodHeaderValue(headerField(route["x-vsr-learning-actions"]), adaptation),
+    scope: methodHeaderValue(headerField(route["x-vsr-learning-scopes"]), adaptation),
+    reason: methodHeaderValue(headerField(route["x-vsr-learning-reasons"]), adaptation),
+  };
+}
+
+function firstLearningMethod(header: string | undefined): string | undefined {
+  return header?.split(",").map((part) => part.trim()).find(Boolean);
+}
+
+function methodHeaderValue(header: string | undefined, method: string | undefined): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+  for (const part of header.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = part.slice(0, separator);
+    const value = part.slice(separator + 1);
+    if (!method || key === method) {
+      return value || undefined;
+    }
+  }
+  return undefined;
+}
+
+function learningLabelFromFields(fields: LearningRouteFields): string | undefined {
+  const { action, mode, scope, reason } = fields;
+  if (!action) {
+    return undefined;
+  }
+  if (action === "select") {
+    return undefined;
+  }
+  if (mode === "observe") {
+    return learningFooterLabel(action, scope, reason, observedLearningLabel(action, scope, reason));
+  }
+  if (action === "hard_lock") {
+    return learningFooterLabel(action, scope, reason, hardLockLearningLabel(reason));
+  }
+  if (action === "stay") {
+    return learningFooterLabel(action, scope, reason, scope === "session" ? "kept session model" : "kept run model");
+  }
+  if (action === "switch") {
+    return learningFooterLabel(action, scope, reason, "model switched");
+  }
+  if (action === "bypass") {
+    return learningFooterLabel(action, scope, reason, "learning bypassed");
+  }
+  if (action === "noop") {
+    return undefined;
+  }
+  return learningFooterLabel(action, scope, reason, action.replace(/[-_]+/g, " "));
+}
+
+function learningFooterLabel(action: string, scope: string | undefined, reason: string | undefined, friendly: string | undefined): string | undefined {
+  if (!friendly) {
+    return undefined;
+  }
+  const parts = [
+    `learning: ${readableLearningValue(action)}`,
+    scope ? `scope ${learningDisplayScope(scope)}` : undefined,
+    reason ? `reason ${readableLearningReason(reason)}` : undefined,
+    friendly,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" · ");
+}
+
+function observedLearningLabel(action: string, scope: string | undefined, reason: string | undefined): string | undefined {
+  if (action === "hard_lock") {
+    return `would pin ${hardLockTarget(reason)}`;
+  }
+  if (action === "stay") {
+    return scope === "session" ? "would keep session model" : "would keep run model";
+  }
+  if (action === "switch") {
+    return "would switch model";
+  }
+  if (action === "bypass") {
+    return "would bypass learning";
+  }
+  if (action === "noop" || action === "select") {
+    return undefined;
+  }
+  return `would ${action.replace(/[-_]+/g, " ")}`;
+}
+
+function hardLockLearningLabel(reason: string | undefined): string {
+  return `${hardLockTarget(reason)} pinned`;
+}
+
+function hardLockTarget(reason: string | undefined): string {
+  if (reason === "hard_lock=tool_loop") {
+    return "tool-loop";
+  }
+  if (reason?.startsWith("hard_lock=context_portability")) {
+    return "context";
+  }
+  if (reason === "hard_lock=min_turns") {
+    return "warmup";
+  }
+  return "model";
+}
+
+function learningDisplayScope(scope: string): string {
+  return scope === "conversation" ? "run" : scope;
+}
+
+function readableLearningValue(value: string): string {
+  return value.replace(/[-_]+/g, " ");
+}
+
+function readableLearningReason(reason: string): string {
+  if (reason.startsWith("hard_lock=")) {
+    return readableLearningValue(reason.slice("hard_lock=".length));
+  }
+  return readableLearningValue(reason);
 }
 
 function composerRouteRequestLabel(requestClass: RuntimeRunOptions["request_class"] | undefined, origin: RuntimeRunOptions["origin"] | undefined): string | undefined {

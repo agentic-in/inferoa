@@ -6,7 +6,7 @@ import type { AppOptions } from "../app.js";
 import type { JsonObject, JsonValue, ModelSetup } from "../types.js";
 import { runDebugSession } from "./run-session.js";
 
-type AgenticRoutingEvalScenario = "all" | "matrix" | "session" | "tool-loop";
+type AgenticRoutingEvalScenario = "all" | "matrix" | "session" | "tool-loop" | "scope";
 
 interface AgenticRoutingEvalArgs {
   scenario: AgenticRoutingEvalScenario;
@@ -73,7 +73,7 @@ const DECISIONS: Record<DecisionGroup, string[]> = {
   domain_code: ["domain_code", "domain_code_complex"],
   domain_business: ["domain_business"],
   complex: ["complex_general", "domain_code_complex", "domain_stem_research"],
-  agentic: ["agentic_session_route"],
+  agentic: [],
 };
 
 const MODELS: Record<ModelGroup, string[]> = {
@@ -162,6 +162,24 @@ const TOOL_LOOP_CASES: EvalCase[] = [
   },
 ];
 
+const SCOPE_CASES: EvalCase[] = [
+  {
+    label: "scope.agentic_start",
+    prompt: "Plan a repository refactor that will touch configuration, routing logic, tests, and docs. Treat this as an agentic workflow and explain the implementation order.",
+    expectation: { decisionGroups: ["agentic", "complex"], modelGroups: ["domain_medium", "domain_complex", "frontier"] },
+  },
+  {
+    label: "scope.simple_new_conversation",
+    prompt: "Calculate 21 + 21. Answer with only the number.",
+    expectation: { decisionGroups: ["simple", "agentic", "complex"], modelGroups: ["local", "domain_medium", "domain_complex", "frontier"] },
+  },
+  {
+    label: "scope.privacy_boundary",
+    prompt: "Customer Jane Doe has SSN 123-45-6789 and api_key=sk-test-private-000 in a support export. Summarize the privacy risk.",
+    expectation: { decisionGroups: ["privacy"], modelGroups: ["local"] },
+  },
+];
+
 export interface AgenticRoutingEvalResult {
   report: JsonObject;
   failed: boolean;
@@ -193,6 +211,9 @@ export async function runAgenticRoutingEval(options: AppOptions, rest: string[])
   }
   if (parsed.scenario === "all" || parsed.scenario === "tool-loop") {
     scenarios.push(await evaluateSingleSessionScenario(options, parsed, replayEnv, costEnv, "tool_loop_stability", TOOL_LOOP_CASES, parsed.toolLoopMaxToolRounds));
+  }
+  if (parsed.scenario === "all" || parsed.scenario === "scope") {
+    scenarios.push(await evaluateSingleSessionScenario(options, parsed, replayEnv, costEnv, "scope_protection", SCOPE_CASES, parsed.maxToolRounds));
   }
 
   const summary = summarizeScenarios(scenarios);
@@ -235,7 +256,7 @@ function parseAgenticRoutingEvalArgs(rest: string[]): AgenticRoutingEvalArgs {
       case "--scenario": {
         const value = requiredValue(rest, ++index, arg);
         if (!isAgenticRoutingEvalScenario(value)) {
-          throw new Error("--scenario must be one of all, matrix, session, tool-loop");
+          throw new Error("--scenario must be one of all, matrix, session, tool-loop, scope");
         }
         parsed.scenario = value;
         break;
@@ -271,7 +292,7 @@ function parseAgenticRoutingEvalArgs(rest: string[]): AgenticRoutingEvalArgs {
       default:
         if (flag === "--scenario" && inlineValue !== undefined) {
           if (!isAgenticRoutingEvalScenario(inlineValue)) {
-            throw new Error("--scenario must be one of all, matrix, session, tool-loop");
+            throw new Error("--scenario must be one of all, matrix, session, tool-loop, scope");
           }
           parsed.scenario = inlineValue;
           break;
@@ -312,7 +333,7 @@ function parseModelList(value: string): string[] {
 }
 
 function isAgenticRoutingEvalScenario(value: string): value is AgenticRoutingEvalScenario {
-  return value === "all" || value === "matrix" || value === "session" || value === "tool-loop";
+  return value === "all" || value === "matrix" || value === "session" || value === "tool-loop" || value === "scope";
 }
 
 function requiredValue(argv: string[], index: number, flag: string): string {
@@ -490,7 +511,42 @@ function compactReplay(replay: JsonObject): JsonObject {
     selected_model: stringField(replay.selected_model),
     original_model: stringField(replay.original_model),
     route_diagnostics: objectField(replay.route_diagnostics),
+    learning: compactLearning(objectField(replay.learning)),
     session_policy: compactSessionPolicy(objectField(replay.session_policy)),
+  };
+}
+
+function compactLearning(learning: JsonObject | undefined): JsonObject | undefined {
+  const adaptations = objectField(learning?.adaptations);
+  const sessionAware = objectField(adaptations?.session_aware);
+  if (!sessionAware) {
+    return undefined;
+  }
+  return {
+    adaptations: {
+      session_aware: compactSessionAwareLearning(sessionAware),
+    },
+  };
+}
+
+function compactSessionAwareLearning(policy: JsonObject): JsonObject {
+  return {
+    mode: stringField(policy.mode),
+    action: stringField(policy.action),
+    reason: stringField(policy.reason),
+    scope: stringField(policy.scope),
+    current_model: stringField(policy.current_model),
+    base_selected_model: stringField(policy.base_selected_model),
+    selected_model: stringField(policy.selected_model),
+    phase: stringField(policy.phase),
+    hard_locked: boolField(policy.hard_locked),
+    hard_lock_reason: stringField(policy.hard_lock_reason),
+    memory_prompt_tokens: numberField(policy.memory_prompt_tokens),
+    memory_cached_tokens: numberField(policy.memory_cached_tokens),
+    memory_estimated_cached_tokens: numberField(policy.memory_estimated_cached_tokens),
+    last_cache_accounting_source: stringField(policy.last_cache_accounting_source),
+    cache_warmth: numberField(policy.cache_warmth),
+    candidate_traces: selectedCandidateTraceSummary(policy),
   };
 }
 
@@ -746,7 +802,7 @@ function telemetrySummary(scenarios: JsonObject[]): JsonObject {
     model_turns: turns.length,
     decisions: countTurnsBy(turns, (turn) => stringField(turn.decision)),
     models: countTurnsBy(turns, (turn) => stringField(turn.selected_model) ?? stringField(turn.model)),
-    saar_actions: countTurnsBy(turns, (turn) => stringField(objectField(turn.route_diagnostics)?.session_action)),
+    saar_actions: countTurnsBy(turns, (turn) => sessionAwareAction(turn)),
     session_phases: countTurnsBy(turns, (turn) => stringField(turn.phase) ?? stringField(objectField(turn.route_diagnostics)?.session_phase)),
     cache: {
       observed_turns: turns.filter((turn) => numberField(turn.prompt_tokens) !== undefined && numberField(turn.cached_prompt_tokens) !== undefined).length,
@@ -892,11 +948,16 @@ function caseChecks(evalCase: EvalCase, run: JsonObject): EvalCheck[] {
   const decision = stringField(primaryTurn.decision);
   const selectedModel = stringField(primaryTurn.selected_model) ?? stringField(primaryTurn.model);
   const diagnostics = objectField(primaryTurn.route_diagnostics);
+  const learningPolicy = learningPolicyFromTurn(primaryTurn);
+  const decisionOk = decisionMatches(decision, evalCase.expectation.decisionGroups);
+  const saarProtectedToolLoop = isToolLoopCase(evalCase) && toolLoopTurnIsStable(primaryTurn);
   checks.push(
     {
       name: `${evalCase.label}.decision_matches_recipe_intent`,
-      passed: decisionMatches(decision, evalCase.expectation.decisionGroups),
-      expected: expectedDecisions(evalCase.expectation.decisionGroups),
+      passed: decisionOk || saarProtectedToolLoop,
+      expected: saarProtectedToolLoop
+        ? { decisions: expectedDecisions(evalCase.expectation.decisionGroups), or: "SAAR-protected tool-loop stay/hard_lock" }
+        : expectedDecisions(evalCase.expectation.decisionGroups),
       actual: decision,
     },
     {
@@ -923,6 +984,18 @@ function caseChecks(evalCase: EvalCase, run: JsonObject): EvalCheck[] {
       expected: "replay.route_diagnostics",
       actual: Boolean(diagnostics),
     },
+    {
+      name: `${evalCase.label}.learning_header_present`,
+      passed: Boolean(stringField(primaryTurn.learning)),
+      expected: "x-vsr-learning-methods",
+      actual: stringField(primaryTurn.learning),
+    },
+    {
+      name: `${evalCase.label}.learning_replay_present`,
+      passed: Boolean(learningPolicy) || replayStatus(primaryTurn) === "skipped",
+      expected: "replay.learning.adaptations.session_aware",
+      actual: Boolean(learningPolicy),
+    },
   );
   if (diagnostics) {
     checks.push(
@@ -944,7 +1017,7 @@ function caseChecks(evalCase: EvalCase, run: JsonObject): EvalCheck[] {
 }
 
 function scenarioChecks(name: string, cases: EvalCase[], runs: JsonObject[]): EvalCheck[] {
-  if (name !== "same_session_tradeoff" && name !== "tool_loop_stability") {
+  if (name !== "same_session_tradeoff" && name !== "tool_loop_stability" && name !== "scope_protection") {
     return [];
   }
   const turns = runs.flatMap((run) => objectArrayField(run.model_turns));
@@ -960,15 +1033,15 @@ function scenarioChecks(name: string, cases: EvalCase[], runs: JsonObject[]): Ev
     checks.push(
       {
         name: `${name}.saar_policy_observed`,
-        passed: turns.some((turn) => boolField(objectField(turn.route_diagnostics)?.session_policy_applied)),
-        expected: "at least one turn with session_policy_applied=true",
-        actual: turns.map((turn) => objectField(turn.route_diagnostics)?.session_policy_applied).filter((item) => item !== undefined) as JsonValue,
+        passed: turns.some((turn) => Boolean(learningPolicyFromTurn(turn)) || boolField(objectField(turn.route_diagnostics)?.session_policy_applied)),
+        expected: "at least one turn with Router Learning session_aware policy",
+        actual: turns.map((turn) => learningPolicyFromTurn(turn) ? "learning.session_aware" : objectField(turn.route_diagnostics)?.session_policy_applied).filter((item) => item !== undefined) as JsonValue,
       },
       {
         name: `${name}.saar_action_observed`,
-        passed: turns.some((turn) => Boolean(stringField(objectField(turn.route_diagnostics)?.session_action))),
+        passed: turns.some((turn) => Boolean(activeSessionAwareAction(turn))),
         expected: ["select", "stay", "switch", "hard_lock"],
-        actual: turns.map((turn) => stringField(objectField(turn.route_diagnostics)?.session_action)).filter(Boolean) as JsonValue,
+        actual: turns.map((turn) => sessionAwareAction(turn)).filter(Boolean) as JsonValue,
       },
     );
   }
@@ -978,7 +1051,7 @@ function scenarioChecks(name: string, cases: EvalCase[], runs: JsonObject[]): Ev
       {
         name: `${name}.tool_loop_turn_observed`,
         passed: toolTurns.length > 0,
-        expected: "phase=tool_loop or route_diagnostics.session_phase=tool_loop",
+        expected: "phase=tool_loop, learning.phase=tool_loop, or route_diagnostics.session_phase=tool_loop",
         actual: toolTurns.length,
       },
       {
@@ -987,13 +1060,69 @@ function scenarioChecks(name: string, cases: EvalCase[], runs: JsonObject[]): Ev
         expected: "tool-loop turns use stay or hard_lock without switching models",
         actual: toolTurns.map((turn) => ({
           selected_model: stringField(turn.selected_model),
-          action: stringField(objectField(turn.route_diagnostics)?.session_action),
-          previous_model: stringField(objectField(turn.route_diagnostics)?.previous_model),
+          action: sessionAwareAction(turn),
+          previous_model: sessionAwareCurrentModel(turn) ?? stringField(objectField(turn.route_diagnostics)?.previous_model),
         })) as JsonValue,
       },
     );
   }
+  if (name === "scope_protection") {
+    checks.push(...scopeProtectionChecks(name, runs));
+  }
   return checks;
+}
+
+function scopeProtectionChecks(name: string, runs: JsonObject[]): EvalCheck[] {
+  const firstTurn = lastModelTurn(runs[0]);
+  const simpleTurn = lastModelTurn(runs[1]);
+  const privacyTurn = lastModelTurn(runs[2]);
+  const observedScopes = [...new Set(runs.flatMap((run) => objectArrayField(run.model_turns).map(sessionAwareScope).filter(Boolean)))];
+  const activeScope = observedScopes.includes("session") ? "session" : observedScopes.includes("conversation") ? "conversation" : undefined;
+  const firstModel = normalizeModel(stringField(firstTurn?.selected_model) ?? stringField(firstTurn?.model));
+  const simpleModel = normalizeModel(stringField(simpleTurn?.selected_model) ?? stringField(simpleTurn?.model));
+  const simpleAction = simpleTurn ? sessionAwareAction(simpleTurn) : undefined;
+  const simpleDecision = stringField(simpleTurn?.decision);
+  const privacyModel = normalizeModel(stringField(privacyTurn?.selected_model) ?? stringField(privacyTurn?.model));
+  const privacyAction = privacyTurn ? sessionAwareAction(privacyTurn) : undefined;
+
+  const checks: EvalCheck[] = [
+    {
+      name: `${name}.scope_observed`,
+      passed: activeScope === "conversation" || activeScope === "session",
+      expected: ["conversation", "session"],
+      actual: observedScopes as JsonValue,
+    },
+  ];
+
+  if (activeScope === "session") {
+    checks.push({
+      name: `${name}.session_scope_protects_across_conversations`,
+      passed: Boolean(firstModel) && firstModel === simpleModel && (simpleAction === "stay" || simpleAction === "hard_lock"),
+      expected: { model: firstModel, action: ["stay", "hard_lock"] },
+      actual: { model: simpleModel, action: simpleAction, decision: simpleDecision },
+    });
+  } else if (activeScope === "conversation") {
+    checks.push({
+      name: `${name}.conversation_scope_allows_new_conversation_reselect`,
+      passed: modelMatches(simpleModel, ["local"]) && decisionMatches(simpleDecision, ["simple"]) && simpleAction === "select",
+      expected: { model_group: "local", decision_group: "simple", action: "select" },
+      actual: { model: simpleModel, action: simpleAction, decision: simpleDecision },
+    });
+  }
+
+  checks.push({
+    name: `${name}.privacy_bypass_stays_local`,
+    passed: modelMatches(privacyModel, ["local"]) && privacyAction === "bypass",
+    expected: { model_group: "local", action: "bypass" },
+    actual: { model: privacyModel, action: privacyAction, decision: stringField(privacyTurn?.decision) },
+  });
+
+  return checks;
+}
+
+function lastModelTurn(run: JsonObject | undefined): JsonObject | undefined {
+  const turns = objectArrayField(run?.model_turns);
+  return turns[turns.length - 1];
 }
 
 function routingOutcome(evalCase: EvalCase, turns: JsonObject[]): JsonObject {
@@ -1002,7 +1131,8 @@ function routingOutcome(evalCase: EvalCase, turns: JsonObject[]): JsonObject {
   const selectedModel = stringField(primaryTurn?.selected_model) ?? stringField(primaryTurn?.model);
   const decisionOk = decisionMatches(decision, evalCase.expectation.decisionGroups);
   const modelOk = modelMatches(selectedModel, evalCase.expectation.modelGroups);
-  const acceptable = Boolean(primaryTurn) && decisionOk && modelOk;
+  const saarProtectedToolLoop = primaryTurn ? isToolLoopCase(evalCase) && toolLoopTurnIsStable(primaryTurn) : false;
+  const acceptable = Boolean(primaryTurn) && modelOk && (decisionOk || saarProtectedToolLoop);
   return {
     acceptable,
     severity: acceptable ? "ok" : routingMismatchSeverity(evalCase.label),
@@ -1011,7 +1141,11 @@ function routingOutcome(evalCase: EvalCase, turns: JsonObject[]): JsonObject {
     actual_model: selectedModel,
     expected_decisions: expectedDecisions(evalCase.expectation.decisionGroups),
     expected_models: expectedModels(evalCase.expectation.modelGroups),
-    reason: acceptable ? "matches_profile_expectation" : routingMismatchReason(decisionOk, modelOk),
+    reason: acceptable
+      ? decisionOk
+        ? "matches_profile_expectation"
+        : "protected_by_saar_despite_decision_drift"
+      : routingMismatchReason(decisionOk, modelOk),
   };
 }
 
@@ -1071,19 +1205,24 @@ function routingMismatchReason(decisionOk: boolean, modelOk: boolean): string {
   return "model_mismatch";
 }
 
+function isToolLoopCase(evalCase: EvalCase): boolean {
+  return evalCase.label.includes("tool_loop");
+}
+
 function isToolLoopTurn(turn: JsonObject): boolean {
   const diagnostics = objectField(turn.route_diagnostics);
-  return stringField(turn.phase) === "tool_loop" || stringField(diagnostics?.session_phase) === "tool_loop";
+  const learning = learningPolicyFromTurn(turn);
+  return stringField(turn.phase) === "tool_loop" || stringField(learning?.phase) === "tool_loop" || stringField(diagnostics?.session_phase) === "tool_loop";
 }
 
 function toolLoopTurnIsStable(turn: JsonObject): boolean {
   const diagnostics = objectField(turn.route_diagnostics);
-  const action = stringField(diagnostics?.session_action);
+  const action = sessionAwareAction(turn);
   if (action !== "stay" && action !== "hard_lock") {
     return false;
   }
-  const previous = normalizeModel(stringField(diagnostics?.previous_model));
-  const selected = normalizeModel(stringField(diagnostics?.selected_model) ?? stringField(turn.selected_model));
+  const previous = normalizeModel(sessionAwareCurrentModel(turn) ?? stringField(diagnostics?.previous_model));
+  const selected = normalizeModel(sessionAwareSelectedModel(turn) ?? stringField(diagnostics?.selected_model) ?? stringField(turn.selected_model));
   return !previous || previous === selected;
 }
 
@@ -1120,6 +1259,50 @@ function publicExpectation(expectation: EvalExpectation): JsonObject {
 
 function replayStatus(turn: JsonObject): string | undefined {
   return stringField(objectField(turn.replay_fetch)?.status);
+}
+
+function learningPolicyFromTurn(turn: JsonObject): JsonObject | undefined {
+  const replayLearning = objectField(objectField(turn.replay)?.learning);
+  const adaptations = objectField(replayLearning?.adaptations);
+  return objectField(adaptations?.session_aware);
+}
+
+function sessionAwareAction(turn: JsonObject): string | undefined {
+  return stringField(learningPolicyFromTurn(turn)?.action) ?? stringField(objectField(turn.route_diagnostics)?.session_action);
+}
+
+function sessionAwareScope(turn: JsonObject): string | undefined {
+  return stringField(learningPolicyFromTurn(turn)?.scope) ?? learningSummaryField(stringField(turn.learning), "scope");
+}
+
+function activeSessionAwareAction(turn: JsonObject): string | undefined {
+  const action = sessionAwareAction(turn);
+  if (action === "select" || action === "stay" || action === "switch" || action === "hard_lock") {
+    return action;
+  }
+  return undefined;
+}
+
+function sessionAwareCurrentModel(turn: JsonObject): string | undefined {
+  return stringField(learningPolicyFromTurn(turn)?.current_model);
+}
+
+function sessionAwareSelectedModel(turn: JsonObject): string | undefined {
+  return stringField(learningPolicyFromTurn(turn)?.selected_model);
+}
+
+function learningSummaryField(summary: string | undefined, key: string): string | undefined {
+  if (!summary) {
+    return undefined;
+  }
+  const prefix = `${key}=`;
+  for (const part of summary.split(/[;\s]+/)) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      return trimmed.slice(prefix.length);
+    }
+  }
+  return undefined;
 }
 
 function summarizeScenarios(scenarios: JsonObject[]): JsonObject {

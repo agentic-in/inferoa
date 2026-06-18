@@ -92,6 +92,8 @@ interface ModelCallSummary {
   stepIndex?: number;
   promptEpochId?: string;
   model?: string;
+  previousModel?: string;
+  route?: JsonObject;
   isRunStart: boolean;
   requestClass?: string;
   requestOrigin?: string;
@@ -121,15 +123,6 @@ interface CompactionCallSummary {
 }
 
 type TurnSummary = RunSummary | ModelCallSummary | CompactionCallSummary;
-
-interface ModelChangeSummary {
-  order: number;
-  event: SessionEvent;
-  runOrdinal: number;
-  stepIndex?: number;
-  previousModel: string;
-  model: string;
-}
 
 interface TokenmaxxingSignalItem {
   event: SessionEvent;
@@ -229,7 +222,6 @@ export function renderTokenmaxxingRows(
   const latencyEvidence = buildLatencyEvidence(endpointEvidence, events);
   const runs = runSummaries(events, cacheEvidence.byRun);
   const modelCalls = modelCallSummaries(events, cacheEvidence.byCall, latencyEvidence);
-  const modelChanges = modelChangeSummaries(modelCalls);
   const compactionCalls = compactionCallSummaries(endpointEvidence, events, cacheEvidence.byCall, latencyEvidence);
   const modelDetailTurns = [...modelCalls, ...compactionCalls].sort((left, right) => left.order - right.order);
   const detailTurns: TurnSummary[] = modelDetailTurns.length ? modelDetailTurns : runs;
@@ -248,14 +240,6 @@ export function renderTokenmaxxingRows(
   if (!options.activityOnly && detailTurns.length) {
     const limit = options.detailLimit ?? 6;
     const recentTurns = Number.isFinite(limit) ? detailTurns.slice(-Math.max(0, limit)) : detailTurns;
-    const recentTurnOrders = new Set(recentTurns.map((turn) => turn.order));
-    const recentModelChanges = modelChanges.filter((change) => recentTurnOrders.has(change.order)).slice().reverse();
-    if (recentModelChanges.length) {
-      rows.push(row(fg256(39, "Model changes"), "section"));
-      for (const change of recentModelChanges) {
-        rows.push(row(modelChangeLine(change, contentWidth), "signal"));
-      }
-    }
     const epochs = epochSummaries(events, cacheEvidence.observations, endpointEvidence);
     rows.push(row(turnTableHeader(contentWidth), "turn-header"));
     let currentEpoch: string | undefined;
@@ -270,7 +254,7 @@ export function renderTokenmaxxingRows(
   }
 
   const includeActivity = options.activityOnly || (options.includeActivity ?? false);
-  const tokenmaxxingActivityEvents = includeActivity ? tokenmaxxingActivityItems(events, modelChanges) : [];
+  const tokenmaxxingActivityEvents = includeActivity ? tokenmaxxingActivityItems(events) : [];
   const activityEvents = options.activityOnly ? tokenmaxxingActivityEvents.slice(-80) : tokenmaxxingActivityEvents.slice(-4);
   if (activityEvents.length) {
     rows.push(...tokenmaxxingSignalRows(events, activityEvents, contentWidth));
@@ -448,7 +432,7 @@ function modelCallSummaries(events: SessionEvent[], cacheByCall: Map<string, Cac
   const requestByCall = modelRequestByCall(events);
   const loopOriginByRun = loopOriginByRunPrompt(events);
   const seenRuns = new Set<string>();
-  return events
+  const calls: ModelCallSummary[] = events
     .map((event, order) => ({ event, order }))
     .filter(({ event }) => event.type === "model.response.settled" && Boolean(event.run_id))
     .map(({ event, order }, index) => {
@@ -464,9 +448,10 @@ function modelCallSummaries(events: SessionEvent[], cacheByCall: Map<string, Cac
       const latency = mergeLatency(latencyFromData(event.data, usageField(event.data.usage)), latencyByCall.get(callKey), usageField(event.data.usage));
       const isRunStart = !seenRuns.has(runId);
       const model = modelCallModel(event.data, request);
+      const route = objectField(event.data.route);
       seenRuns.add(runId);
       return {
-        kind: "model_call",
+        kind: "model_call" as const,
         event,
         order,
         index: index + 1,
@@ -476,6 +461,7 @@ function modelCallSummaries(events: SessionEvent[], cacheByCall: Map<string, Cac
         stepIndex,
         promptEpochId: cache?.promptEpochId ?? stringField(event.data.prompt_epoch_id) ?? stringField(request?.prompt_epoch_id),
         model,
+        route: Object.keys(route).length ? route : undefined,
         isRunStart,
         requestClass: stringField(event.data.request_class) ?? stringField(request?.request_class),
         requestOrigin: stringField(event.data.request_origin) ?? stringField(request?.request_origin) ?? loopOriginByRun.get(runId),
@@ -488,6 +474,16 @@ function modelCallSummaries(events: SessionEvent[], cacheByCall: Map<string, Cac
         latency,
       };
     });
+  let previousModel: string | undefined;
+  for (const call of calls) {
+    if (call.model && previousModel && previousModel !== call.model) {
+      call.previousModel = previousModel;
+    }
+    if (call.model) {
+      previousModel = call.model;
+    }
+  }
+  return calls;
 }
 
 function modelCallModel(data: JsonObject, request: JsonObject | undefined): string | undefined {
@@ -500,28 +496,6 @@ function selectedModelFromRoute(route: JsonObject): string | undefined {
     stringField(route["x-selected-model"]) ??
     stringField(route["x-router-model"])
   );
-}
-
-function modelChangeSummaries(modelCalls: ModelCallSummary[]): ModelChangeSummary[] {
-  const out: ModelChangeSummary[] = [];
-  let previous: ModelCallSummary | undefined;
-  for (const call of modelCalls.slice().sort((left, right) => left.order - right.order)) {
-    if (!call.model) {
-      continue;
-    }
-    if (previous?.model && previous.model !== call.model) {
-      out.push({
-        order: call.order,
-        event: call.event,
-        runOrdinal: call.runOrdinal,
-        stepIndex: call.stepIndex,
-        previousModel: previous.model,
-        model: call.model,
-      });
-    }
-    previous = call;
-  }
-  return out;
 }
 
 function compactionCallSummaries(evidence: JsonObject[], events: SessionEvent[], cacheByCall: Map<string, CacheObservation>, latencyByCall: Map<string, TurnLatency>): CompactionCallSummary[] {
@@ -1455,24 +1429,22 @@ function rtkLine(rtk: RtkTotals): string {
   ].filter((part): part is string => Boolean(part)).join(" · ");
 }
 
-function modelChangeLine(change: ModelChangeSummary, width: number): string {
-  const turn = `turn ${change.runOrdinal}${change.stepIndex === undefined ? "" : `.${change.stepIndex}`}`;
-  return truncateToWidth(
-    [
-      fg256(111, "model changed"),
-      fg256(244, turn),
-      modelChangeDetail(change.previousModel, change.model),
-    ].join(` ${fg256(67, "·")} `),
-    width,
-  );
-}
-
 function modelChangeDetail(previousModel: string | undefined, model: string | undefined): string {
   return [
-    previousModel ? fg256(244, previousModel) : fg256(244, "?"),
+    previousModel ? fg256(244, compactModelName(previousModel)) : fg256(244, "?"),
     fg256(238, "->"),
-    model ? fg256(75, model) : fg256(244, "?"),
+    model ? fg256(75, compactModelName(model)) : fg256(244, "?"),
   ].join(" ");
+}
+
+function compactModelName(model: string): string {
+  const parts = model.split("/");
+  const display = (parts.at(-1) || model).replace(/-tokenhub$/, "");
+  const maxWidth = 18;
+  if (visibleWidth(display) <= maxWidth) {
+    return display;
+  }
+  return `${[...display].slice(0, maxWidth - 1).join("")}…`;
 }
 
 function tokenmaxxingSignalRows(allEvents: SessionEvent[], items: TokenmaxxingSignalItem[], width: number): TokenmaxxingScreenRow[] {
@@ -1485,42 +1457,28 @@ function tokenmaxxingSignalRows(allEvents: SessionEvent[], items: TokenmaxxingSi
   return rows;
 }
 
-function tokenmaxxingActivityItems(events: SessionEvent[], modelChanges: ModelChangeSummary[]): TokenmaxxingSignalItem[] {
+function tokenmaxxingActivityItems(events: SessionEvent[]): TokenmaxxingSignalItem[] {
   const eventItems = events
     .map((event, order) => ({ event, order }))
     .filter((item) => isTokenmaxxingActivityEvent(item.event));
-  const modelChangeItems = modelChanges.map((change) => ({
-    event: modelChangeSignalEvent(change),
-    order: change.order + 0.1,
-  }));
-  return [...eventItems, ...modelChangeItems].sort((left, right) => left.order - right.order);
-}
-
-function modelChangeSignalEvent(change: ModelChangeSummary): SessionEvent {
-  return {
-    ...change.event,
-    type: "tokenmaxxing.model.changed",
-    data: {
-      step_index: change.stepIndex,
-      previous_model: change.previousModel,
-      model: change.model,
-    },
-  };
+  return eventItems.sort((left, right) => left.order - right.order);
 }
 
 function signalCells(event: SessionEvent, runOrdinals: Map<string, number>): string[] {
   const data = event.data;
   switch (event.type) {
-    case "tokenmaxxing.model.changed":
+    case "model.route.selected": {
+      const route = objectField(data.route);
       return [
         signalTime(event.created_at ?? ""),
-        fg256(111, "model changed"),
+        fg256(39, "route"),
         signalTurnLabel(event, runOrdinals),
         "",
         "",
-        "route",
-        modelChangeDetail(stringField(data.previous_model), stringField(data.model)),
+        fg256(252, routeLearningShortLabel(route, { includeInitial: true })),
+        routeLearningDetail(route),
       ];
+    }
     case "model.response.settled": {
       const usage = usageField(data.usage);
       return [
@@ -1656,7 +1614,7 @@ function formatSignalRow(cells: string[], width: number): string {
 }
 
 function signalColumnWidths(width: number): number[] {
-  const fixed = [8, 16, 12, 22, 16, 10];
+  const fixed = [8, 16, 12, 22, 16, 14];
   const separatorWidth = 2 * fixed.length;
   const detail = Math.max(20, width - fixed.reduce((sum, item) => sum + item, separatorWidth));
   return [...fixed, detail];
@@ -1694,6 +1652,7 @@ function turnTableHeader(width: number): string {
   return formatTurnTableRow([
     fg256(244, "turn"),
     fg256(244, "event"),
+    fg256(244, "route"),
     fg256(244, "tokens"),
     fg256(244, "cache A/O"),
     fg256(244, "cache gap"),
@@ -1711,6 +1670,7 @@ function turnLine(turn: TurnSummary, width: number): string {
   return formatTurnTableRow([
     turnLabel(turn),
     turnEventLabel(turn),
+    turnRouteLabel(turn),
     `tokens ${turn.actualTokens}/${turn.withoutRtkTokens}`,
     cache.cache,
     cache.diff,
@@ -1798,9 +1758,9 @@ function formatTurnTableRow(cells: Array<string | undefined>, width: number): st
 }
 
 function turnTableWidths(width: number): number[] {
-  const minimums = [10, 10, 15, 13, 9, 7, 7, 8, 7, 7, 9];
-  const maximums = [18, 18, 36, 34, 24, 18, 18, 24, 10, 10, 12];
-  const weights = [1.1, 1, 2, 2, 1.25, 1, 0.85, 0.85, 0.7, 0.7, 0.9];
+  const minimums = [9, 10, 10, 17, 11, 8, 6, 7, 7, 6, 6, 8];
+  const maximums = [16, 13, 60, 30, 30, 20, 14, 14, 20, 9, 9, 11];
+  const weights = [0.9, 0.9, 2.5, 1.45, 1.75, 1, 0.7, 0.7, 0.65, 0.55, 0.55, 0.8];
   const separatorWidth = 2 * (minimums.length - 1);
   const minimumSum = minimums.reduce((sum, value) => sum + value, 0);
   const maximumSum = maximums.reduce((sum, value) => sum + value, 0);
@@ -1888,6 +1848,20 @@ function turnEventLabel(turn: TurnSummary): string {
     return name;
   }
   return "run";
+}
+
+function turnRouteLabel(turn: TurnSummary): string {
+  if (turn.kind === "compaction") {
+    return fg256(87, "compact");
+  }
+  if (turn.kind !== "model_call") {
+    return fg256(244, "-");
+  }
+  const model = turn.previousModel && turn.model
+    ? modelChangeDetail(turn.previousModel, turn.model)
+    : turn.model ? fg256(75, compactModelName(turn.model)) : fg256(244, "-");
+  const learning = turn.route ? routeLearningShortLabel(turn.route) : undefined;
+  return [model, learning ? fg256(252, learning) : undefined].filter((part): part is string => Boolean(part)).join(` ${fg256(67, "·")} `);
 }
 
 function modelCallEventName(turn: ModelCallSummary): string {
@@ -2007,6 +1981,7 @@ function isRunEvent(event: SessionEvent): boolean {
 function isTokenmaxxingActivityEvent(event: SessionEvent): boolean {
   return (
     event.type === "endpoint.evidence.recorded" ||
+    event.type === "model.route.selected" ||
     event.type === "prompt.epoch.created" ||
     event.type === "context.compacted" ||
     event.type === "evidence.context_compression" ||
@@ -2019,6 +1994,219 @@ function isTokenmaxxingActivityEvent(event: SessionEvent): boolean {
     event.type === "run.stopped" ||
     event.type === "run.failed"
   );
+}
+
+interface LearningRouteFields {
+  adaptation?: string;
+  mode?: string;
+  action?: string;
+  scope?: string;
+  reason?: string;
+}
+
+function routeLearningShortLabel(route: JsonObject, options: { includeInitial?: boolean } = {}): string {
+  const fields = routeLearningFields(route);
+  const { mode, action, scope, reason } = fields;
+  if (!fields.adaptation && !action) {
+    return options.includeInitial ? "selected" : "";
+  }
+  if (action === "select") {
+    return options.includeInitial ? "new run" : "";
+  }
+  if (mode === "observe") {
+    return observedRouteLearningShortLabel(action, scope, reason);
+  }
+  if (action === "hard_lock") {
+    return learningRouteBadge(action, scope);
+  }
+  if (action === "stay") {
+    return learningRouteBadge(action, scope);
+  }
+  if (action === "switch") {
+    return learningRouteBadge(action, scope);
+  }
+  if (action === "bypass") {
+    return learningRouteBadge(action, scope);
+  }
+  if (action === "noop") {
+    return options.includeInitial ? noopRouteShortLabel(reason) : "";
+  }
+  return action ? learningRouteBadge(action, scope) : "selected";
+}
+
+function observedRouteLearningShortLabel(action: string | undefined, scope: string | undefined, reason: string | undefined): string {
+  if (action === "hard_lock") {
+    return scope ? `would hard lock/${learningDisplayScope(scope)}` : `would ${hardLockRouteShortLabel(reason)}`;
+  }
+  if (action === "stay") {
+    return scope === "session" ? "would keep session" : "would keep run";
+  }
+  if (action === "switch") {
+    return "would switch";
+  }
+  if (action === "bypass") {
+    return "would bypass";
+  }
+  if (action === "noop") {
+    return reason === "identity_missing" ? "would miss ids" : "observe only";
+  }
+  return action && scope ? `would ${learningRouteBadge(action, scope)}` : action ? `would ${readableReason(action)}` : "observe";
+}
+
+function learningRouteBadge(action: string, scope: string | undefined): string {
+  return [
+    readableLearningValue(action),
+    scope ? learningDisplayScope(scope) : undefined,
+  ].filter((part): part is string => Boolean(part)).join("/");
+}
+
+function noopRouteShortLabel(reason: string | undefined): string {
+  return reason === "identity_missing" ? "missing ids" : "inactive";
+}
+
+function hardLockRouteShortLabel(reason: string | undefined): string {
+  if (reason === "hard_lock=tool_loop") {
+    return "pin tool";
+  }
+  if (reason?.startsWith("hard_lock=context_portability")) {
+    return "pin context";
+  }
+  if (reason === "hard_lock=min_turns") {
+    return "pin warmup";
+  }
+  return "pinned";
+}
+
+function routeLearningDetail(route: JsonObject): string {
+  const fields = routeLearningFields(route);
+  const model = selectedModelFromRoute(route);
+  const decision = stringField(route["x-vsr-selected-decision"]);
+  const action = fields.action;
+  const scope = fields.scope;
+  const reason = fields.reason;
+  const showReason = reason && !(action === "select" && reason === "missing_previous_model");
+  const showLearningFields = action && action !== "select";
+  const parts = [
+    routeLearningLongLabel(route),
+    showLearningFields ? `action ${readableLearningValue(action)}` : undefined,
+    showLearningFields && scope ? `scope ${learningDisplayScope(scope)}` : undefined,
+    fields.mode && fields.mode !== "apply" ? `mode ${fields.mode}` : undefined,
+    showReason ? `reason ${readableLearningReason(reason)}` : undefined,
+    model ? `model ${model}` : undefined,
+    decision ? `decision ${decision}` : undefined,
+    showLearningFields && fields.adaptation ? `method ${fields.adaptation}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return compactInlineString(parts.join(" · "), 180);
+}
+
+function routeLearningLongLabel(route: JsonObject): string {
+  const { mode, action, scope, reason } = routeLearningFields(route);
+  if (action === "select") {
+    return reason === "missing_previous_model" ? "first route for this run" : "route selected";
+  }
+  if (mode === "observe") {
+    return observedRouteLearningLongLabel(action, scope, reason);
+  }
+  if (action === "hard_lock") {
+    return hardLockRouteLongLabel(reason);
+  }
+  if (action === "stay") {
+    return scope === "session" ? "kept session model" : "kept run model";
+  }
+  if (action === "switch") {
+    return "model switched";
+  }
+  if (action === "bypass") {
+    return "learning bypassed";
+  }
+  if (action === "noop") {
+    return reason === "identity_missing" ? "learning identity missing" : "learning inactive";
+  }
+  return action ? readableReason(action) : "route selected";
+}
+
+function observedRouteLearningLongLabel(action: string | undefined, scope: string | undefined, reason: string | undefined): string {
+  if (action === "hard_lock") {
+    return `would pin ${hardLockRouteTarget(reason)}`;
+  }
+  if (action === "stay") {
+    return scope === "session" ? "would keep session model" : "would keep run model";
+  }
+  if (action === "switch") {
+    return "would switch model";
+  }
+  if (action === "bypass") {
+    return "would bypass learning";
+  }
+  if (action === "noop") {
+    return reason === "identity_missing" ? "would miss learning identity" : "learning observed only";
+  }
+  return action ? `would ${readableReason(action)}` : "learning observed";
+}
+
+function hardLockRouteLongLabel(reason: string | undefined): string {
+  return `${hardLockRouteTarget(reason)} pinned`;
+}
+
+function hardLockRouteTarget(reason: string | undefined): string {
+  if (reason === "hard_lock=tool_loop") {
+    return "tool-loop";
+  }
+  if (reason?.startsWith("hard_lock=context_portability")) {
+    return "context";
+  }
+  if (reason === "hard_lock=min_turns") {
+    return "warmup";
+  }
+  return "model";
+}
+
+function routeLearningFields(route: JsonObject): LearningRouteFields {
+  const adaptation = firstLearningMethod(stringField(route["x-vsr-learning-methods"]));
+  return {
+    adaptation,
+    mode: methodHeaderValue(stringField(route["x-vsr-learning-modes"]), adaptation),
+    action: methodHeaderValue(stringField(route["x-vsr-learning-actions"]), adaptation),
+    scope: methodHeaderValue(stringField(route["x-vsr-learning-scopes"]), adaptation),
+    reason: methodHeaderValue(stringField(route["x-vsr-learning-reasons"]), adaptation),
+  };
+}
+
+function firstLearningMethod(header: string | undefined): string | undefined {
+  return header?.split(",").map((part) => part.trim()).find(Boolean);
+}
+
+function methodHeaderValue(header: string | undefined, method: string | undefined): string | undefined {
+  if (!header) {
+    return undefined;
+  }
+  for (const part of header.split(",").map((item) => item.trim()).filter(Boolean)) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = part.slice(0, separator);
+    const value = part.slice(separator + 1);
+    if (!method || key === method) {
+      return value || undefined;
+    }
+  }
+  return undefined;
+}
+
+function learningDisplayScope(scope: string): string {
+  return scope === "conversation" ? "run" : scope;
+}
+
+function readableLearningValue(value: string): string {
+  return value.replace(/[-_]+/g, " ");
+}
+
+function readableLearningReason(reason: string): string {
+  if (reason.startsWith("hard_lock=")) {
+    return readableLearningValue(reason.slice("hard_lock=".length));
+  }
+  return readableLearningValue(reason);
 }
 
 function rtkSummary(value: unknown): RtkSavingsSummary {

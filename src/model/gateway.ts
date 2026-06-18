@@ -93,7 +93,9 @@ export class ModelGateway {
     const headers = new Headers(authHeaders(setup, "chat_completions"));
     headers.set("accept", "text/event-stream");
     headers.set("x-session-id", request.session_id);
+    headers.set("x-conversation-id", request.run_id);
     headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-conversation-id", request.run_id);
     headers.set("x-inferoa-run-id", request.run_id);
     if (request.request_class) {
       headers.set("x-inferoa-request-class", request.request_class);
@@ -241,7 +243,9 @@ export class ModelGateway {
     const headers = new Headers(authHeaders(setup, "messages"));
     headers.set("anthropic-version", "2023-06-01");
     headers.set("x-session-id", request.session_id);
+    headers.set("x-conversation-id", request.run_id);
     headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-conversation-id", request.run_id);
     headers.set("x-inferoa-run-id", request.run_id);
     if (request.request_class) {
       headers.set("x-inferoa-request-class", request.request_class);
@@ -306,7 +310,9 @@ export class ModelGateway {
     const url = `${base}/v1beta/models/${encodeURIComponent(model ?? "")}:generateContent${apiKey ? `?key=${encodeURIComponent(apiKey)}` : ""}`;
     const headers = new Headers(authHeaders({ ...setup, api_key: undefined, api_key_ref: undefined }, "chat_completions"));
     headers.set("x-session-id", request.session_id);
+    headers.set("x-conversation-id", request.run_id);
     headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-conversation-id", request.run_id);
     headers.set("x-inferoa-run-id", request.run_id);
     if (request.request_class) {
       headers.set("x-inferoa-request-class", request.request_class);
@@ -363,7 +369,9 @@ export class ModelGateway {
     const headers = new Headers(authHeaders(setup, "responses"));
     headers.set("accept", "text/event-stream");
     headers.set("x-session-id", request.session_id);
+    headers.set("x-conversation-id", request.run_id);
     headers.set("x-inferoa-session-id", request.session_id);
+    headers.set("x-inferoa-conversation-id", request.run_id);
     headers.set("x-inferoa-run-id", request.run_id);
     if (request.request_class) {
       headers.set("x-inferoa-request-class", request.request_class);
@@ -978,6 +986,11 @@ function routeFromHeaders(headers: Record<string, string>): JsonObject | undefin
     "x-vsr-selected-reasoning",
     "x-vsr-selected-modality",
     "x-vsr-session-phase",
+    "x-vsr-learning-methods",
+    "x-vsr-learning-actions",
+    "x-vsr-learning-scopes",
+    "x-vsr-learning-reasons",
+    "x-vsr-learning-modes",
     "x-vsr-cache-hit",
     "x-vsr-replay-id",
     // legacy / integration variants
