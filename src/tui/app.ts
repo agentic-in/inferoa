@@ -1999,7 +1999,7 @@ export class TuiApp {
     const provider = await this.chooseWebSearchProvider(config.web_search.provider);
     config.web_search.provider = provider;
     delete config.web_search.api_key;
-    if (provider === "auto" || provider === "off") {
+    if (provider === "auto" || provider === "off" || provider === "parallel") {
       delete config.web_search.base_url;
       delete config.web_search.api_key_ref;
       return;
@@ -7751,6 +7751,7 @@ function appendRtkReviewLines(lines: string[], rtk?: RtkStatus, contentWidth = s
 export function webSearchProviderSetupOptions(): SelectOption<WebSearchProviderChoice>[] {
   return [
     { value: "auto", label: "Auto chain", description: "Use configured provider when supported, otherwise zero-key HTTP fallback" },
+    { value: "parallel", label: "Parallel", description: "Free keyless Search MCP (rate limited)" },
     { value: "brave", label: "Brave", description: "Requires Brave Search API key" },
     { value: "jina", label: "Jina", description: "Optional Jina API key; public endpoint works as fallback" },
     { value: "searxng", label: "SearXNG", description: "Use a SearXNG JSON endpoint" },
@@ -8001,6 +8002,8 @@ function webSearchProviderLabel(provider: WebSearchProviderChoice): string {
       return "Auto chain";
     case "off":
       return "Fallback";
+    case "parallel":
+      return "Parallel";
     case "brave":
       return "Brave";
     case "jina":

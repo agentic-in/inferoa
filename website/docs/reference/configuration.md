@@ -121,3 +121,27 @@ the YAML file. The same rule applies to `model_setup`,
 
 `inferoa debug setup` redacts any `*api_key*` field before printing. Public
 docs, progress logs, and evidence artifacts must not include raw keys.
+
+## Parallel web search
+
+Choose **Parallel** in `/setup`, or set the following in your Inferoa config:
+
+```yaml
+web_search:
+  provider: parallel
+```
+
+This opt-in provider uses [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+at `https://search.parallel.ai/mcp` over Streamable HTTP. No API key or OAuth is
+needed. Anonymous requests use Fast mode with free-tier rate limits; inference
+still uses your configured model endpoint. Parallel ignores `web_search.base_url`,
+`api_key`, and `api_key_ref`, and does not read Parallel credentials from the environment.
+
+The agent discovers `web_search` through `tool_search` and runs it through
+`capability_call`. Results include source URLs, titles, and relevant excerpts in
+the existing `results` and `results_text` fields. `limit` caps the returned results
+locally (1–20); it does not change the server's search settings. Each search has a
+20-second deadline, and service errors are returned without switching providers.
+
+The default `auto` chain still tries DuckDuckGo HTML, DuckDuckGo Instant, then
+Jina. Other explicitly selected providers and direct URL opening are unchanged.

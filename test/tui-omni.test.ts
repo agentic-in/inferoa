@@ -57,7 +57,7 @@ test("TUI setup web search provider list hides legacy fallback option", () => {
 
   assert.deepEqual(
     options.map((option) => option.value),
-    ["auto", "brave", "jina", "searxng", "custom"],
+    ["auto", "parallel", "brave", "jina", "searxng", "custom"],
   );
   assert.doesNotMatch(options.map((option) => `${option.label} ${option.description}`).join("\n"), /Default fallback/i);
 });

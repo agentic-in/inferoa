@@ -115,7 +115,7 @@ export interface VllmAgentConfig {
     managed_installs: "ask" | "allow" | "off";
   };
   web_search: {
-    provider: "auto" | "brave" | "jina" | "exa" | "perplexity" | "kimi" | "openai" | "anthropic" | "gemini" | "searxng" | "custom" | "off";
+    provider: "auto" | "parallel" | "brave" | "jina" | "exa" | "perplexity" | "kimi" | "openai" | "anthropic" | "gemini" | "searxng" | "custom" | "off";
     base_url?: string;
     api_key_ref?: string;
     api_key?: string;

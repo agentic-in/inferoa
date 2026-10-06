@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@colbymchenry/codegraph": "0.9.9",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "commander": "^14.0.2",
     "typescript": "^5.9.3",
     "yaml": "^2.8.1"

@@ -150,6 +150,10 @@ async function configuredProviderSearch(
   limit: number,
   context: ToolExecutionContext,
 ): Promise<ToolResult> {
+  if (provider === "parallel") {
+    const { parallelSearch } = await import("./parallel-search.js");
+    return await parallelSearch(query, limit, context);
+  }
   if (provider === "brave") {
     return await braveSearch(query, limit, context);
   }
@@ -161,7 +165,7 @@ async function configuredProviderSearch(
   }
   return fail(
     "web_search_provider_unsupported",
-    `${provider} web_search is not implemented in this build. Choose auto, brave, jina, searxng, or custom in /setup.`,
+    `${provider} web_search is not implemented in this build. Choose auto, parallel, brave, jina, searxng, or custom in /setup.`,
     { query, provider },
   );
 }
